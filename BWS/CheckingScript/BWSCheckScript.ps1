@@ -9,6 +9,11 @@
                this script imports ONLY Microsoft.Graph.Authentication (for Connect-MgGraph) and ensures
                Microsoft.Graph is installed (for submodules). It does NOT import the Microsoft.Graph meta module.
   - Executes checks and generates an HTML report
+
+  Fixes included:
+  - "Count cannot be found on this object": all .Count usage on pipeline results is wrapped with @(...)
+  - "Argument types do not match": invokes condition Test scriptblocks with adaptive argument types
+    (hashtable vs PSCustomObject) based on the scriptblock parameter types.
 .NOTES
   Recommended: PowerShell 7.4+ on Windows
   GUI requires Windows (WinForms).
@@ -54,13 +59,6 @@ $ErrorActionPreference = 'Stop'
 # ---------- Utilities ----------
 function New-BwsRunId { (Get-Date).ToString('yyyyMMdd-HHmmss') }
 
-function Ensure-Folder {
-    param([Parameter(Mandatory)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) {
-        New-Item -ItemType Directory -Path $Path | Out-Null
-    }
-}
-
 function Write-BwsLog {
     param(
         [Parameter(Mandatory)][string]$Message,
@@ -73,6 +71,13 @@ function Write-BwsLog {
 
 function Test-IsWindows { return $IsWindows }
 
+function New-BwsFolder {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -ItemType Directory -Path $Path | Out-Null
+    }
+}
+
 function Set-TlsForWindowsPowerShell {
     # Windows PowerShell 5.1 often needs TLS 1.2 for PSGallery
     if ($PSVersionTable.PSEdition -eq 'Desktop') {
@@ -81,7 +86,7 @@ function Set-TlsForWindowsPowerShell {
     }
 }
 
-function Ensure-NuGetProvider {
+function Install-BwsNuGetProviderIfMissing {
     $prov = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
     if (-not $prov) {
         if (-not $AutoInstallModules) {
@@ -93,7 +98,7 @@ function Ensure-NuGetProvider {
     }
 }
 
-function Ensure-PSGalleryTrustedIfAutoInstall {
+function Set-BwsPSGalleryTrustedIfAutoInstall {
     if (-not $AutoInstallModules) { return }
     try {
         $repo = Get-PSRepository -Name PSGallery -ErrorAction Stop
@@ -106,7 +111,7 @@ function Ensure-PSGalleryTrustedIfAutoInstall {
     }
 }
 
-function Ensure-Module {
+function Install-BwsModuleIfNeeded {
     param(
         [Parameter(Mandatory)][string]$Name,
         [switch]$AutoInstall,
@@ -134,8 +139,8 @@ function Ensure-Module {
     }
 
     Set-TlsForWindowsPowerShell
-    Ensure-NuGetProvider
-    Ensure-PSGalleryTrustedIfAutoInstall
+    Install-BwsNuGetProviderIfMissing
+    Set-BwsPSGalleryTrustedIfAutoInstall
 
     $installParams = @{
         Name         = $Name
@@ -180,67 +185,202 @@ function Get-Union {
     @($A + $B | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
 }
 
+function ConvertTo-BwsHashtable {
+    param([Parameter(Mandatory)][object]$InputObject)
+
+    if ($InputObject -is [hashtable]) { return $InputObject }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $h = @{}
+        foreach ($k in $InputObject.Keys) { $h[$k] = $InputObject[$k] }
+        return $h
+    }
+
+    $h2 = @{}
+    foreach ($p in $InputObject.PSObject.Properties) {
+        $h2[$p.Name] = $p.Value
+    }
+    return $h2
+}
+
+function Get-BwsScriptBlockParamSpec {
+    param([Parameter(Mandatory)][scriptblock]$ScriptBlock)
+
+    $spec = [ordered]@{
+        HasParamBlock = $false
+        ParamNames    = @()
+        ParamTypes    = @{} # name -> [Type]
+    }
+
+    try {
+        $pb = $ScriptBlock.Ast.ParamBlock
+        if (-not $pb) { return [pscustomobject]$spec }
+        $spec.HasParamBlock = $true
+
+        foreach ($p in @($pb.Parameters)) {
+            $name = $p.Name.VariablePath.UserPath
+            $spec.ParamNames += $name
+            $spec.ParamTypes[$name] = $p.StaticType
+        }
+    } catch {
+        # Ignore AST parsing issues; we'll fall back to positional
+    }
+
+    return [pscustomobject]$spec
+}
+
+function Invoke-BwsConditionTest {
+    <#
+      This prevents "Argument types do not match" when conditions strongly type their parameters.
+      We inspect the scriptblock param types (AST) and pass Context/Condition either as hashtable or PSCustomObject.
+    #>
+    param(
+        [Parameter(Mandatory)][scriptblock]$Test,
+        [Parameter(Mandatory)][hashtable]$ContextHash,
+        [Parameter(Mandatory)][object]$Condition
+    )
+
+    $ctxObj  = [pscustomobject]$ContextHash
+    $condObj = $Condition
+    $condHash = ConvertTo-BwsHashtable -InputObject $Condition
+
+    $spec = Get-BwsScriptBlockParamSpec -ScriptBlock $Test
+
+    # Decide argument forms (default to PSCustomObject unless explicitly hashtable/IDictionary)
+    $ctxArg  = $ctxObj
+    $condArg = $condObj
+
+    if ($spec.HasParamBlock) {
+        # Match Context parameter by common names
+        $ctxName = @($spec.ParamNames | Where-Object { $_ -match '^(Context|Ctx)$' } | Select-Object -First 1)
+        if ($ctxName) {
+            $t = $spec.ParamTypes[$ctxName]
+            if ($t -and (
+                $t -eq [hashtable] -or
+                $t.FullName -eq 'System.Collections.Hashtable' -or
+                [System.Collections.IDictionary].IsAssignableFrom($t)
+            )) {
+                $ctxArg = $ContextHash
+            } else {
+                $ctxArg = $ctxObj
+            }
+        }
+
+        # Match Condition parameter by common names
+        $condName = @($spec.ParamNames | Where-Object { $_ -match '^(Condition|Cond)$' } | Select-Object -First 1)
+        if ($condName) {
+            $t2 = $spec.ParamTypes[$condName]
+            if ($t2 -and (
+                $t2 -eq [hashtable] -or
+                $t2.FullName -eq 'System.Collections.Hashtable' -or
+                [System.Collections.IDictionary].IsAssignableFrom($t2)
+            )) {
+                $condArg = $condHash
+            } else {
+                $condArg = $condObj
+            }
+        }
+
+        # Invoke using named binding if the param names exist, otherwise positional.
+        $hasCtxParam  = $spec.ParamNames -contains 'Context' -or $spec.ParamNames -contains 'Ctx'
+        $hasCondParam = $spec.ParamNames -contains 'Condition' -or $spec.ParamNames -contains 'Cond'
+
+        if ($hasCtxParam -and $hasCondParam) {
+            if ($spec.ParamNames -contains 'Context') {
+                if ($spec.ParamNames -contains 'Condition') {
+                    return & $Test -Context $ctxArg -Condition $condArg
+                } else {
+                    return & $Test -Context $ctxArg -Cond $condArg
+                }
+            } else {
+                if ($spec.ParamNames -contains 'Condition') {
+                    return & $Test -Ctx $ctxArg -Condition $condArg
+                } else {
+                    return & $Test -Ctx $ctxArg -Cond $condArg
+                }
+            }
+        }
+        elseif ($hasCtxParam -and -not $hasCondParam) {
+            if ($spec.ParamNames -contains 'Context') { return & $Test -Context $ctxArg }
+            else { return & $Test -Ctx $ctxArg }
+        }
+        elseif (-not $hasCtxParam -and $hasCondParam) {
+            if ($spec.ParamNames -contains 'Condition') { return & $Test -Condition $condArg }
+            else { return & $Test -Cond $condArg }
+        }
+        else {
+            # No recognizable names -> positional (first two params)
+            return & $Test $ctxArg $condArg
+        }
+    }
+
+    # No param block -> positional
+    return & $Test $ctxArg $condArg
+}
+
 function Get-FilteredConditions {
     param(
         [Parameter(Mandatory)][object[]]$Conditions,
         [string[]]$IncludeProducts,
         [string[]]$IncludeTags
     )
-    $filtered = $Conditions
 
-    if ($IncludeProducts -and $IncludeProducts.Count -gt 0) {
-        $set = $IncludeProducts | ForEach-Object { $_.Trim() }
-        $filtered = $filtered | Where-Object { $set -contains $_.Product }
+    $filtered = @($Conditions)
+
+    if ($IncludeProducts -and @($IncludeProducts).Count -gt 0) {
+        $set = @($IncludeProducts) | ForEach-Object { $_.Trim() }
+        $filtered = @($filtered | Where-Object { $set -contains $_.Product })
     }
-    if ($IncludeTags -and $IncludeTags.Count -gt 0) {
-        $tags = $IncludeTags | ForEach-Object { $_.Trim() }
-        $filtered = $filtered | Where-Object {
-            $_.Tags -and (@($_.Tags) | Where-Object { $tags -contains $_ }).Count -gt 0
-        }
+
+    if ($IncludeTags -and @($IncludeTags).Count -gt 0) {
+        $tags = @($IncludeTags) | ForEach-Object { $_.Trim() }
+        $filtered = @($filtered | Where-Object {
+            $_.Tags -and (@(@($_.Tags) | Where-Object { $tags -contains $_ })).Count -gt 0
+        })
     }
+
     return @($filtered)
 }
 
 # ---------- Condition Loading ----------
 function Import-BwsConditions {
     param([Parameter(Mandatory)][string]$Path)
+
     if (-not (Test-Path -LiteralPath $Path)) { throw "BWSConditions not found: $Path" }
+
     $conds = & $Path
     if (-not $conds) { throw "BWSConditions returned no conditions." }
-    if ($conds -isnot [System.Collections.IEnumerable]) { throw "BWSConditions must return an array/enumerable." }
-    return @($conds)
+
+    $arr = @($conds)
+    if ($arr.Count -eq 0) { throw "BWSConditions returned an empty set." }
+
+    return $arr
 }
 
-# ---------- Graph Stack (fix for exact-version dependency issues) ----------
-function Ensure-AndImportGraphStack {
+# ---------- Graph Stack ----------
+function Import-BwsGraphModules {
     <#
-      Why this exists:
-      - Import-Module Microsoft.Graph may enforce an exact Microsoft.Graph.Authentication version (e.g. 2.25.0).
-      - Many environments have a newer Authentication version installed, which breaks importing the meta module.
-      - Solution: Import ONLY Microsoft.Graph.Authentication (for Connect-MgGraph) and ensure Microsoft.Graph is installed
-                  so submodules/cmdlets can auto-load on demand.
+      - Import ONLY Microsoft.Graph.Authentication (Connect-MgGraph)
+      - Ensure Microsoft.Graph is installed (submodules auto-load)
+      - Do NOT import Microsoft.Graph meta module to avoid exact-version dependency issues
     #>
 
-    # Ensure Authentication (provides Connect-MgGraph)
-    $okAuth = Ensure-Module -Name "Microsoft.Graph.Authentication" -AutoInstall:$AutoInstallModules
+    $okAuth = Install-BwsModuleIfNeeded -Name "Microsoft.Graph.Authentication" -AutoInstall:$AutoInstallModules
     if (-not $okAuth) {
         throw "Microsoft.Graph.Authentication is missing. Install it or run with -AutoInstallModules."
     }
 
-    # Import Authentication (latest available)
     Import-ModuleSafe -Name "Microsoft.Graph.Authentication"
 
     if (-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)) {
         throw "Connect-MgGraph not found even after importing Microsoft.Graph.Authentication."
     }
 
-    # Ensure Microsoft.Graph is installed (brings in the Graph submodules exporting Get-Mg* cmdlets)
-    $okMg = Ensure-Module -Name "Microsoft.Graph" -AutoInstall:$AutoInstallModules
+    $okMg = Install-BwsModuleIfNeeded -Name "Microsoft.Graph" -AutoInstall:$AutoInstallModules
     if (-not $okMg) {
         throw "Microsoft.Graph is missing. Install it or run with -AutoInstallModules."
     }
 
-    # Do NOT import Microsoft.Graph meta module
     Write-BwsLog "Microsoft.Graph is installed. Graph submodules will auto-load on demand (meta module import skipped)." "INFO"
 }
 
@@ -248,44 +388,43 @@ function Ensure-AndImportGraphStack {
 function Get-ModulesRequiredForConditions {
     param([Parameter(Mandatory)][object[]]$Conditions)
 
-    $needAzure = ($Conditions | Where-Object { $_.RequiresAzure -eq $true }).Count -gt 0
-    $needAD    = ($Conditions | Where-Object { $_.RequiresAD -eq $true }).Count -gt 0
+    $needAzure = @($Conditions | Where-Object { $_.RequiresAzure -eq $true }).Count -gt 0
+    $needAD    = @($Conditions | Where-Object { $_.RequiresAD -eq $true }).Count -gt 0
 
     $modules = New-Object System.Collections.Generic.List[string]
 
-    # NOTE: Graph stack is handled via Ensure-AndImportGraphStack()
     if ($needAzure) {
         [void]$modules.Add("Az.Accounts")
         [void]$modules.Add("Az.Resources")
-        $needAvdModule = ($Conditions | Where-Object { $_.Product -eq 'AVD' }).Count -gt 0
+        $needAvdModule = @($Conditions | Where-Object { $_.Product -eq 'AVD' }).Count -gt 0
         if ($needAvdModule) { [void]$modules.Add("Az.DesktopVirtualization") }
     }
 
     if ($needAD) { [void]$modules.Add("ActiveDirectory") }
 
-    # Optional per-condition module list
-    $Conditions | ForEach-Object {
-        if ($_.PSObject.Properties.Name -contains 'RequiredModules' -and $_.RequiredModules) {
-            foreach ($m in @($_.RequiredModules)) { if ($m) { [void]$modules.Add([string]$m) } }
+    foreach ($c in @($Conditions)) {
+        if ($c.PSObject.Properties.Name -contains 'RequiredModules' -and $c.RequiredModules) {
+            foreach ($m in @($c.RequiredModules)) {
+                if ($m) { [void]$modules.Add([string]$m) }
+            }
         }
     }
 
     return @($modules)
 }
 
-function Ensure-AndImportModulesForRun {
+function Import-BwsModulesForRun {
     param([Parameter(Mandatory)][object[]]$Conditions)
 
-    $needGraph = ($Conditions | Where-Object { $_.RequiresGraph -eq $true }).Count -gt 0
+    $needGraph = @($Conditions | Where-Object { $_.RequiresGraph -eq $true }).Count -gt 0
     if ($needGraph) {
         Write-BwsLog "Preparing Microsoft Graph module stack..." "INFO"
-        Ensure-AndImportGraphStack
+        Import-BwsGraphModules
     }
 
-    $modules = Get-ModulesRequiredForConditions -Conditions $Conditions
-    if (-not $modules -or $modules.Count -eq 0) { return }
+    $modules = @(Get-ModulesRequiredForConditions -Conditions $Conditions)
+    if (@($modules).Count -eq 0) { return }
 
-    # Preserve order but dedupe
     $seen = @{}
     $orderedUnique = foreach ($m in $modules) {
         if (-not $seen.ContainsKey($m)) { $seen[$m] = $true; $m }
@@ -294,12 +433,12 @@ function Ensure-AndImportModulesForRun {
     Write-BwsLog "Required modules: $($orderedUnique -join ', ')" "INFO"
 
     foreach ($m in $orderedUnique) {
-        $ok = Ensure-Module -Name $m -AutoInstall:$AutoInstallModules
+        $ok = Install-BwsModuleIfNeeded -Name $m -AutoInstall:$AutoInstallModules
         if (-not $ok) { throw "Missing module '$m'. Install it or run with -AutoInstallModules." }
         Import-ModuleSafe -Name $m
     }
 
-    if (($Conditions | Where-Object { $_.RequiresAzure }).Count -gt 0) {
+    if (@($Conditions | Where-Object { $_.RequiresAzure -eq $true }).Count -gt 0) {
         if (-not (Get-Command Connect-AzAccount -ErrorAction SilentlyContinue)) {
             throw "Connect-AzAccount not found even after importing Az.Accounts."
         }
@@ -383,35 +522,33 @@ function Invoke-BwsChecks {
         [switch]$NoAuth
     )
 
-    $filtered = Get-FilteredConditions -Conditions $Conditions -IncludeProducts $IncludeProducts -IncludeTags $IncludeTags
-    if (-not $filtered -or $filtered.Count -eq 0) { throw "No conditions left after filtering." }
+    $filtered = @(Get-FilteredConditions -Conditions $Conditions -IncludeProducts $IncludeProducts -IncludeTags $IncludeTags)
+    if ($filtered.Count -eq 0) { throw "No conditions left after filtering." }
 
-    # Preflight modules for filtered run
-    Ensure-AndImportModulesForRun -Conditions $filtered
+    Import-BwsModulesForRun -Conditions $filtered
 
-    # Determine required connections
-    $needGraph = ($filtered | Where-Object { $_.RequiresGraph -eq $true }).Count -gt 0
-    $needAzure = ($filtered | Where-Object { $_.RequiresAzure -eq $true }).Count -gt 0
-    $needAD    = ($filtered | Where-Object { $_.RequiresAD -eq $true }).Count -gt 0
+    $needGraph = @($filtered | Where-Object { $_.RequiresGraph -eq $true }).Count -gt 0
+    $needAzure = @($filtered | Where-Object { $_.RequiresAzure -eq $true }).Count -gt 0
+    $needAD    = @($filtered | Where-Object { $_.RequiresAD -eq $true }).Count -gt 0
 
     $graphScopes = @()
     if ($needGraph) {
-        $filtered | Where-Object { $_.GraphScopes } | ForEach-Object {
-            $graphScopes = Get-Union -A $graphScopes -B @($_.GraphScopes)
+        foreach ($c in @($filtered | Where-Object { $_.GraphScopes })) {
+            $graphScopes = Get-Union -A $graphScopes -B @($c.GraphScopes)
         }
-        if (-not $graphScopes -or $graphScopes.Count -eq 0) { $graphScopes = @("Directory.Read.All") }
+        if (@($graphScopes).Count -eq 0) { $graphScopes = @("Directory.Read.All") }
     }
 
-    $context = [ordered]@{
-        RunId          = New-BwsRunId
-        GraphContext   = $null
-        AzContext      = $null
-        NeedGraph      = $needGraph
-        NeedAzure      = $needAzure
-        NeedAD         = $needAD
-        StartTime      = Get-Date
-        Errors         = @()
-    }
+    # Context is hashtable by design; we also create PSCustomObject in Invoke-BwsConditionTest when needed.
+    $context = @{}
+    $context.RunId        = New-BwsRunId
+    $context.GraphContext = $null
+    $context.AzContext    = $null
+    $context.NeedGraph    = $needGraph
+    $context.NeedAzure    = $needAzure
+    $context.NeedAD       = $needAD
+    $context.StartTime    = Get-Date
+    $context.Errors       = @()
 
     if (-not $NoAuth) {
         if ($needGraph) {
@@ -431,7 +568,7 @@ function Invoke-BwsChecks {
 
     $results = New-Object System.Collections.Generic.List[object]
 
-    foreach ($c in $filtered) {
+    foreach ($c in @($filtered)) {
         $started = Get-Date
         $status = 'Error'
         $isCompliant = $false
@@ -445,7 +582,8 @@ function Invoke-BwsChecks {
                 throw "Condition '$($c.Id)' has no valid Test scriptblock."
             }
 
-            $r = & $c.Test -Context $context -Condition $c
+            # ✅ FIX: adaptive invocation prevents "Argument types do not match"
+            $r = Invoke-BwsConditionTest -Test $c.Test -ContextHash $context -Condition $c
             if ($null -eq $r) { throw "Test returned no result object." }
 
             $isCompliant = [bool]$r.IsCompliant
@@ -496,11 +634,11 @@ function Convert-BwsResultsToHtml {
     )
 
     $ctx  = $Run.Context
-    $rows = $Run.Results
+    $rows = @($Run.Results)
 
-    $summary = $rows | Group-Object Status | Sort-Object Name | ForEach-Object {
+    $summary = @($rows | Group-Object Status | Sort-Object Name | ForEach-Object {
         [pscustomobject]@{ Status = $_.Name; Count = $_.Count }
-    }
+    })
 
     $css = @"
     body { font-family: Segoe UI, Arial, sans-serif; margin: 20px; }
@@ -532,19 +670,19 @@ function Convert-BwsResultsToHtml {
 
     $summaryHtml = ($summary | ConvertTo-Html -Fragment -PreContent "<h2>Summary</h2>")
 
-    $byProduct = $rows | Sort-Object Product, Severity, Id | Group-Object Product
+    $byProduct = @($rows | Sort-Object Product, Severity, Id | Group-Object Product)
 
     $sections = foreach ($g in $byProduct) {
         $prod = $g.Name
 
-        $tblRows = foreach ($r in $g.Group) {
+        $tblRows = foreach ($r in @($g.Group)) {
             $cls = $r.Status
 
-            $exp = [System.Net.WebUtility]::HtmlEncode($r.Expected)
-            $act = [System.Net.WebUtility]::HtmlEncode($r.Actual)
-            $evi = [System.Net.WebUtility]::HtmlEncode($r.Evidence)
-            $msg = [System.Net.WebUtility]::HtmlEncode($r.Message)
-            $rem = [System.Net.WebUtility]::HtmlEncode($r.Remediation)
+            $exp = [System.Net.WebUtility]::HtmlEncode([string]$r.Expected)
+            $act = [System.Net.WebUtility]::HtmlEncode([string]$r.Actual)
+            $evi = [System.Net.WebUtility]::HtmlEncode([string]$r.Evidence)
+            $msg = [System.Net.WebUtility]::HtmlEncode([string]$r.Message)
+            $rem = [System.Net.WebUtility]::HtmlEncode([string]$r.Remediation)
 
 @"
 <tr class='$cls'>
@@ -655,7 +793,7 @@ function Show-BwsGuiAndRun {
     $clb.Width = 200
     $clb.Height = 200
 
-    $products = $Conditions | Select-Object -ExpandProperty Product -Unique | Sort-Object
+    $products = @($Conditions | Select-Object -ExpandProperty Product -Unique | Sort-Object)
     foreach ($p in $products) { [void]$clb.Items.Add($p, $true) }
 
     $btnRun = New-Object System.Windows.Forms.Button
@@ -684,13 +822,13 @@ function Show-BwsGuiAndRun {
             for ($i=0; $i -lt $clb.Items.Count; $i++) {
                 if ($clb.GetItemChecked($i)) { $sel += [string]$clb.Items[$i] }
             }
-            if (-not $sel -or $sel.Count -eq 0) { throw "No product selected." }
+            if (@($sel).Count -eq 0) { throw "No product selected." }
 
             $status.Text = "Running..."
             $form.Refresh()
 
             $script:OutputPath = $txtOut.Text
-            Ensure-Folder -Path $script:OutputPath
+            New-BwsFolder -Path $script:OutputPath
 
             $run = Invoke-BwsChecks -Conditions $Conditions -IncludeProducts $sel -IncludeTags $IncludeTags -NoAuth:$NoAuth
 
@@ -711,12 +849,12 @@ function Show-BwsGuiAndRun {
 # ---------- Main ----------
 try {
     $runId = New-BwsRunId
-    Ensure-Folder -Path $OutputPath
+    New-BwsFolder -Path $OutputPath
     $logFile = Join-Path $OutputPath "BWSCheck-$runId.log"
     Start-Transcript -LiteralPath $logFile -Append | Out-Null
 
     $condPath = Join-Path $PSScriptRoot "BWSConditions.ps1"
-    $conditions = Import-BwsConditions -Path $condPath
+    $conditions = @(Import-BwsConditions -Path $condPath)
 
     if ($Gui) {
         Show-BwsGuiAndRun -Conditions $conditions
