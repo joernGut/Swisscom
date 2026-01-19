@@ -1,6 +1,7 @@
 <# 
 .SYNOPSIS
   BWSCheckScript - Configuration/Compliance checks for Entra ID, Azure, Azure Virtual Desktop, Intune and Active Directory.
+
 .DESCRIPTION
   - Loads conditions from .\BWSConditions.ps1 (same folder)
   - Optional GUI (-Gui)
@@ -11,9 +12,10 @@
   - Executes checks and generates an HTML report
 
   Fixes included:
-  - "Count cannot be found on this object": all .Count usage on pipeline results is wrapped with @(...)
-  - "Argument types do not match": invokes condition Test scriptblocks with adaptive argument types
-    (hashtable vs PSCustomObject) based on the scriptblock parameter types.
+  - "Count cannot be found on this object": all Count usage on pipeline/scalar results is wrapped with @(...)
+  - "Argument types do not match": condition Test scriptblocks are invoked POSITIONALLY with arguments converted
+    to the exact declared parameter types (hashtable, OrderedDictionary, generic Dictionary<TKey,TValue>, etc.).
+
 .NOTES
   Recommended: PowerShell 7.4+ on Windows
   GUI requires Windows (WinForms).
@@ -79,7 +81,6 @@ function New-BwsFolder {
 }
 
 function Set-TlsForWindowsPowerShell {
-    # Windows PowerShell 5.1 often needs TLS 1.2 for PSGallery
     if ($PSVersionTable.PSEdition -eq 'Desktop') {
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }
         catch { Write-BwsLog "Could not set TLS 1.2: $($_.Exception.Message)" "WARN" }
@@ -132,8 +133,8 @@ function Install-BwsModuleIfNeeded {
 
     if (-not $AutoInstall) {
         $vMsg = if ($RequiredVersion) { " (RequiredVersion: $RequiredVersion)" }
-                elseif ($MinimumVersion) { " (MinimumVersion: $MinimumVersion)" }
-                else { "" }
+        elseif ($MinimumVersion) { " (MinimumVersion: $MinimumVersion)" }
+        else { "" }
         Write-BwsLog "Module '$Name' is missing or does not meet the required version$vMsg. Install manually or run with -AutoInstallModules." "WARN"
         return $false
     }
@@ -185,6 +186,7 @@ function Get-Union {
     @($A + $B | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
 }
 
+# ---------- Safe conversions (for type-strict condition parameters) ----------
 function ConvertTo-BwsHashtable {
     param([Parameter(Mandatory)][object]$InputObject)
 
@@ -197,42 +199,125 @@ function ConvertTo-BwsHashtable {
     }
 
     $h2 = @{}
-    foreach ($p in $InputObject.PSObject.Properties) {
-        $h2[$p.Name] = $p.Value
-    }
+    foreach ($p in $InputObject.PSObject.Properties) { $h2[$p.Name] = $p.Value }
     return $h2
 }
 
-function Get-BwsScriptBlockParamSpec {
-    param([Parameter(Mandatory)][scriptblock]$ScriptBlock)
+function ConvertTo-BwsOrderedDictionary {
+    param([Parameter(Mandatory)][object]$InputObject)
 
-    $spec = [ordered]@{
-        HasParamBlock = $false
-        ParamNames    = @()
-        ParamTypes    = @{} # name -> [Type]
+    $src = ConvertTo-BwsHashtable -InputObject $InputObject
+    $od = New-Object System.Collections.Specialized.OrderedDictionary
+    foreach ($k in $src.Keys) { [void]$od.Add($k, $src[$k]) }
+    return $od
+}
+
+function ConvertTo-BwsGenericDictionary {
+    param(
+        [Parameter(Mandatory)][object]$InputObject,
+        [Parameter(Mandatory)][Type]$TargetType
+    )
+
+    # Supports Dictionary<TKey,TValue> and IDictionary<TKey,TValue> declared types by creating Dictionary<TKey,TValue>
+    $src = ConvertTo-BwsHashtable -InputObject $InputObject
+
+    if (-not $TargetType.IsGenericType) { throw "TargetType is not generic." }
+    $genArgs = $TargetType.GetGenericArguments()
+    if ($genArgs.Count -ne 2) { throw "Generic dictionary must have 2 generic arguments." }
+
+    $keyType = $genArgs[0]
+    $valType = $genArgs[1]
+
+    $dictType = [System.Collections.Generic.Dictionary`2].MakeGenericType($keyType, $valType)
+    $dict = [Activator]::CreateInstance($dictType)
+
+    foreach ($k in $src.Keys) {
+        $kk = [System.Management.Automation.LanguagePrimitives]::ConvertTo($k, $keyType)
+        $vv = $src[$k]
+        if ($null -ne $vv) { $vv = [System.Management.Automation.LanguagePrimitives]::ConvertTo($vv, $valType) }
+        $dict.Add($kk, $vv)
     }
 
+    return $dict
+}
+
+function ConvertTo-BwsTargetType {
+    param(
+        [Parameter(Mandatory)][object]$Value,
+        [Parameter(Mandatory)][Type]$TargetType,
+        [ValidateSet('Context','Condition')]
+        [string]$Role = 'Context'
+    )
+
+    # If no type / object, keep as is (but prefer PSCustomObject for convenience)
+    if (-not $TargetType -or $TargetType -eq [object]) {
+        if ($Role -eq 'Context') { return [pscustomobject](ConvertTo-BwsHashtable -InputObject $Value) }
+        return $Value
+    }
+
+    # Hashtable / IDictionary
+    if ($TargetType -eq [hashtable] -or $TargetType.FullName -eq 'System.Collections.Hashtable') {
+        return (ConvertTo-BwsHashtable -InputObject $Value)
+    }
+    if ([System.Collections.IDictionary].IsAssignableFrom($TargetType)) {
+        # OrderedDictionary is IDictionary but not interchangeable; handle explicitly below
+        if ($TargetType.FullName -eq 'System.Collections.Specialized.OrderedDictionary') {
+            return (ConvertTo-BwsOrderedDictionary -InputObject $Value)
+        }
+        # Hashtable implements IDictionary
+        return (ConvertTo-BwsHashtable -InputObject $Value)
+    }
+
+    # Generic dictionary requested (Dictionary<TKey,TValue>, IDictionary<TKey,TValue>, IReadOnlyDictionary<TKey,TValue>)
+    if ($TargetType.IsGenericType) {
+        $def = $TargetType.GetGenericTypeDefinition().FullName
+        if ($def -like 'System.Collections.Generic.Dictionary`2' -or
+            $def -like 'System.Collections.Generic.IDictionary`2' -or
+            $def -like 'System.Collections.Generic.IReadOnlyDictionary`2') {
+            return (ConvertTo-BwsGenericDictionary -InputObject $Value -TargetType $TargetType)
+        }
+    }
+
+    # PSCustomObject / PSObject types
+    if ($TargetType.FullName -eq 'System.Management.Automation.PSCustomObject' -or
+        $TargetType.FullName -eq 'System.Management.Automation.PSObject') {
+        return [pscustomobject](ConvertTo-BwsHashtable -InputObject $Value)
+    }
+
+    # Last resort: try PowerShell conversion
+    try {
+        return [System.Management.Automation.LanguagePrimitives]::ConvertTo($Value, $TargetType)
+    } catch {
+        # Fallback to PSCustomObject (least surprising for most checks)
+        if ($Role -eq 'Context') { return [pscustomobject](ConvertTo-BwsHashtable -InputObject $Value) }
+        return [pscustomobject](ConvertTo-BwsHashtable -InputObject $Value)
+    }
+}
+
+function Get-BwsScriptBlockParamInfo {
+    param([Parameter(Mandatory)][scriptblock]$ScriptBlock)
+
+    $info = New-Object System.Collections.Generic.List[object]
     try {
         $pb = $ScriptBlock.Ast.ParamBlock
-        if (-not $pb) { return [pscustomobject]$spec }
-        $spec.HasParamBlock = $true
+        if (-not $pb) { return @() }
 
         foreach ($p in @($pb.Parameters)) {
             $name = $p.Name.VariablePath.UserPath
-            $spec.ParamNames += $name
-            $spec.ParamTypes[$name] = $p.StaticType
+            $type = $p.StaticType
+            $info.Add([pscustomobject]@{ Name = $name; Type = $type }) | Out-Null
         }
     } catch {
-        # Ignore AST parsing issues; we'll fall back to positional
+        return @()
     }
-
-    return [pscustomobject]$spec
+    return @($info)
 }
 
 function Invoke-BwsConditionTest {
     <#
-      This prevents "Argument types do not match" when conditions strongly type their parameters.
-      We inspect the scriptblock param types (AST) and pass Context/Condition either as hashtable or PSCustomObject.
+      This is the hard fix for: "Argument types do not match"
+      - We inspect the scriptblock param types and CONVERT context/condition to the declared types.
+      - We then invoke POSITIONALLY to avoid named-binding issues.
     #>
     param(
         [Parameter(Mandatory)][scriptblock]$Test,
@@ -240,84 +325,76 @@ function Invoke-BwsConditionTest {
         [Parameter(Mandatory)][object]$Condition
     )
 
-    $ctxObj  = [pscustomobject]$ContextHash
-    $condObj = $Condition
-    $condHash = ConvertTo-BwsHashtable -InputObject $Condition
+    $paramInfo = @(Get-BwsScriptBlockParamInfo -ScriptBlock $Test)
 
-    $spec = Get-BwsScriptBlockParamSpec -ScriptBlock $Test
+    # Decide mapping: by name if possible; else assume [0]=Context, [1]=Condition
+    $ctxIdx  = -1
+    $condIdx = -1
 
-    # Decide argument forms (default to PSCustomObject unless explicitly hashtable/IDictionary)
-    $ctxArg  = $ctxObj
-    $condArg = $condObj
-
-    if ($spec.HasParamBlock) {
-        # Match Context parameter by common names
-        $ctxName = @($spec.ParamNames | Where-Object { $_ -match '^(Context|Ctx)$' } | Select-Object -First 1)
-        if ($ctxName) {
-            $t = $spec.ParamTypes[$ctxName]
-            if ($t -and (
-                $t -eq [hashtable] -or
-                $t.FullName -eq 'System.Collections.Hashtable' -or
-                [System.Collections.IDictionary].IsAssignableFrom($t)
-            )) {
-                $ctxArg = $ContextHash
-            } else {
-                $ctxArg = $ctxObj
-            }
-        }
-
-        # Match Condition parameter by common names
-        $condName = @($spec.ParamNames | Where-Object { $_ -match '^(Condition|Cond)$' } | Select-Object -First 1)
-        if ($condName) {
-            $t2 = $spec.ParamTypes[$condName]
-            if ($t2 -and (
-                $t2 -eq [hashtable] -or
-                $t2.FullName -eq 'System.Collections.Hashtable' -or
-                [System.Collections.IDictionary].IsAssignableFrom($t2)
-            )) {
-                $condArg = $condHash
-            } else {
-                $condArg = $condObj
-            }
-        }
-
-        # Invoke using named binding if the param names exist, otherwise positional.
-        $hasCtxParam  = $spec.ParamNames -contains 'Context' -or $spec.ParamNames -contains 'Ctx'
-        $hasCondParam = $spec.ParamNames -contains 'Condition' -or $spec.ParamNames -contains 'Cond'
-
-        if ($hasCtxParam -and $hasCondParam) {
-            if ($spec.ParamNames -contains 'Context') {
-                if ($spec.ParamNames -contains 'Condition') {
-                    return & $Test -Context $ctxArg -Condition $condArg
-                } else {
-                    return & $Test -Context $ctxArg -Cond $condArg
-                }
-            } else {
-                if ($spec.ParamNames -contains 'Condition') {
-                    return & $Test -Ctx $ctxArg -Condition $condArg
-                } else {
-                    return & $Test -Ctx $ctxArg -Cond $condArg
-                }
-            }
-        }
-        elseif ($hasCtxParam -and -not $hasCondParam) {
-            if ($spec.ParamNames -contains 'Context') { return & $Test -Context $ctxArg }
-            else { return & $Test -Ctx $ctxArg }
-        }
-        elseif (-not $hasCtxParam -and $hasCondParam) {
-            if ($spec.ParamNames -contains 'Condition') { return & $Test -Condition $condArg }
-            else { return & $Test -Cond $condArg }
-        }
-        else {
-            # No recognizable names -> positional (first two params)
-            return & $Test $ctxArg $condArg
+    if ($paramInfo.Count -gt 0) {
+        for ($i=0; $i -lt $paramInfo.Count; $i++) {
+            $n = $paramInfo[$i].Name
+            if ($ctxIdx -lt 0 -and $n -match '^(Context|Ctx)$') { $ctxIdx = $i }
+            if ($condIdx -lt 0 -and $n -match '^(Condition|Cond)$') { $condIdx = $i }
         }
     }
 
-    # No param block -> positional
-    return & $Test $ctxArg $condArg
+    if ($ctxIdx -lt 0 -and $condIdx -lt 0) {
+        $ctxIdx  = 0
+        $condIdx = 1
+    } elseif ($ctxIdx -ge 0 -and $condIdx -lt 0) {
+        $condIdx = if ($ctxIdx -eq 0) { 1 } else { 0 }
+    } elseif ($condIdx -ge 0 -and $ctxIdx -lt 0) {
+        $ctxIdx = if ($condIdx -eq 0) { 1 } else { 0 }
+    }
+
+    # Determine how many args to pass (at least up to the max idx we touch)
+    $argCount = 0
+    if ($paramInfo.Count -gt 0) {
+        $argCount = $paramInfo.Count
+    } else {
+        $argCount = 2
+    }
+    $maxIdx = [Math]::Max($ctxIdx, $condIdx)
+    if ($argCount -lt ($maxIdx + 1)) { $argCount = $maxIdx + 1 }
+
+    $args = @()
+    for ($i=0; $i -lt $argCount; $i++) { $args += $null }
+
+    # Prepare base objects
+    $ctxBase  = $ContextHash
+    $condBase = $Condition
+
+    # Convert to declared types if we have them
+    if ($paramInfo.Count -gt 0 -and $ctxIdx -ge 0 -and $ctxIdx -lt $paramInfo.Count) {
+        $t = $paramInfo[$ctxIdx].Type
+        $args[$ctxIdx] = ConvertTo-BwsTargetType -Value $ctxBase -TargetType $t -Role 'Context'
+    } else {
+        $args[$ctxIdx] = [pscustomobject]$ContextHash
+    }
+
+    if ($paramInfo.Count -gt 0 -and $condIdx -ge 0 -and $condIdx -lt $paramInfo.Count) {
+        $t2 = $paramInfo[$condIdx].Type
+        $args[$condIdx] = ConvertTo-BwsTargetType -Value $condBase -TargetType $t2 -Role 'Condition'
+    } else {
+        $args[$condIdx] = $Condition
+    }
+
+    try {
+        return & $Test @args
+    } catch {
+        # Add diagnostics so you see the real expected types in the log/HTML message
+        $expected = if ($paramInfo.Count -gt 0) {
+            ($paramInfo | ForEach-Object { "$($_.Name): $($_.Type.FullName)" }) -join '; '
+        } else {
+            '(no param block detected)'
+        }
+
+        throw "Argument types do not match when invoking condition test. Expected parameters: $expected. Inner error: $($_.Exception.Message)"
+    }
 }
 
+# ---------- Filtering / Conditions ----------
 function Get-FilteredConditions {
     param(
         [Parameter(Mandatory)][object[]]$Conditions,
@@ -342,7 +419,6 @@ function Get-FilteredConditions {
     return @($filtered)
 }
 
-# ---------- Condition Loading ----------
 function Import-BwsConditions {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -359,27 +435,16 @@ function Import-BwsConditions {
 
 # ---------- Graph Stack ----------
 function Import-BwsGraphModules {
-    <#
-      - Import ONLY Microsoft.Graph.Authentication (Connect-MgGraph)
-      - Ensure Microsoft.Graph is installed (submodules auto-load)
-      - Do NOT import Microsoft.Graph meta module to avoid exact-version dependency issues
-    #>
-
     $okAuth = Install-BwsModuleIfNeeded -Name "Microsoft.Graph.Authentication" -AutoInstall:$AutoInstallModules
-    if (-not $okAuth) {
-        throw "Microsoft.Graph.Authentication is missing. Install it or run with -AutoInstallModules."
-    }
+    if (-not $okAuth) { throw "Microsoft.Graph.Authentication is missing. Install it or run with -AutoInstallModules." }
 
     Import-ModuleSafe -Name "Microsoft.Graph.Authentication"
-
     if (-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)) {
         throw "Connect-MgGraph not found even after importing Microsoft.Graph.Authentication."
     }
 
     $okMg = Install-BwsModuleIfNeeded -Name "Microsoft.Graph" -AutoInstall:$AutoInstallModules
-    if (-not $okMg) {
-        throw "Microsoft.Graph is missing. Install it or run with -AutoInstallModules."
-    }
+    if (-not $okMg) { throw "Microsoft.Graph is missing. Install it or run with -AutoInstallModules." }
 
     Write-BwsLog "Microsoft.Graph is installed. Graph submodules will auto-load on demand (meta module import skipped)." "INFO"
 }
@@ -462,21 +527,15 @@ function Connect-BwsGraph {
     if ($TenantId) { $params.TenantId = $TenantId }
 
     switch ($AuthMode) {
-        'DeviceCode' {
-            Connect-MgGraph @params -Scopes $Scopes -UseDeviceAuthentication | Out-Null
-        }
-        'Interactive' {
-            Connect-MgGraph @params -Scopes $Scopes | Out-Null
-        }
+        'DeviceCode' { Connect-MgGraph @params -Scopes $Scopes -UseDeviceAuthentication | Out-Null }
+        'Interactive' { Connect-MgGraph @params -Scopes $Scopes | Out-Null }
         'ClientCertificate' {
             if (-not $ClientId -or -not $CertificateThumbprint) {
                 throw "ClientCertificate requires -ClientId and -CertificateThumbprint."
             }
             Connect-MgGraph @params -ClientId $ClientId -CertificateThumbprint $CertificateThumbprint | Out-Null
         }
-        'ManagedIdentity' {
-            Connect-MgGraph @params -Identity | Out-Null
-        }
+        'ManagedIdentity' { Connect-MgGraph @params -Identity | Out-Null }
     }
 
     $ctx = Get-MgContext
@@ -539,7 +598,7 @@ function Invoke-BwsChecks {
         if (@($graphScopes).Count -eq 0) { $graphScopes = @("Directory.Read.All") }
     }
 
-    # Context is hashtable by design; we also create PSCustomObject in Invoke-BwsConditionTest when needed.
+    # Context in canonical form: hashtable
     $context = @{}
     $context.RunId        = New-BwsRunId
     $context.GraphContext = $null
@@ -582,7 +641,7 @@ function Invoke-BwsChecks {
                 throw "Condition '$($c.Id)' has no valid Test scriptblock."
             }
 
-            # ✅ FIX: adaptive invocation prevents "Argument types do not match"
+            # Critical: this is where Argument types do not match is fixed
             $r = Invoke-BwsConditionTest -Test $c.Test -ContextHash $context -Condition $c
             if ($null -eq $r) { throw "Test returned no result object." }
 
