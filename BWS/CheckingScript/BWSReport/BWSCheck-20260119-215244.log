@@ -46,3 +46,8 @@ PS>TerminatingError(Get-BwsScriptBlockParamInfo): "Argument types do not match"
 >> TerminatingError(Get-BwsScriptBlockParamInfo): "Argument types do not match"
 PS>TerminatingError(Get-BwsScriptBlockParamInfo): "Argument types do not match"
 >> TerminatingError(Get-BwsScriptBlockParamInfo): "Argument types do not match"
+PS>TerminatingError(Invoke-BwsChecks): "Argument types do not match"
+**********************
+PowerShell transcript end
+End time: 20260119215519
+**********************
