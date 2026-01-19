@@ -4,8 +4,8 @@
 .DESCRIPTION
   - Loads conditions from .\BWSConditions.ps1 (same folder)
   - Optional GUI (-Gui)
+  - Preflights + installs/imports required modules (including auth modules)
   - Executes checks and generates an HTML report
-  - Uses modern modules: Microsoft.Graph + Az (+ RSAT ActiveDirectory optional)
 .NOTES
   Recommended: PowerShell 7.4+ on Windows
   GUI requires Windows (WinForms).
@@ -70,9 +70,30 @@ function Write-BwsLog {
     Write-Host "[$ts][$Level] $Message"
 }
 
-function Test-IsWindows {
-    $PSVersionTable.PSVersion | Out-Null
-    return $IsWindows
+function Test-IsWindows { return $IsWindows }
+
+function Set-TlsForWindowsPowerShell {
+    # Windows PowerShell 5.1 often needs TLS 1.2 for PSGallery
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        } catch {
+            Write-BwsLog "Could not set TLS 1.2: $($_.Exception.Message)" "WARN"
+        }
+    }
+}
+
+function Ensure-NuGetProvider {
+    # Required for Install-Module on some systems
+    $prov = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
+    if (-not $prov) {
+        if (-not $AutoInstallModules) {
+            Write-BwsLog "NuGet package provider is missing. Install it or run with -AutoInstallModules." "WARN"
+            return
+        }
+        Write-BwsLog "Installing NuGet package provider..." "INFO"
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+    }
 }
 
 function Ensure-Module {
@@ -80,6 +101,7 @@ function Ensure-Module {
         [Parameter(Mandatory)][string]$Name,
         [switch]$AutoInstall
     )
+
     if (Get-Module -ListAvailable -Name $Name) { return $true }
 
     if (-not $AutoInstall) {
@@ -87,14 +109,135 @@ function Ensure-Module {
         return $false
     }
 
+    Set-TlsForWindowsPowerShell
+    Ensure-NuGetProvider
+
     Write-BwsLog "Installing missing module '$Name' (CurrentUser)..." "INFO"
-    Install-Module -Name $Name -Scope CurrentUser -Force -AllowClobber
+    Install-Module -Name $Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+
     return [bool](Get-Module -ListAvailable -Name $Name)
+}
+
+function Import-RequiredModule {
+    param(
+        [Parameter(Mandatory)][string]$Name
+    )
+    try {
+        Import-Module $Name -ErrorAction Stop | Out-Null
+        Write-BwsLog "Imported module: $Name" "DEBUG"
+    } catch {
+        throw "Failed to import module '$Name': $($_.Exception.Message)"
+    }
 }
 
 function Get-Union {
     param([string[]]$A, [string[]]$B)
     @($A + $B | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
+}
+
+function Get-FilteredConditions {
+    param(
+        [Parameter(Mandatory)][object[]]$Conditions,
+        [string[]]$IncludeProducts,
+        [string[]]$IncludeTags
+    )
+    $filtered = $Conditions
+
+    if ($IncludeProducts -and $IncludeProducts.Count -gt 0) {
+        $set = $IncludeProducts | ForEach-Object { $_.Trim() }
+        $filtered = $filtered | Where-Object { $set -contains $_.Product }
+    }
+    if ($IncludeTags -and $IncludeTags.Count -gt 0) {
+        $tags = $IncludeTags | ForEach-Object { $_.Trim() }
+        $filtered = $filtered | Where-Object {
+            $_.Tags -and (@($_.Tags) | Where-Object { $tags -contains $_ }).Count -gt 0
+        }
+    }
+    return @($filtered)
+}
+
+# ---------- Condition Loading ----------
+function Import-BwsConditions {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "BWSConditions not found: $Path"
+    }
+    $conds = & $Path
+    if (-not $conds) { throw "BWSConditions returned no conditions." }
+    if ($conds -isnot [System.Collections.IEnumerable]) { throw "BWSConditions must return an array/enumerable." }
+    return @($conds)
+}
+
+# ---------- Module Preflight ----------
+function Get-ModulesRequiredForConditions {
+    param([Parameter(Mandatory)][object[]]$Conditions)
+
+    $needGraph = ($Conditions | Where-Object { $_.RequiresGraph -eq $true }).Count -gt 0
+    $needAzure = ($Conditions | Where-Object { $_.RequiresAzure -eq $true }).Count -gt 0
+    $needAD    = ($Conditions | Where-Object { $_.RequiresAD -eq $true }).Count -gt 0
+
+    $modules = New-Object System.Collections.Generic.List[string]
+
+    # Graph stack
+    if ($needGraph) {
+        [void]$modules.Add("Microsoft.Graph") # includes Connect-MgGraph / Graph cmdlets
+    }
+
+    # Az stack
+    if ($needAzure) {
+        [void]$modules.Add("Az.Accounts") # Connect-AzAccount
+        [void]$modules.Add("Az.Resources") # common for subscription/resource queries
+
+        # If any AVD product checks exist -> ensure Az.DesktopVirtualization
+        $needAvdModule = ($Conditions | Where-Object { $_.Product -eq 'AVD' }).Count -gt 0
+        if ($needAvdModule) { [void]$modules.Add("Az.DesktopVirtualization") }
+    }
+
+    # Active Directory (RSAT)
+    if ($needAD) {
+        [void]$modules.Add("ActiveDirectory")
+    }
+
+    # Optional per-condition module list (future-proof)
+    $Conditions | ForEach-Object {
+        if ($_.PSObject.Properties.Name -contains 'RequiredModules' -and $_.RequiredModules) {
+            foreach ($m in @($_.RequiredModules)) { if ($m) { [void]$modules.Add([string]$m) } }
+        }
+    }
+
+    return @($modules | Select-Object -Unique)
+}
+
+function Ensure-AndImportModulesForRun {
+    param([Parameter(Mandatory)][object[]]$Conditions)
+
+    $modules = Get-ModulesRequiredForConditions -Conditions $Conditions
+    if (-not $modules -or $modules.Count -eq 0) {
+        Write-BwsLog "No external modules required based on current filters." "INFO"
+        return
+    }
+
+    Write-BwsLog "Required modules: $($modules -join ', ')" "INFO"
+
+    foreach ($m in $modules) {
+        $ok = Ensure-Module -Name $m -AutoInstall:$AutoInstallModules
+        if (-not $ok) {
+            throw "Missing module '$m'. Install it or run with -AutoInstallModules."
+        }
+        Import-RequiredModule -Name $m
+    }
+
+    # Sanity checks for auth cmdlets
+    if (($Conditions | Where-Object { $_.RequiresGraph }).Count -gt 0) {
+        if (-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)) {
+            throw "Connect-MgGraph not found even after importing Microsoft.Graph."
+        }
+    }
+    if (($Conditions | Where-Object { $_.RequiresAzure }).Count -gt 0) {
+        if (-not (Get-Command Connect-AzAccount -ErrorAction SilentlyContinue)) {
+            throw "Connect-AzAccount not found even after importing Az.Accounts."
+        }
+    }
 }
 
 # ---------- Auth / Connections ----------
@@ -107,12 +250,6 @@ function Connect-BwsGraph {
         [string]$ClientId,
         [string]$CertificateThumbprint
     )
-
-    if (-not (Ensure-Module -Name "Microsoft.Graph" -AutoInstall:$AutoInstallModules)) {
-        throw "Microsoft.Graph module is missing."
-    }
-
-    Import-Module Microsoft.Graph -ErrorAction Stop
 
     Write-BwsLog "Connecting to Microsoft Graph ($AuthMode) with scopes: $($Scopes -join ', ')" "INFO"
 
@@ -139,7 +276,6 @@ function Connect-BwsGraph {
 
     $ctx = Get-MgContext
     if (-not $ctx) { throw "Graph context is empty. Authentication failed?" }
-
     return $ctx
 }
 
@@ -151,12 +287,6 @@ function Connect-BwsAzure {
         [string]$ClientId,
         [string]$CertificateThumbprint
     )
-
-    if (-not (Ensure-Module -Name "Az.Accounts" -AutoInstall:$AutoInstallModules)) {
-        throw "Az.Accounts module is missing."
-    }
-
-    Import-Module Az.Accounts -ErrorAction Stop
 
     Write-BwsLog "Connecting to Azure (Az.Accounts) via $AuthMode" "INFO"
 
@@ -178,19 +308,6 @@ function Connect-BwsAzure {
     return (Get-AzContext)
 }
 
-# ---------- Condition Loading ----------
-function Import-BwsConditions {
-    param([Parameter(Mandatory)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) {
-        throw "BWSConditions not found: $Path"
-    }
-    # BWSConditions.ps1 must return an array of PSCustomObjects
-    $conds = & $Path
-    if (-not $conds) { throw "BWSConditions returned no conditions." }
-    if ($conds -isnot [System.Collections.IEnumerable]) { throw "BWSConditions must return an array/enumerable." }
-    return @($conds)
-}
-
 # ---------- Execution ----------
 function Invoke-BwsChecks {
     param(
@@ -200,23 +317,11 @@ function Invoke-BwsChecks {
         [switch]$NoAuth
     )
 
-    # Filter
-    $filtered = $Conditions
+    $filtered = Get-FilteredConditions -Conditions $Conditions -IncludeProducts $IncludeProducts -IncludeTags $IncludeTags
+    if (-not $filtered -or $filtered.Count -eq 0) { throw "No conditions left after filtering." }
 
-    if ($IncludeProducts -and $IncludeProducts.Count -gt 0) {
-        $set = $IncludeProducts | ForEach-Object { $_.Trim() }
-        $filtered = $filtered | Where-Object { $set -contains $_.Product }
-    }
-    if ($IncludeTags -and $IncludeTags.Count -gt 0) {
-        $tags = $IncludeTags | ForEach-Object { $_.Trim() }
-        $filtered = $filtered | Where-Object {
-            $_.Tags -and (@($_.Tags) | Where-Object { $tags -contains $_ }).Count -gt 0
-        }
-    }
-
-    if (-not $filtered -or $filtered.Count -eq 0) {
-        throw "No conditions left after filtering."
-    }
+    # Preflight modules for filtered run
+    Ensure-AndImportModulesForRun -Conditions $filtered
 
     # Determine required connections
     $needGraph = ($filtered | Where-Object { $_.RequiresGraph -eq $true }).Count -gt 0
@@ -229,7 +334,6 @@ function Invoke-BwsChecks {
             $graphScopes = Get-Union -A $graphScopes -B @($_.GraphScopes)
         }
         if (-not $graphScopes -or $graphScopes.Count -eq 0) {
-            # Minimal fallback (read-only)
             $graphScopes = @("Directory.Read.All")
         }
     }
@@ -253,11 +357,9 @@ function Invoke-BwsChecks {
             $context.AzContext = Connect-BwsAzure -AuthMode $AuthMode -TenantId $TenantId -ClientId $ClientId -CertificateThumbprint $CertificateThumbprint
         }
         if ($needAD) {
-            # RSAT ActiveDirectory
-            if (-not (Ensure-Module -Name "ActiveDirectory" -AutoInstall:$AutoInstallModules)) {
-                Write-BwsLog "ActiveDirectory module is missing. AD checks may fail if RSAT isn't installed." "WARN"
-            } else {
-                Import-Module ActiveDirectory -ErrorAction Stop
+            # ActiveDirectory already imported by preflight; still verify cmdlet availability
+            if (-not (Get-Command Get-ADDomain -ErrorAction SilentlyContinue)) {
+                Write-BwsLog "ActiveDirectory cmdlets not available. AD checks may fail (RSAT missing?)." "WARN"
             }
         }
     } else {
@@ -281,8 +383,6 @@ function Invoke-BwsChecks {
             }
 
             $r = & $c.Test -Context $context -Condition $c
-
-            # Expected: object with IsCompliant, Actual, Expected(optional), Evidence(optional), Message(optional)
             if ($null -eq $r) { throw "Test returned no result object." }
 
             $isCompliant = [bool]$r.IsCompliant
@@ -332,7 +432,7 @@ function Convert-BwsResultsToHtml {
         [Parameter(Mandatory)][string]$OutFile
     )
 
-    $ctx = $Run.Context
+    $ctx  = $Run.Context
     $rows = $Run.Results
 
     $summary = $rows | Group-Object Status | Sort-Object Name | ForEach-Object {
@@ -352,26 +452,38 @@ function Convert-BwsResultsToHtml {
     .badge { display:inline-block; padding:2px 8px; border-radius: 10px; font-size: 12px; background:#eee; margin-right:6px; }
     .small { font-size: 12px; color:#666; }
     details summary { cursor: pointer; }
+    pre { white-space: pre-wrap; word-break: break-word; }
 "@
 
     $metaHtml = @"
     <div class='meta'>
       <div><span class='badge'>RunId</span> $($ctx.RunId)</div>
       <div><span class='badge'>Start</span> $($ctx.StartTime)</div>
-      <div><span class='badge'>NeedGraph</span> $($ctx.NeedGraph) &nbsp; <span class='badge'>NeedAzure</span> $($ctx.NeedAzure) &nbsp; <span class='badge'>NeedAD</span> $($ctx.NeedAD)</div>
+      <div>
+        <span class='badge'>NeedGraph</span> $($ctx.NeedGraph)
+        <span class='badge'>NeedAzure</span> $($ctx.NeedAzure)
+        <span class='badge'>NeedAD</span> $($ctx.NeedAD)
+      </div>
     </div>
 "@
 
     $summaryHtml = ($summary | ConvertTo-Html -Fragment -PreContent "<h2>Summary</h2>")
 
-    # Group by product
     $byProduct = $rows | Sort-Object Product, Severity, Id | Group-Object Product
 
     $sections = foreach ($g in $byProduct) {
         $prod = $g.Name
+
         $tblRows = foreach ($r in $g.Group) {
             $cls = $r.Status
-            @"
+
+            $exp = [System.Net.WebUtility]::HtmlEncode($r.Expected)
+            $act = [System.Net.WebUtility]::HtmlEncode($r.Actual)
+            $evi = [System.Net.WebUtility]::HtmlEncode($r.Evidence)
+            $msg = [System.Net.WebUtility]::HtmlEncode($r.Message)
+            $rem = [System.Net.WebUtility]::HtmlEncode($r.Remediation)
+
+@"
 <tr class='$cls'>
   <td>$($r.Severity)</td>
   <td><b>$($r.Id)</b><br/><span class='small'>$($r.Tags)</span></td>
@@ -379,18 +491,18 @@ function Convert-BwsResultsToHtml {
   <td><b>$($r.Status)</b><br/><span class='small'>$($r.DurationMs) ms</span></td>
   <td>
     <details><summary>Details</summary>
-      <div><b>Expected:</b><pre>$([System.Web.HttpUtility]::HtmlEncode($r.Expected))</pre></div>
-      <div><b>Actual:</b><pre>$([System.Web.HttpUtility]::HtmlEncode($r.Actual))</pre></div>
-      <div><b>Evidence:</b><pre>$([System.Web.HttpUtility]::HtmlEncode($r.Evidence))</pre></div>
-      <div><b>Message:</b><pre>$([System.Web.HttpUtility]::HtmlEncode($r.Message))</pre></div>
+      <div><b>Expected:</b><pre>$exp</pre></div>
+      <div><b>Actual:</b><pre>$act</pre></div>
+      <div><b>Evidence:</b><pre>$evi</pre></div>
+      <div><b>Message:</b><pre>$msg</pre></div>
     </details>
   </td>
-  <td><pre>$([System.Web.HttpUtility]::HtmlEncode($r.Remediation))</pre></td>
+  <td><pre>$rem</pre></td>
 </tr>
 "@
         }
 
-        @"
+@"
 <h2>$prod</h2>
 <table>
   <thead>
@@ -527,7 +639,6 @@ function Show-BwsGuiAndRun {
             Convert-BwsResultsToHtml -Run $run -OutFile $reportFile
 
             $grid.DataSource = $run.Results
-
             $status.Text = "Done. Report: $reportFile"
         } catch {
             $status.Text = "ERROR: " + $_.Exception.Message
