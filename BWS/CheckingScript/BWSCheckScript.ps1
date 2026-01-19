@@ -5,6 +5,9 @@
   - Loads conditions from .\BWSConditions.ps1 (same folder)
   - Optional GUI (-Gui)
   - Preflights + installs/imports required modules (including auth modules)
+  - IMPORTANT: To avoid Microsoft.Graph <-> Microsoft.Graph.Authentication exact-version dependency issues,
+               this script imports ONLY Microsoft.Graph.Authentication (for Connect-MgGraph) and ensures
+               Microsoft.Graph is installed (for submodules). It does NOT import the Microsoft.Graph meta module.
   - Executes checks and generates an HTML report
 .NOTES
   Recommended: PowerShell 7.4+ on Windows
@@ -49,9 +52,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # ---------- Utilities ----------
-function New-BwsRunId {
-    (Get-Date).ToString('yyyyMMdd-HHmmss')
-}
+function New-BwsRunId { (Get-Date).ToString('yyyyMMdd-HHmmss') }
 
 function Ensure-Folder {
     param([Parameter(Mandatory)][string]$Path)
@@ -75,16 +76,12 @@ function Test-IsWindows { return $IsWindows }
 function Set-TlsForWindowsPowerShell {
     # Windows PowerShell 5.1 often needs TLS 1.2 for PSGallery
     if ($PSVersionTable.PSEdition -eq 'Desktop') {
-        try {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        } catch {
-            Write-BwsLog "Could not set TLS 1.2: $($_.Exception.Message)" "WARN"
-        }
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }
+        catch { Write-BwsLog "Could not set TLS 1.2: $($_.Exception.Message)" "WARN" }
     }
 }
 
 function Ensure-NuGetProvider {
-    # Required for Install-Module on some systems
     $prov = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
     if (-not $prov) {
         if (-not $AutoInstallModules) {
@@ -96,35 +93,83 @@ function Ensure-NuGetProvider {
     }
 }
 
+function Ensure-PSGalleryTrustedIfAutoInstall {
+    if (-not $AutoInstallModules) { return }
+    try {
+        $repo = Get-PSRepository -Name PSGallery -ErrorAction Stop
+        if ($repo.InstallationPolicy -ne 'Trusted') {
+            Write-BwsLog "Setting PSGallery InstallationPolicy to Trusted (may prompt in some environments)..." "WARN"
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+        }
+    } catch {
+        Write-BwsLog "Could not validate PSGallery repository: $($_.Exception.Message)" "WARN"
+    }
+}
+
 function Ensure-Module {
     param(
         [Parameter(Mandatory)][string]$Name,
-        [switch]$AutoInstall
+        [switch]$AutoInstall,
+        [version]$MinimumVersion,
+        [version]$RequiredVersion
     )
 
-    if (Get-Module -ListAvailable -Name $Name) { return $true }
+    $available = Get-Module -ListAvailable -Name $Name | Sort-Object Version -Descending
+    if ($available) {
+        if ($RequiredVersion) {
+            if ($available | Where-Object { $_.Version -eq $RequiredVersion }) { return $true }
+        } elseif ($MinimumVersion) {
+            if ($available[0].Version -ge $MinimumVersion) { return $true }
+        } else {
+            return $true
+        }
+    }
 
     if (-not $AutoInstall) {
-        Write-BwsLog "Module '$Name' is missing. Install manually: Install-Module $Name -Scope CurrentUser" "WARN"
+        $vMsg = if ($RequiredVersion) { " (RequiredVersion: $RequiredVersion)" }
+                elseif ($MinimumVersion) { " (MinimumVersion: $MinimumVersion)" }
+                else { "" }
+        Write-BwsLog "Module '$Name' is missing or does not meet the required version$vMsg. Install manually or run with -AutoInstallModules." "WARN"
         return $false
     }
 
     Set-TlsForWindowsPowerShell
     Ensure-NuGetProvider
+    Ensure-PSGalleryTrustedIfAutoInstall
 
-    Write-BwsLog "Installing missing module '$Name' (CurrentUser)..." "INFO"
-    Install-Module -Name $Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+    $installParams = @{
+        Name         = $Name
+        Scope        = 'CurrentUser'
+        Force        = $true
+        AllowClobber = $true
+        ErrorAction  = 'Stop'
+    }
+    if ($RequiredVersion) { $installParams.RequiredVersion = $RequiredVersion }
+    elseif ($MinimumVersion) { $installParams.MinimumVersion = $MinimumVersion }
 
-    return [bool](Get-Module -ListAvailable -Name $Name)
+    Write-BwsLog "Installing module '$Name' (CurrentUser)..." "INFO"
+    Install-Module @installParams
+
+    $available2 = Get-Module -ListAvailable -Name $Name | Sort-Object Version -Descending
+    if (-not $available2) { return $false }
+
+    if ($RequiredVersion) { return [bool]($available2 | Where-Object { $_.Version -eq $RequiredVersion }) }
+    if ($MinimumVersion) { return [bool]($available2[0].Version -ge $MinimumVersion) }
+    return $true
 }
 
-function Import-RequiredModule {
+function Import-ModuleSafe {
     param(
-        [Parameter(Mandatory)][string]$Name
+        [Parameter(Mandatory)][string]$Name,
+        [version]$RequiredVersion
     )
     try {
-        Import-Module $Name -ErrorAction Stop | Out-Null
-        Write-BwsLog "Imported module: $Name" "DEBUG"
+        $params = @{ Name = $Name; ErrorAction = 'Stop'; Force = $true }
+        if ($RequiredVersion) { $params.RequiredVersion = $RequiredVersion }
+        Import-Module @params | Out-Null
+        $loaded = Get-Module -Name $Name -ErrorAction SilentlyContinue
+        $verMsg = if ($loaded) { $loaded.Version.ToString() } else { "?" }
+        Write-BwsLog "Imported module: $Name ($verMsg)" "DEBUG"
     } catch {
         throw "Failed to import module '$Name': $($_.Exception.Message)"
     }
@@ -159,80 +204,101 @@ function Get-FilteredConditions {
 # ---------- Condition Loading ----------
 function Import-BwsConditions {
     param([Parameter(Mandatory)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) {
-        throw "BWSConditions not found: $Path"
-    }
+    if (-not (Test-Path -LiteralPath $Path)) { throw "BWSConditions not found: $Path" }
     $conds = & $Path
     if (-not $conds) { throw "BWSConditions returned no conditions." }
     if ($conds -isnot [System.Collections.IEnumerable]) { throw "BWSConditions must return an array/enumerable." }
     return @($conds)
 }
 
+# ---------- Graph Stack (fix for exact-version dependency issues) ----------
+function Ensure-AndImportGraphStack {
+    <#
+      Why this exists:
+      - Import-Module Microsoft.Graph may enforce an exact Microsoft.Graph.Authentication version (e.g. 2.25.0).
+      - Many environments have a newer Authentication version installed, which breaks importing the meta module.
+      - Solution: Import ONLY Microsoft.Graph.Authentication (for Connect-MgGraph) and ensure Microsoft.Graph is installed
+                  so submodules/cmdlets can auto-load on demand.
+    #>
+
+    # Ensure Authentication (provides Connect-MgGraph)
+    $okAuth = Ensure-Module -Name "Microsoft.Graph.Authentication" -AutoInstall:$AutoInstallModules
+    if (-not $okAuth) {
+        throw "Microsoft.Graph.Authentication is missing. Install it or run with -AutoInstallModules."
+    }
+
+    # Import Authentication (latest available)
+    Import-ModuleSafe -Name "Microsoft.Graph.Authentication"
+
+    if (-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)) {
+        throw "Connect-MgGraph not found even after importing Microsoft.Graph.Authentication."
+    }
+
+    # Ensure Microsoft.Graph is installed (brings in the Graph submodules exporting Get-Mg* cmdlets)
+    $okMg = Ensure-Module -Name "Microsoft.Graph" -AutoInstall:$AutoInstallModules
+    if (-not $okMg) {
+        throw "Microsoft.Graph is missing. Install it or run with -AutoInstallModules."
+    }
+
+    # Do NOT import Microsoft.Graph meta module
+    Write-BwsLog "Microsoft.Graph is installed. Graph submodules will auto-load on demand (meta module import skipped)." "INFO"
+}
+
 # ---------- Module Preflight ----------
 function Get-ModulesRequiredForConditions {
     param([Parameter(Mandatory)][object[]]$Conditions)
 
-    $needGraph = ($Conditions | Where-Object { $_.RequiresGraph -eq $true }).Count -gt 0
     $needAzure = ($Conditions | Where-Object { $_.RequiresAzure -eq $true }).Count -gt 0
     $needAD    = ($Conditions | Where-Object { $_.RequiresAD -eq $true }).Count -gt 0
 
     $modules = New-Object System.Collections.Generic.List[string]
 
-    # Graph stack
-    if ($needGraph) {
-        [void]$modules.Add("Microsoft.Graph") # includes Connect-MgGraph / Graph cmdlets
-    }
-
-    # Az stack
+    # NOTE: Graph stack is handled via Ensure-AndImportGraphStack()
     if ($needAzure) {
-        [void]$modules.Add("Az.Accounts") # Connect-AzAccount
-        [void]$modules.Add("Az.Resources") # common for subscription/resource queries
-
-        # If any AVD product checks exist -> ensure Az.DesktopVirtualization
+        [void]$modules.Add("Az.Accounts")
+        [void]$modules.Add("Az.Resources")
         $needAvdModule = ($Conditions | Where-Object { $_.Product -eq 'AVD' }).Count -gt 0
         if ($needAvdModule) { [void]$modules.Add("Az.DesktopVirtualization") }
     }
 
-    # Active Directory (RSAT)
-    if ($needAD) {
-        [void]$modules.Add("ActiveDirectory")
-    }
+    if ($needAD) { [void]$modules.Add("ActiveDirectory") }
 
-    # Optional per-condition module list (future-proof)
+    # Optional per-condition module list
     $Conditions | ForEach-Object {
         if ($_.PSObject.Properties.Name -contains 'RequiredModules' -and $_.RequiredModules) {
             foreach ($m in @($_.RequiredModules)) { if ($m) { [void]$modules.Add([string]$m) } }
         }
     }
 
-    return @($modules | Select-Object -Unique)
+    return @($modules)
 }
 
 function Ensure-AndImportModulesForRun {
     param([Parameter(Mandatory)][object[]]$Conditions)
 
+    $needGraph = ($Conditions | Where-Object { $_.RequiresGraph -eq $true }).Count -gt 0
+    if ($needGraph) {
+        Write-BwsLog "Preparing Microsoft Graph module stack..." "INFO"
+        Ensure-AndImportGraphStack
+    }
+
     $modules = Get-ModulesRequiredForConditions -Conditions $Conditions
-    if (-not $modules -or $modules.Count -eq 0) {
-        Write-BwsLog "No external modules required based on current filters." "INFO"
-        return
+    if (-not $modules -or $modules.Count -eq 0) { return }
+
+    # Preserve order but dedupe
+    $seen = @{}
+    $orderedUnique = foreach ($m in $modules) {
+        if (-not $seen.ContainsKey($m)) { $seen[$m] = $true; $m }
     }
 
-    Write-BwsLog "Required modules: $($modules -join ', ')" "INFO"
+    Write-BwsLog "Required modules: $($orderedUnique -join ', ')" "INFO"
 
-    foreach ($m in $modules) {
+    foreach ($m in $orderedUnique) {
         $ok = Ensure-Module -Name $m -AutoInstall:$AutoInstallModules
-        if (-not $ok) {
-            throw "Missing module '$m'. Install it or run with -AutoInstallModules."
-        }
-        Import-RequiredModule -Name $m
+        if (-not $ok) { throw "Missing module '$m'. Install it or run with -AutoInstallModules." }
+        Import-ModuleSafe -Name $m
     }
 
-    # Sanity checks for auth cmdlets
-    if (($Conditions | Where-Object { $_.RequiresGraph }).Count -gt 0) {
-        if (-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)) {
-            throw "Connect-MgGraph not found even after importing Microsoft.Graph."
-        }
-    }
     if (($Conditions | Where-Object { $_.RequiresAzure }).Count -gt 0) {
         if (-not (Get-Command Connect-AzAccount -ErrorAction SilentlyContinue)) {
             throw "Connect-AzAccount not found even after importing Az.Accounts."
@@ -333,9 +399,7 @@ function Invoke-BwsChecks {
         $filtered | Where-Object { $_.GraphScopes } | ForEach-Object {
             $graphScopes = Get-Union -A $graphScopes -B @($_.GraphScopes)
         }
-        if (-not $graphScopes -or $graphScopes.Count -eq 0) {
-            $graphScopes = @("Directory.Read.All")
-        }
+        if (-not $graphScopes -or $graphScopes.Count -eq 0) { $graphScopes = @("Directory.Read.All") }
     }
 
     $context = [ordered]@{
@@ -357,7 +421,6 @@ function Invoke-BwsChecks {
             $context.AzContext = Connect-BwsAzure -AuthMode $AuthMode -TenantId $TenantId -ClientId $ClientId -CertificateThumbprint $CertificateThumbprint
         }
         if ($needAD) {
-            # ActiveDirectory already imported by preflight; still verify cmdlet availability
             if (-not (Get-Command Get-ADDomain -ErrorAction SilentlyContinue)) {
                 Write-BwsLog "ActiveDirectory cmdlets not available. AD checks may fail (RSAT missing?)." "WARN"
             }
@@ -544,13 +607,9 @@ function Convert-BwsResultsToHtml {
 
 # ---------- Optional GUI ----------
 function Show-BwsGuiAndRun {
-    param(
-        [Parameter(Mandatory)][object[]]$Conditions
-    )
+    param([Parameter(Mandatory)][object[]]$Conditions)
 
-    if (-not (Test-IsWindows)) {
-        throw "GUI is only available on Windows."
-    }
+    if (-not (Test-IsWindows)) { throw "GUI is only available on Windows." }
 
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -664,7 +723,6 @@ try {
         return
     }
 
-    # CLI mode
     $run = Invoke-BwsChecks -Conditions $conditions -IncludeProducts $IncludeProducts -IncludeTags $IncludeTags -NoAuth:$NoAuth
 
     $reportFile = Join-Path $OutputPath ("BWSReport-{0}.html" -f $run.Context.RunId)

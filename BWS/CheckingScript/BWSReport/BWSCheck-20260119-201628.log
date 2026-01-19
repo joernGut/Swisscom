@@ -1,6 +1,6 @@
 **********************
 PowerShell transcript start
-Start time: 20260119201016
+Start time: 20260119201628
 Username: AzureAD\JörnGutting
 RunAs User: AzureAD\JörnGutting
 Configuration Name: 
@@ -22,13 +22,15 @@ PSRemotingProtocolVersion: 2.3
 SerializationVersion: 1.1.0.1
 WSManStackVersion: 3.0
 **********************
-[2026-01-19 20:10:18][INFO] Required modules: Microsoft.Graph, Az.Accounts, Az.Resources, Az.DesktopVirtualization, ActiveDirectory
+[2026-01-19 20:16:31][INFO] Required modules: Microsoft.Graph.Authentication, Microsoft.Graph, Az.Accounts, Az.Resources, Az.DesktopVirtualization, ActiveDirectory
+[2026-01-19 20:16:31][INFO] Installing missing module 'Microsoft.Graph.Authentication' (CurrentUser)...
+[2026-01-19 20:16:36][DEBUG] Imported module: Microsoft.Graph.Authentication
+[2026-01-19 20:16:36][DEBUG] Imported module: Microsoft.Graph.Authentication
 PS>TerminatingError(Import-Module): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The required module 'Microsoft.Graph.Authentication' is not loaded. Load the module or remove the module from 'RequiredModules' in the file 'C:\Users\JörnGutting\OneDrive - JG-NET\Dokumente\PowerShell\Modules\Microsoft.Graph\2.25.0\Microsoft.Graph.psd1'."
 >> TerminatingError(): "Failed to import module 'Microsoft.Graph': The required module 'Microsoft.Graph.Authentication' is not loaded. Load the module or remove the module from 'RequiredModules' in the file 'C:\Users\JörnGutting\OneDrive - JG-NET\Dokumente\PowerShell\Modules\Microsoft.Graph\2.25.0\Microsoft.Graph.psd1'."
 >> TerminatingError(): "Failed to import module 'Microsoft.Graph': The required module 'Microsoft.Graph.Authentication' is not loaded. Load the module or remove the module from 'RequiredModules' in the file 'C:\Users\JörnGutting\OneDrive - JG-NET\Dokumente\PowerShell\Modules\Microsoft.Graph\2.25.0\Microsoft.Graph.psd1'."
 >> TerminatingError(): "Failed to import module 'Microsoft.Graph': The required module 'Microsoft.Graph.Authentication' is not loaded. Load the module or remove the module from 'RequiredModules' in the file 'C:\Users\JörnGutting\OneDrive - JG-NET\Dokumente\PowerShell\Modules\Microsoft.Graph\2.25.0\Microsoft.Graph.psd1'."
-PS>TerminatingError(): "The pipeline has been stopped."
 **********************
 PowerShell transcript end
-End time: 20260119201626
+End time: 20260119201849
 **********************

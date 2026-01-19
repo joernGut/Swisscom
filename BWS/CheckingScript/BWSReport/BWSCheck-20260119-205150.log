@@ -1,0 +1,109 @@
+**********************
+PowerShell transcript start
+Start time: 20260119205150
+Username: AzureAD\JörnGutting
+RunAs User: AzureAD\JörnGutting
+Configuration Name: 
+Machine: JGN-G-83094864 (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -NoProfile -ExecutionPolicy Bypass -Command Import-Module 'c:\Users\JörnGutting\.vscode\extensions\ms-vscode.powershell-2025.4.0\modules\PowerShellEditorServices\PowerShellEditorServices.psd1'; Start-EditorServices -HostName 'Visual Studio Code Host' -HostProfileId 'Microsoft.VSCode' -HostVersion '2025.4.0' -BundledModulesPath 'c:\Users\JörnGutting\.vscode\extensions\ms-vscode.powershell-2025.4.0\modules' -EnableConsoleRepl -StartupBanner "PowerShell Extension v2025.4.0
+Copyright (c) Microsoft Corporation.
+
+https://aka.ms/vscode-powershell
+Type 'help' to get help.
+" -LogLevel 'Warning' -LogPath 'c:\Users\JörnGutting\AppData\Roaming\Code\logs\20260119T195908\window1\exthost\ms-vscode.powershell' -SessionDetailsPath 'c:\Users\JörnGutting\AppData\Roaming\Code\User\globalStorage\ms-vscode.powershell\sessions\PSES-VSCode-46312-617165.json' -FeatureFlags @() 
+Process ID: 48744
+PSVersion: 7.5.4
+PSEdition: Core
+GitCommitId: 7.5.4
+OS: Microsoft Windows 10.0.26200
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+[2026-01-19 20:51:52][INFO] Preparing Microsoft Graph module stack...
+[2026-01-19 20:51:52][DEBUG] Imported module: Microsoft.Graph.Authentication (2.34.0)
+[2026-01-19 20:51:52][INFO] Microsoft.Graph is installed. Graph submodules will auto-load on demand (meta module import skipped).
+[2026-01-19 20:51:52][INFO] Required modules: Az.Accounts, Az.Resources, Az.DesktopVirtualization, ActiveDirectory
+[2026-01-19 20:51:53][DEBUG] Imported module: Az.Accounts (5.3.1)
+[2026-01-19 20:51:53][DEBUG] Imported module: Az.Resources (9.0.0)
+[2026-01-19 20:51:54][DEBUG] Imported module: Az.DesktopVirtualization (5.4.1)
+[2026-01-19 20:51:54][DEBUG] Imported module: ActiveDirectory (1.0.1.0)
+[2026-01-19 20:51:54][INFO] Connecting to Microsoft Graph (Interactive) with scopes: Policy.Read.All, DeviceManagementConfiguration.Read.All
+WARNING: Note: Sign in by Web Account Manager (WAM) is enabled by default on Windows. If using an embedded terminal, the interactive browser window may be hidden behind other windows.
+>> TerminatingError(Connect-MgGraph): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: InteractiveBrowserCredential authentication failed: "
+>> TerminatingError(Connect-MgGraph): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: InteractiveBrowserCredential authentication failed: "
+>> TerminatingError(Connect-MgGraph): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: InteractiveBrowserCredential authentication failed: "
+[2026-01-19 20:52:58][INFO] Preparing Microsoft Graph module stack...
+[2026-01-19 20:52:58][DEBUG] Imported module: Microsoft.Graph.Authentication (2.34.0)
+[2026-01-19 20:52:58][INFO] Microsoft.Graph is installed. Graph submodules will auto-load on demand (meta module import skipped).
+[2026-01-19 20:52:58][INFO] Required modules: Az.Accounts, Az.Resources, Az.DesktopVirtualization, ActiveDirectory
+[2026-01-19 20:52:59][DEBUG] Imported module: Az.Accounts (5.3.1)
+[2026-01-19 20:52:59][DEBUG] Imported module: Az.Resources (9.0.0)
+[2026-01-19 20:52:59][DEBUG] Imported module: Az.DesktopVirtualization (5.4.1)
+[2026-01-19 20:53:00][DEBUG] Imported module: ActiveDirectory (1.0.1.0)
+[2026-01-19 20:53:00][INFO] Connecting to Microsoft Graph (Interactive) with scopes: Policy.Read.All, DeviceManagementConfiguration.Read.All
+WARNING: Note: Sign in by Web Account Manager (WAM) is enabled by default on Windows. If using an embedded terminal, the interactive browser window may be hidden behind other windows.
+[2026-01-19 20:53:35][INFO] Connecting to Azure (Az.Accounts) via Interactive
+Please select the account you want to login with.
+Retrieving subscriptions for the selection...
+WARNING: Unable to acquire token for tenant 'd01507d6-7747-4e7b-93a8-a964a8f64bde' with error 'Authentication failed against tenant d01507d6-7747-4e7b-93a8-a964a8f64bde. User interaction is required. This may be due to the conditional access policy settings such as multi-factor authentication (MFA). If you need to access subscriptions in that tenant, please rerun 'Connect-AzAccount' with additional parameter '-TenantId d01507d6-7747-4e7b-93a8-a964a8f64bde'.'
+[Announcements]
+With the new Azure PowerShell login experience, you can select the subscription you want to use more easily. Learn more about it and its configuration at https://go.microsoft.com/fwlink/?linkid=2271909.
+If you encounter any problem, please open an issue at: https://aka.ms/azpsissue
+PS>TerminatingError(): "The term 'Get-MgPolicyIdentitySecurityDefaultEnforcementPolicy' is not recognized as a name of a cmdlet, function, script file, or executable program.
+Check the spelling of the name, or if a path was included, verify that the path is correct and try again."
+PS>TerminatingError(): "The term 'Get-MgIdentityConditionalAccessPolicy' is not recognized as a name of a cmdlet, function, script file, or executable program.
+Check the spelling of the name, or if a path was included, verify that the path is correct and try again."
+WARNING: Unable to acquire token for tenant '7cabd4d7-77db-46bf-b6c6-52fd68a2a472' with error 'Authentication failed against tenant 7cabd4d7-77db-46bf-b6c6-52fd68a2a472. User interaction is required. This may be due to the conditional access policy settings such as multi-factor authentication (MFA). If you need to access subscriptions in that tenant, please rerun 'Connect-AzAccount' with additional parameter '-TenantId 7cabd4d7-77db-46bf-b6c6-52fd68a2a472'.'
+WARNING: Unable to acquire token for tenant '7cabd4d7-77db-46bf-b6c6-52fd68a2a472' with error 'Authentication failed against tenant 7cabd4d7-77db-46bf-b6c6-52fd68a2a472. User interaction is required. This may be due to the conditional access policy settings such as multi-factor authentication (MFA). If you need to access subscriptions in that tenant, please rerun 'Connect-AzAccount' with additional parameter '-TenantId 7cabd4d7-77db-46bf-b6c6-52fd68a2a472'.'
+PS>TerminatingError(Get-AzWvdHostPool_List1): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: Authentication failed against tenant 7cabd4d7-77db-46bf-b6c6-52fd68a2a472. User interaction is required. This may be due to the conditional access policy settings such as multi-factor authentication (MFA). If you need to access subscriptions in that tenant, please rerun 'Connect-AzAccount' with additional parameter '-TenantId 7cabd4d7-77db-46bf-b6c6-52fd68a2a472'."
+>> TerminatingError(Get-AzWvdHostPool_List1): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: Authentication failed against tenant 7cabd4d7-77db-46bf-b6c6-52fd68a2a472. User interaction is required. This may be due to the conditional access policy settings such as multi-factor authentication (MFA). If you need to access subscriptions in that tenant, please rerun 'Connect-AzAccount' with additional parameter '-TenantId 7cabd4d7-77db-46bf-b6c6-52fd68a2a472'."
+PS>TerminatingError(): "The 'Get-MgDeviceManagementDeviceCompliancePolicy' command was found in the module 'Microsoft.Graph.DeviceManagement', but the module could not be loaded. For more information, run 'Import-Module Microsoft.Graph.DeviceManagement'."
+PS>TerminatingError(Get-ADDefaultDomainPasswordPolicy): "Es wurde kein Standardserver gefunden, auf dem die Active Directory-Webdienste ausgeführt werden."
+>> TerminatingError(Get-ADDefaultDomainPasswordPolicy): "Es wurde kein Standardserver gefunden, auf dem die Active Directory-Webdienste ausgeführt werden."
+PS>TerminatingError(Invoke-BwsChecks): "Argument types do not match"
+[2026-01-19 20:54:06][INFO] Preparing Microsoft Graph module stack...
+[2026-01-19 20:54:07][DEBUG] Imported module: Microsoft.Graph.Authentication (2.34.0)
+[2026-01-19 20:54:07][INFO] Microsoft.Graph is installed. Graph submodules will auto-load on demand (meta module import skipped).
+[2026-01-19 20:54:07][INFO] Required modules: Az.Accounts, Az.Resources, Az.DesktopVirtualization, ActiveDirectory
+[2026-01-19 20:54:07][DEBUG] Imported module: Az.Accounts (5.3.1)
+[2026-01-19 20:54:08][DEBUG] Imported module: Az.Resources (9.0.0)
+[2026-01-19 20:54:08][DEBUG] Imported module: Az.DesktopVirtualization (5.4.1)
+[2026-01-19 20:54:08][DEBUG] Imported module: ActiveDirectory (1.0.1.0)
+[2026-01-19 20:54:08][INFO] Connecting to Microsoft Graph (Interactive) with scopes: Policy.Read.All, DeviceManagementConfiguration.Read.All
+[2026-01-19 20:54:09][INFO] Connecting to Azure (Az.Accounts) via Interactive
+Please select the account you want to login with.
+Retrieving subscriptions for the selection...
+WARNING: To override which subscription Connect-AzAccount selects by default, use `Update-AzConfig -DefaultSubscriptionForLogin 00000000-0000-0000-0000-000000000000`. Go to https://go.microsoft.com/fwlink/?linkid=2200610 for more information.
+WARNING: Unable to acquire token for tenant '61f98370-55a7-41ee-9a22-1a0781b90844' with error 'Authentication failed against tenant 61f98370-55a7-41ee-9a22-1a0781b90844. User interaction is required. This may be due to the conditional access policy settings such as multi-factor authentication (MFA). If you need to access subscriptions in that tenant, please rerun 'Connect-AzAccount' with additional parameter '-TenantId 61f98370-55a7-41ee-9a22-1a0781b90844'.'
+[Tenant and subscription selection]
+No      Subscription name                       Subscription ID                             Tenant name
+----    ------------------------------------    ----------------------------------------    --------------------------
+[1]     Azure Plan                              7542a9e1-cb42-4972-9674-7a022bc15376        JG-NET
+[2] *   Nutzungsbasierte Bezahlung              df6513be-9269-4eb9-8874-62e7a61b67e9        JG-NET                    
+
+The default is marked with an *; the default tenant is 'JG-NET' and subscription is 'Nutzungsbasierte Bezahlung (df6513be-9269-4eb9-8874-62e7a61b67e9)'.
+
+Select a tenant and subscription (type a number or Enter to accept default):
+PS>TerminatingError(): "The term 'Get-MgPolicyIdentitySecurityDefaultEnforcementPolicy' is not recognized as a name of a cmdlet, function, script file, or executable program.
+Check the spelling of the name, or if a path was included, verify that the path is correct and try again."
+PS>TerminatingError(): "The term 'Get-MgIdentityConditionalAccessPolicy' is not recognized as a name of a cmdlet, function, script file, or executable program.
+Check the spelling of the name, or if a path was included, verify that the path is correct and try again."
+WARNING: Unable to acquire token for tenant '61f98370-55a7-41ee-9a22-1a0781b90844' with error 'Authentication failed against tenant 61f98370-55a7-41ee-9a22-1a0781b90844. User interaction is required. This may be due to the conditional access policy settings such as multi-factor authentication (MFA). If you need to access subscriptions in that tenant, please rerun 'Connect-AzAccount' with additional parameter '-TenantId 61f98370-55a7-41ee-9a22-1a0781b90844'.'
+PS>TerminatingError(): "You cannot call a method on a null-valued expression."
+PS>TerminatingError(): "The 'Get-MgDeviceManagementDeviceCompliancePolicy' command was found in the module 'Microsoft.Graph.DeviceManagement', but the module could not be loaded. For more information, run 'Import-Module Microsoft.Graph.DeviceManagement'."
+PS>TerminatingError(Get-ADDefaultDomainPasswordPolicy): "Es wurde kein Standardserver gefunden, auf dem die Active Directory-Webdienste ausgeführt werden."
+>> TerminatingError(Get-ADDefaultDomainPasswordPolicy): "Es wurde kein Standardserver gefunden, auf dem die Active Directory-Webdienste ausgeführt werden."
+PS>TerminatingError(Invoke-BwsChecks): "Argument types do not match"
+[2026-01-19 20:55:22][INFO] Preparing Microsoft Graph module stack...
+[2026-01-19 20:55:22][DEBUG] Imported module: Microsoft.Graph.Authentication (2.34.0)
+[2026-01-19 20:55:22][INFO] Microsoft.Graph is installed. Graph submodules will auto-load on demand (meta module import skipped).
+[2026-01-19 20:55:22][INFO] Required modules: Az.Accounts, Az.Resources, Az.DesktopVirtualization, ActiveDirectory
+[2026-01-19 20:55:23][DEBUG] Imported module: Az.Accounts (5.3.1)
+[2026-01-19 20:55:23][DEBUG] Imported module: Az.Resources (9.0.0)
+[2026-01-19 20:55:23][DEBUG] Imported module: Az.DesktopVirtualization (5.4.1)
+[2026-01-19 20:55:24][DEBUG] Imported module: ActiveDirectory (1.0.1.0)
+[2026-01-19 20:55:24][INFO] Connecting to Microsoft Graph (Interactive) with scopes: Policy.Read.All, DeviceManagementConfiguration.Read.All
+[2026-01-19 20:55:24][INFO] Connecting to Azure (Az.Accounts) via Interactive
