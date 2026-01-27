@@ -9,11 +9,13 @@
   - Graph: imports ONLY Microsoft.Graph.Authentication (Connect-MgGraph) and ensures Microsoft.Graph is installed
   - Executes checks and generates an HTML report
 
-  Key fixes:
-  - "Count cannot be found": all scalar/pipeline count checks use @(...).Count
-  - "Argument types do not match": condition Test scriptblocks are invoked with arguments converted to the scriptblock's declared parameter types
-    (supports Hashtable/IDictionary/OrderedDictionary/Generic Dictionary and custom classes via property mapping)
-  - GUI error output includes ScriptName + Line + Column.
+  Fixes included:
+  - Robust GUI error display (even if error occurs before GUI is shown)
+  - GUI shows full error details in a dedicated textbox + MessageBox
+  - Error output includes file + line + column when possible (fallback parsing from ScriptStackTrace)
+  - "Count cannot be found": use @(...).Count for scalar/pipeline normalization
+  - "Argument types do not match": converts Context/Condition to the declared parameter types of each Test scriptblock,
+    including Hashtable/IDictionary/OrderedDictionary/Generic dictionaries and custom classes via property mapping
 
 .NOTES
   Recommended: PowerShell 7+ on Windows
@@ -81,17 +83,71 @@ function New-BwsFolder {
     }
 }
 
-function Format-BwsError {
+function Initialize-BwsWinForms {
+    if (-not (Test-IsWindows)) { return }
+    try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop } catch {}
+    try { Add-Type -AssemblyName System.Drawing -ErrorAction Stop } catch {}
+}
+
+function Get-BwsSourceLineFromFile {
     param(
-        [Parameter(Mandatory)]
-        [System.Management.Automation.ErrorRecord]$ErrorRecord
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int]$LineNumber
     )
+    try {
+        if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+        $lines = Get-Content -LiteralPath $Path -ErrorAction Stop
+        $idx = $LineNumber - 1
+        if ($idx -ge 0 -and $idx -lt $lines.Count) { return $lines[$idx] }
+    } catch {}
+    return $null
+}
+
+function Get-BwsLocationFromError {
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+
+    $scriptName = $null
+    $lineNo = $null
+    $col = $null
+    $codeLine = $null
 
     $inv = $ErrorRecord.InvocationInfo
-    $scriptName = $inv.ScriptName
-    $lineNo = $inv.ScriptLineNumber
-    $col = $inv.OffsetInLine
-    $line = $inv.Line
+    if ($inv) {
+        if ($inv.ScriptName) { $scriptName = $inv.ScriptName }
+        if ($inv.ScriptLineNumber -gt 0) { $lineNo = $inv.ScriptLineNumber }
+        if ($inv.OffsetInLine -gt 0) { $col = $inv.OffsetInLine }
+        if ($inv.Line) { $codeLine = $inv.Line }
+    }
+
+    # Fallback: parse ScriptStackTrace if InvocationInfo is missing (common for .NET exceptions)
+    if (-not $lineNo -or -not $scriptName) {
+        $sst = $ErrorRecord.ScriptStackTrace
+        if ($sst) {
+            $m = [regex]::Match($sst, '(?<path>[A-Za-z]:\\[^:]+):\s*line\s*(?<line>\d+)', 'IgnoreCase')
+            if ($m.Success) {
+                if (-not $scriptName) { $scriptName = $m.Groups['path'].Value }
+                if (-not $lineNo) { $lineNo = [int]$m.Groups['line'].Value }
+            }
+        }
+    }
+
+    # If we got path + line but no code line, try reading it from file
+    if ($scriptName -and $lineNo -and -not $codeLine) {
+        $codeLine = Get-BwsSourceLineFromFile -Path $scriptName -LineNumber $lineNo
+    }
+
+    return [pscustomobject]@{
+        ScriptName = $scriptName
+        Line       = $lineNo
+        Column     = $col
+        Code       = $codeLine
+    }
+}
+
+function Format-BwsError {
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+
+    $loc = Get-BwsLocationFromError -ErrorRecord $ErrorRecord
 
     $inner = $ErrorRecord.Exception.InnerException
     $innerMsg = if ($inner) { $inner.Message } else { $null }
@@ -101,26 +157,47 @@ function Format-BwsError {
     $parts = New-Object System.Collections.Generic.List[string]
     $parts.Add("ERROR: $($ErrorRecord.Exception.Message)") | Out-Null
 
-    if ($scriptName -or $lineNo -or $col) {
-        $parts.Add("Location: $scriptName (Line $lineNo, Column $col)") | Out-Null
+    if ($loc.ScriptName -or $loc.Line -or $loc.Column) {
+        $colText  = if ($loc.Column) { $loc.Column } else { "n/a" }
+        $lineText = if ($loc.Line)   { $loc.Line }   else { "n/a" }
+        $parts.Add("Location: $($loc.ScriptName) (Line $lineText, Column $colText)") | Out-Null
     }
-    if ($line) {
-        $parts.Add("Code: $line") | Out-Null
-    }
-    if ($innerMsg) {
-        $parts.Add("InnerException: $innerMsg") | Out-Null
-    }
-    if ($stack) {
-        $parts.Add("Stack: $stack") | Out-Null
-    }
+    if ($loc.Code) { $parts.Add("Code: $($loc.Code)") | Out-Null }
+    if ($innerMsg) { $parts.Add("InnerException: $innerMsg") | Out-Null }
+    if ($stack)    { $parts.Add("ScriptStackTrace: $stack") | Out-Null }
 
     return ($parts -join [Environment]::NewLine)
+}
+
+function Show-BwsErrorDialog {
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [string]$Title = "BWSCheckScript - Error"
+    )
+
+    $details = Format-BwsError -ErrorRecord $ErrorRecord
+
+    if (Test-IsWindows) {
+        Initialize-BwsWinForms
+        try {
+            [System.Windows.Forms.MessageBox]::Show(
+                $details,
+                $Title,
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Error
+            ) | Out-Null
+            return
+        } catch {}
+    }
+
+    Write-BwsLog $details "ERROR"
 }
 
 # -----------------------------
 # PowerShellGet / Modules
 # -----------------------------
 function Set-TlsForWindowsPowerShell {
+    # Windows PowerShell 5.1 often needs TLS 1.2 for PSGallery
     if ($PSVersionTable.PSEdition -eq 'Desktop') {
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }
         catch { Write-BwsLog "Could not set TLS 1.2: $($_.Exception.Message)" "WARN" }
@@ -209,17 +286,9 @@ function Import-ModuleSafe {
         [Parameter(Mandatory)][string]$Name,
         [version]$RequiredVersion
     )
-    try {
-        $params = @{ Name = $Name; ErrorAction = 'Stop'; Force = $true }
-        if ($RequiredVersion) { $params.RequiredVersion = $RequiredVersion }
-        Import-Module @params | Out-Null
-
-        $loaded = Get-Module -Name $Name -ErrorAction SilentlyContinue
-        $verMsg = if ($loaded) { $loaded.Version.ToString() } else { "?" }
-        Write-BwsLog "Imported module: $Name ($verMsg)" "DEBUG"
-    } catch {
-        throw
-    }
+    $params = @{ Name = $Name; ErrorAction = 'Stop'; Force = $true }
+    if ($RequiredVersion) { $params.RequiredVersion = $RequiredVersion }
+    Import-Module @params | Out-Null
 }
 
 # -----------------------------
@@ -233,7 +302,7 @@ function Import-BwsConditions {
     $conds = & $Path
     if (-not $conds) { throw "BWSConditions returned no conditions." }
 
-    $arr = @($conds) # normalize
+    $arr = @($conds)
     if ($arr.Count -eq 0) { throw "BWSConditions returned an empty set." }
 
     return $arr
@@ -284,8 +353,6 @@ function Import-BwsGraphModules {
 
     $okMg = Install-BwsModuleIfNeeded -Name "Microsoft.Graph" -AutoInstall:$AutoInstallModules
     if (-not $okMg) { throw "Microsoft.Graph is missing. Install it or run with -AutoInstallModules." }
-
-    Write-BwsLog "Microsoft.Graph is installed. Submodules will auto-load on demand (meta module import skipped)." "INFO"
 }
 
 # -----------------------------
@@ -302,7 +369,6 @@ function Get-ModulesRequiredForConditions {
     if ($needAzure) {
         [void]$modules.Add("Az.Accounts")
         [void]$modules.Add("Az.Resources")
-
         $needAvd = @($Conditions | Where-Object { $_.Product -eq 'AVD' }).Count -gt 0
         if ($needAvd) { [void]$modules.Add("Az.DesktopVirtualization") }
     }
@@ -324,21 +390,16 @@ function Import-BwsModulesForRun {
     param([Parameter(Mandatory)][object[]]$Conditions)
 
     $needGraph = @($Conditions | Where-Object { $_.RequiresGraph -eq $true }).Count -gt 0
-    if ($needGraph) {
-        Write-BwsLog "Preparing Microsoft Graph module stack..." "INFO"
-        Import-BwsGraphModules
-    }
+    if ($needGraph) { Import-BwsGraphModules }
 
     $modules = @(Get-ModulesRequiredForConditions -Conditions $Conditions)
     if (@($modules).Count -eq 0) { return }
 
-    # Preserve order but dedupe
+    # Keep order but dedupe
     $seen = @{}
     $orderedUnique = foreach ($m in $modules) {
         if (-not $seen.ContainsKey($m)) { $seen[$m] = $true; $m }
     }
-
-    Write-BwsLog "Required modules: $($orderedUnique -join ', ')" "INFO"
 
     foreach ($m in $orderedUnique) {
         $ok = Install-BwsModuleIfNeeded -Name $m -AutoInstall:$AutoInstallModules
@@ -412,7 +473,7 @@ function Connect-BwsAzure {
 }
 
 # -----------------------------
-# Type conversion (the real fix)
+# Type conversion (fix for Argument types do not match)
 # -----------------------------
 function ConvertTo-BwsHashtable {
     param([Parameter(Mandatory)][object]$InputObject)
@@ -446,7 +507,6 @@ function ConvertTo-BwsGenericDictionary {
     )
 
     $src = ConvertTo-BwsHashtable -InputObject $InputObject
-
     $genArgs = $TargetType.GetGenericArguments()
     $keyType = $genArgs[0]
     $valType = $genArgs[1]
@@ -460,7 +520,6 @@ function ConvertTo-BwsGenericDictionary {
         if ($null -ne $vv) { $vv = [System.Management.Automation.LanguagePrimitives]::ConvertTo($vv, $valType) }
         $dict.Add($kk, $vv)
     }
-
     return $dict
 }
 
@@ -469,7 +528,7 @@ function ConvertTo-BwsCustomObjectType {
         [Parameter(Mandatory)][object]$InputObject,
         [Parameter(Mandatory)][Type]$TargetType
     )
-    # Create instance via parameterless ctor and map properties by name (case-insensitive)
+
     if ($TargetType.IsAbstract -or $TargetType.IsInterface) {
         throw "TargetType '$($TargetType.FullName)' is abstract/interface - cannot instantiate."
     }
@@ -486,19 +545,19 @@ function ConvertTo-BwsCustomObjectType {
     foreach ($k in $src.Keys) { $lookup[[string]$k] = $src[$k] }
 
     $obj = [Activator]::CreateInstance($TargetType)
+
     foreach ($prop in $TargetType.GetProperties([Reflection.BindingFlags]::Public -bor [Reflection.BindingFlags]::Instance)) {
         if (-not $prop.CanWrite) { continue }
-        $name = $prop.Name
-        if (-not $lookup.ContainsKey($name)) { continue }
+        if (-not $lookup.ContainsKey($prop.Name)) { continue }
 
-        $val = $lookup[$name]
+        $val = $lookup[$prop.Name]
         try {
             if ($null -ne $val -and $prop.PropertyType -ne [object] -and -not $prop.PropertyType.IsInstanceOfType($val)) {
                 $val = [System.Management.Automation.LanguagePrimitives]::ConvertTo($val, $prop.PropertyType)
             }
             $prop.SetValue($obj, $val)
         } catch {
-            # ignore single property conversion errors (do not fail whole mapping)
+            # ignore property conversion errors
         }
     }
 
@@ -517,22 +576,18 @@ function ConvertTo-BwsTargetType {
 
     if ($TargetType.IsInstanceOfType($Value)) { return $Value }
 
-    # Hashtable
     if ($TargetType -eq [hashtable] -or $TargetType.FullName -eq 'System.Collections.Hashtable') {
         return (ConvertTo-BwsHashtable -InputObject $Value)
     }
 
-    # OrderedDictionary
     if ($TargetType.FullName -eq 'System.Collections.Specialized.OrderedDictionary') {
         return (ConvertTo-BwsOrderedDictionary -InputObject $Value)
     }
 
-    # IDictionary (non-generic)
     if ([System.Collections.IDictionary].IsAssignableFrom($TargetType)) {
         return (ConvertTo-BwsHashtable -InputObject $Value)
     }
 
-    # Generic dictionary types
     if ($TargetType.IsGenericType) {
         $def = $TargetType.GetGenericTypeDefinition().FullName
         if ($def -like 'System.Collections.Generic.Dictionary`2' -or
@@ -542,21 +597,14 @@ function ConvertTo-BwsTargetType {
         }
     }
 
-    # PSCustomObject/PSObject
     if ($TargetType.FullName -in @('System.Management.Automation.PSCustomObject','System.Management.Automation.PSObject')) {
         return [pscustomobject](ConvertTo-BwsHashtable -InputObject $Value)
     }
 
-    # Custom class mapping (this often fixes the remaining "Argument types do not match")
     if ($TargetType.IsClass) {
-        try {
-            return (ConvertTo-BwsCustomObjectType -InputObject $Value -TargetType $TargetType)
-        } catch {
-            # continue to last-resort conversion
-        }
+        try { return (ConvertTo-BwsCustomObjectType -InputObject $Value -TargetType $TargetType) } catch {}
     }
 
-    # Last resort PowerShell conversion
     return [System.Management.Automation.LanguagePrimitives]::ConvertTo($Value, $TargetType)
 }
 
@@ -594,8 +642,8 @@ function Invoke-BwsConditionTest {
     if ($paramInfo.Count -gt 0) {
         for ($i=0; $i -lt $paramInfo.Count; $i++) {
             $n = $paramInfo[$i].Name
-            if ($ctxIdx  -lt 0 -and $n -match '^(Context|Ctx)$')   { $ctxIdx  = $i }
-            if ($condIdx -lt 0 -and $n -match '^(Condition|Cond)$'){ $condIdx = $i }
+            if ($ctxIdx  -lt 0 -and $n -match '^(Context|Ctx)$')    { $ctxIdx  = $i }
+            if ($condIdx -lt 0 -and $n -match '^(Condition|Cond)$') { $condIdx = $i }
         }
     }
     if ($ctxIdx -lt 0 -and $condIdx -lt 0) { $ctxIdx = 0; $condIdx = 1 }
@@ -609,7 +657,6 @@ function Invoke-BwsConditionTest {
     $args = @()
     for ($i=0; $i -lt $argCount; $i++) { $args += $null }
 
-    # Convert to declared parameter types (core fix)
     if ($paramInfo.Count -gt 0 -and $ctxIdx -lt $paramInfo.Count) {
         $args[$ctxIdx] = ConvertTo-BwsTargetType -Value $ContextHash -TargetType $paramInfo[$ctxIdx].Type
     } else {
@@ -622,37 +669,12 @@ function Invoke-BwsConditionTest {
         $args[$condIdx] = $Condition
     }
 
-    # Try positional invoke first (most compatible)
     try {
         return & $Test @args
     } catch {
         $expected = if ($paramInfo.Count -gt 0) {
             ($paramInfo | ForEach-Object { "$($_.Name): $($_.Type.FullName)" }) -join '; '
         } else { '(no param block detected)' }
-
-        # Fallback 1: if the scriptblock has Context/Condition named params, try named binding too
-        try {
-            if ($paramInfo.Count -gt 0) {
-                $hasContext = @($paramInfo | Where-Object { $_.Name -in @('Context','Ctx') }).Count -gt 0
-                $hasCond    = @($paramInfo | Where-Object { $_.Name -in @('Condition','Cond') }).Count -gt 0
-
-                $named = @{}
-                if ($hasContext) {
-                    $ctxName = @($paramInfo | Where-Object { $_.Name -in @('Context','Ctx') } | Select-Object -First 1).Name
-                    $named[$ctxName] = $args[$ctxIdx]
-                }
-                if ($hasCond) {
-                    $condName = @($paramInfo | Where-Object { $_.Name -in @('Condition','Cond') } | Select-Object -First 1).Name
-                    $named[$condName] = $args[$condIdx]
-                }
-                if ($named.Count -gt 0) {
-                    return & $Test @named
-                }
-            }
-        } catch {
-            # ignore fallback errors; throw the enriched message below
-        }
-
         throw "Argument types do not match when invoking condition test. Expected parameters: $expected. Inner error: $($_.Exception.Message)"
     }
 }
@@ -698,6 +720,11 @@ function Invoke-BwsChecks {
     if (-not $NoAuth) {
         if ($needGraph) { $context.GraphContext = Connect-BwsGraph -Scopes $graphScopes -TenantId $TenantId -AuthMode $AuthMode -ClientId $ClientId -CertificateThumbprint $CertificateThumbprint }
         if ($needAzure) { $context.AzContext    = Connect-BwsAzure -AuthMode $AuthMode -TenantId $TenantId -ClientId $ClientId -CertificateThumbprint $CertificateThumbprint }
+        if ($needAD) {
+            if (-not (Get-Command Get-ADDomain -ErrorAction SilentlyContinue)) {
+                Write-BwsLog "ActiveDirectory cmdlets not available. AD checks may fail (RSAT missing?)." "WARN"
+            }
+        }
     } else {
         Write-BwsLog "NoAuth set: expecting you already connected (Connect-MgGraph / Connect-AzAccount)." "WARN"
     }
@@ -734,12 +761,13 @@ function Invoke-BwsChecks {
             $status = 'Error'
             $message = $_.Exception.Message
 
-            # capture script location (line/column) for report
-            $inv = $_.InvocationInfo
-            if ($inv) {
-                $location = "$($inv.ScriptName) (Line $($inv.ScriptLineNumber), Column $($inv.OffsetInLine))"
-                if ($inv.Line) { $evidence = $inv.Line }
+            $loc = Get-BwsLocationFromError -ErrorRecord $_
+            $colText  = if ($loc.Column) { $loc.Column } else { "n/a" }
+            $lineText = if ($loc.Line)   { $loc.Line }   else { "n/a" }
+            if ($loc.ScriptName -or $loc.Line -or $loc.Column) {
+                $location = "$($loc.ScriptName) (Line $lineText, Column $colText)"
             }
+            if ($loc.Code) { $evidence = $loc.Code }
 
             $context.Errors += $_.Exception
         }
@@ -788,31 +816,31 @@ function Convert-BwsResultsToHtml {
     })
 
     $css = @"
-    body { font-family: Segoe UI, Arial, sans-serif; margin: 20px; }
-    h1, h2 { margin-bottom: 6px; }
-    .meta { color: #555; margin-bottom: 18px; }
-    table { border-collapse: collapse; width: 100%; margin: 12px 0 20px 0; }
-    th, td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
-    th { background: #f3f3f3; text-align: left; }
-    .Pass  { background: #e9f7ef; }
-    .Fail  { background: #fff3cd; }
-    .Error { background: #f8d7da; }
-    .badge { display:inline-block; padding:2px 8px; border-radius: 10px; font-size: 12px; background:#eee; margin-right:6px; }
-    .small { font-size: 12px; color:#666; }
-    details summary { cursor: pointer; }
-    pre { white-space: pre-wrap; word-break: break-word; }
+body { font-family: Segoe UI, Arial, sans-serif; margin: 20px; }
+h1, h2 { margin-bottom: 6px; }
+.meta { color: #555; margin-bottom: 18px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0 20px 0; }
+th, td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
+th { background: #f3f3f3; text-align: left; }
+.Pass  { background: #e9f7ef; }
+.Fail  { background: #fff3cd; }
+.Error { background: #f8d7da; }
+.badge { display:inline-block; padding:2px 8px; border-radius: 10px; font-size: 12px; background:#eee; margin-right:6px; }
+.small { font-size: 12px; color:#666; }
+details summary { cursor: pointer; }
+pre { white-space: pre-wrap; word-break: break-word; }
 "@
 
     $metaHtml = @"
-    <div class='meta'>
-      <div><span class='badge'>RunId</span> $($ctx.RunId)</div>
-      <div><span class='badge'>Start</span> $($ctx.StartTime)</div>
-      <div>
-        <span class='badge'>NeedGraph</span> $($ctx.NeedGraph)
-        <span class='badge'>NeedAzure</span> $($ctx.NeedAzure)
-        <span class='badge'>NeedAD</span> $($ctx.NeedAD)
-      </div>
-    </div>
+<div class='meta'>
+  <div><span class='badge'>RunId</span> $($ctx.RunId)</div>
+  <div><span class='badge'>Start</span> $($ctx.StartTime)</div>
+  <div>
+    <span class='badge'>NeedGraph</span> $($ctx.NeedGraph)
+    <span class='badge'>NeedAzure</span> $($ctx.NeedAzure)
+    <span class='badge'>NeedAD</span> $($ctx.NeedAD)
+  </div>
+</div>
 "@
 
     $summaryHtml = ($summary | ConvertTo-Html -Fragment -PreContent "<h2>Summary</h2>")
@@ -900,13 +928,12 @@ function Show-BwsGuiAndRun {
 
     if (-not (Test-IsWindows)) { throw "GUI is only available on Windows." }
 
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
+    Initialize-BwsWinForms
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "BWSCheckScript"
-    $form.Width = 980
-    $form.Height = 640
+    $form.Width = 1100
+    $form.Height = 720
     $form.StartPosition = "CenterScreen"
 
     $lblOut = New-Object System.Windows.Forms.Label
@@ -918,18 +945,22 @@ function Show-BwsGuiAndRun {
     $txtOut = New-Object System.Windows.Forms.TextBox
     $txtOut.Left = 110
     $txtOut.Top = 10
-    $txtOut.Width = 700
+    $txtOut.Width = 760
     $txtOut.Text = $OutputPath
 
     $btnBrowse = New-Object System.Windows.Forms.Button
     $btnBrowse.Text = "..."
-    $btnBrowse.Left = 820
+    $btnBrowse.Left = 880
     $btnBrowse.Top = 9
     $btnBrowse.Width = 40
     $btnBrowse.Add_Click({
-        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-        $dlg.SelectedPath = $txtOut.Text
-        if ($dlg.ShowDialog() -eq "OK") { $txtOut.Text = $dlg.SelectedPath }
+        try {
+            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+            $dlg.SelectedPath = $txtOut.Text
+            if ($dlg.ShowDialog() -eq "OK") { $txtOut.Text = $dlg.SelectedPath }
+        } catch {
+            Show-BwsErrorDialog -ErrorRecord $_ -Title "Browse Error"
+        }
     })
 
     $lblProd = New-Object System.Windows.Forms.Label
@@ -941,8 +972,8 @@ function Show-BwsGuiAndRun {
     $clb = New-Object System.Windows.Forms.CheckedListBox
     $clb.Left = 12
     $clb.Top = 72
-    $clb.Width = 200
-    $clb.Height = 200
+    $clb.Width = 220
+    $clb.Height = 220
 
     $products = @($Conditions | Select-Object -ExpandProperty Product -Unique | Sort-Object)
     foreach ($p in $products) { [void]$clb.Items.Add($p, $true) }
@@ -950,25 +981,42 @@ function Show-BwsGuiAndRun {
     $btnRun = New-Object System.Windows.Forms.Button
     $btnRun.Text = "Run checks"
     $btnRun.Left = 12
-    $btnRun.Top = 285
-    $btnRun.Width = 200
+    $btnRun.Top = 305
+    $btnRun.Width = 220
+
+    $status = New-Object System.Windows.Forms.Label
+    $status.Left = 250
+    $status.Top = 50
+    $status.Width = 820
+    $status.Text = "Ready."
 
     $grid = New-Object System.Windows.Forms.DataGridView
-    $grid.Left = 230
+    $grid.Left = 250
     $grid.Top = 72
-    $grid.Width = 720
-    $grid.Height = 500
+    $grid.Width = 820
+    $grid.Height = 420
     $grid.ReadOnly = $true
     $grid.AutoSizeColumnsMode = "Fill"
 
-    $status = New-Object System.Windows.Forms.Label
-    $status.Left = 230
-    $status.Top = 50
-    $status.Width = 720
-    $status.Text = "Ready."
+    $lblErr = New-Object System.Windows.Forms.Label
+    $lblErr.Left = 12
+    $lblErr.Top = 350
+    $lblErr.Width = 220
+    $lblErr.Text = "Last error (details):"
+
+    $txtErr = New-Object System.Windows.Forms.TextBox
+    $txtErr.Left = 12
+    $txtErr.Top = 372
+    $txtErr.Width = 1058
+    $txtErr.Height = 300
+    $txtErr.Multiline = $true
+    $txtErr.ScrollBars = "Vertical"
+    $txtErr.ReadOnly = $true
 
     $btnRun.Add_Click({
         try {
+            $txtErr.Text = ""
+
             $sel = @()
             for ($i=0; $i -lt $clb.Items.Count; $i++) {
                 if ($clb.GetItemChecked($i)) { $sel += [string]$clb.Items[$i] }
@@ -990,18 +1038,24 @@ function Show-BwsGuiAndRun {
             $status.Text = "Done. Report: $reportFile"
         } catch {
             $details = Format-BwsError -ErrorRecord $_
-            $status.Text = ("ERROR: {0} (Line {1}, Col {2})" -f $_.Exception.Message, $_.InvocationInfo.ScriptLineNumber, $_.InvocationInfo.OffsetInLine)
+            $txtErr.Text = $details
 
-            [System.Windows.Forms.MessageBox]::Show(
-                $details,
-                "BWSCheckScript - Error",
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Error
-            ) | Out-Null
+            $loc = Get-BwsLocationFromError -ErrorRecord $_
+            $colText  = if ($loc.Column) { $loc.Column } else { "n/a" }
+            $lineText = if ($loc.Line)   { $loc.Line }   else { "n/a" }
+            $status.Text = ("ERROR: {0} (Line {1}, Col {2})" -f $_.Exception.Message, $lineText, $colText)
+
+            Show-BwsErrorDialog -ErrorRecord $_ -Title "BWSCheckScript - Run Error"
         }
     })
 
-    $form.Controls.AddRange(@($lblOut,$txtOut,$btnBrowse,$lblProd,$clb,$btnRun,$status,$grid))
+    $form.Controls.AddRange(@(
+        $lblOut,$txtOut,$btnBrowse,
+        $lblProd,$clb,$btnRun,
+        $status,$grid,
+        $lblErr,$txtErr
+    ))
+
     [void]$form.ShowDialog()
 }
 
@@ -1032,8 +1086,10 @@ try {
     Write-BwsLog "Log file: $logFile" "INFO"
 }
 catch {
-    $details = Format-BwsError -ErrorRecord $_
-    Write-BwsLog $details "ERROR"
+    if ($Gui) {
+        Show-BwsErrorDialog -ErrorRecord $_ -Title "BWSCheckScript - Startup Error"
+    }
+    Write-BwsLog (Format-BwsError -ErrorRecord $_) "ERROR"
     throw
 }
 finally {
