@@ -6,8 +6,8 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$BCID = "0000",
     
-    [Parameter(Mandatory=$true)]
-    [string]$ResourceGroupName,
+    [Parameter(Mandatory=$false)]
+    [string]$SubscriptionId,
     
     [Parameter(Mandatory=$false)]
     [switch]$ExportReport
@@ -53,17 +53,40 @@ $bwsMI = "mi-" + $BCID.ToLower() + "-bwsfactory-nch-0"
 
 
 #============================================================================
+# Set Subscription Context
+#============================================================================
+
+if ($SubscriptionId) {
+    Write-Host "Setting subscription context to: $SubscriptionId" -ForegroundColor Yellow
+    try {
+        Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop | Out-Null
+        Write-Host "Subscription context set successfully" -ForegroundColor Green
+    } catch {
+        Write-Host "Error setting subscription context: $($_.Exception.Message)" -ForegroundColor Red
+        return
+    }
+} else {
+    $currentContext = Get-AzContext
+    if ($currentContext) {
+        Write-Host "Using current subscription: $($currentContext.Subscription.Name) ($($currentContext.Subscription.Id))" -ForegroundColor Yellow
+    } else {
+        Write-Host "No subscription context found. Please login with Connect-AzAccount or specify -SubscriptionId" -ForegroundColor Red
+        return
+    }
+}
+
+#============================================================================
 # BWS Base Check
 #============================================================================
 
 Write-Host ""
 Write-Host "======================================================" -ForegroundColor Cyan
 Write-Host "  BWS Base Check - BCID: $BCID" -ForegroundColor Cyan
-Write-Host "  Resource Group: $ResourceGroupName" -ForegroundColor Cyan
+Write-Host "  Searching across entire subscription" -ForegroundColor Cyan
 Write-Host "======================================================" -ForegroundColor Cyan
 Write-Host ""
 
-## Azure Ressourcen-Definition
+## Azure Resource Definition
 $azureResourcesToCheck = @(
     # Storage Accounts
     @{Name = $bwsStorAccFactory; Type = "Microsoft.Storage/storageAccounts"; Category = "Storage Account"; SubCategory = "BWS Factory"},
@@ -105,12 +128,12 @@ $azureResourcesToCheck = @(
     @{Name = $bwsMI; Type = "Microsoft.ManagedIdentity/userAssignedIdentities"; Category = "Managed Identity"; SubCategory = "BWS Factory"}
 )
 
-# Prüfung durchführen
+# Perform Check
 $foundResources = @()
 $missingResources = @()
 $errorResources = @()
 
-Write-Host "Prüfe Azure Ressourcen..." -ForegroundColor Yellow
+Write-Host "Checking Azure Resources across subscription..." -ForegroundColor Yellow
 Write-Host ""
 
 foreach ($resource in $azureResourcesToCheck) {
@@ -119,7 +142,8 @@ foreach ($resource in $azureResourcesToCheck) {
     Write-Host "$($resource.Name)" -NoNewline
     
     try {
-        $azResource = Get-AzResource -ResourceGroupName $ResourceGroupName -Name $resource.Name -ResourceType $resource.Type -ErrorAction SilentlyContinue
+        # Search across entire subscription without specifying ResourceGroupName
+        $azResource = Get-AzResource -Name $resource.Name -ResourceType $resource.Type -ErrorAction SilentlyContinue
         
         if ($azResource) {
             Write-Host " ✓" -ForegroundColor Green
@@ -130,10 +154,11 @@ foreach ($resource in $azureResourcesToCheck) {
                 Type = $resource.Type
                 Status = "Found"
                 Location = $azResource.Location
+                ResourceGroupName = $azResource.ResourceGroupName
                 ResourceId = $azResource.ResourceId
             }
         } else {
-            Write-Host " ✗ FEHLT" -ForegroundColor Red
+            Write-Host " ✗ MISSING" -ForegroundColor Red
             $missingResources += [PSCustomObject]@{
                 Category = $resource.Category
                 SubCategory = $resource.SubCategory
@@ -143,7 +168,7 @@ foreach ($resource in $azureResourcesToCheck) {
             }
         }
     } catch {
-        Write-Host " ⚠ FEHLER" -ForegroundColor Yellow
+        Write-Host " ⚠ ERROR" -ForegroundColor Yellow
         $errorResources += [PSCustomObject]@{
             Category = $resource.Category
             SubCategory = $resource.SubCategory
@@ -157,39 +182,49 @@ foreach ($resource in $azureResourcesToCheck) {
 
 Write-Host ""
 Write-Host "======================================================" -ForegroundColor Cyan
-Write-Host "  ZUSAMMENFASSUNG" -ForegroundColor Cyan
+Write-Host "  SUMMARY" -ForegroundColor Cyan
 Write-Host "======================================================" -ForegroundColor Cyan
-Write-Host "  Gesamt:    $($azureResourcesToCheck.Count) Ressourcen" -ForegroundColor White
-Write-Host "  Gefunden:  $($foundResources.Count)" -ForegroundColor Green
-Write-Host "  Fehlend:   $($missingResources.Count)" -ForegroundColor Red
-Write-Host "  Fehler:    $($errorResources.Count)" -ForegroundColor Yellow
+Write-Host "  Total:     $($azureResourcesToCheck.Count) Resources" -ForegroundColor White
+Write-Host "  Found:     $($foundResources.Count)" -ForegroundColor Green
+Write-Host "  Missing:   $($missingResources.Count)" -ForegroundColor Red
+Write-Host "  Errors:    $($errorResources.Count)" -ForegroundColor Yellow
 Write-Host "======================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Detaillierte Auflistung fehlender Ressourcen
+# Detailed listing of found resources with their resource groups
+if ($foundResources.Count -gt 0) {
+    Write-Host "FOUND RESOURCES:" -ForegroundColor Green
+    Write-Host ""
+    $foundResources | Format-Table Category, SubCategory, Name, ResourceGroupName, Location -AutoSize
+    Write-Host ""
+}
+
+# Detailed listing of missing resources
 if ($missingResources.Count -gt 0) {
-    Write-Host "FEHLENDE RESSOURCEN:" -ForegroundColor Red
+    Write-Host "MISSING RESOURCES:" -ForegroundColor Red
     Write-Host ""
     $missingResources | Format-Table Category, SubCategory, Name -AutoSize
     Write-Host ""
 }
 
-# Detaillierte Auflistung von Fehlern
+# Detailed listing of errors
 if ($errorResources.Count -gt 0) {
-    Write-Host "RESSOURCEN MIT FEHLERN:" -ForegroundColor Yellow
+    Write-Host "RESOURCES WITH ERRORS:" -ForegroundColor Yellow
     Write-Host ""
     $errorResources | Format-Table Category, SubCategory, Name, ErrorMessage -AutoSize
     Write-Host ""
 }
 
 #============================================================================
-# BWS Report erstellen
+# BWS Report Generation
 #============================================================================
 
+$currentContext = Get-AzContext
 $reportData = [PSCustomObject]@{
     Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     BCID = $BCID
-    ResourceGroup = $ResourceGroupName
+    SubscriptionId = $currentContext.Subscription.Id
+    SubscriptionName = $currentContext.Subscription.Name
     TotalResources = $azureResourcesToCheck.Count
     FoundCount = $foundResources.Count
     MissingCount = $missingResources.Count
@@ -200,28 +235,28 @@ $reportData = [PSCustomObject]@{
     ErrorResources = $errorResources
 }
 
-# Optional: Report exportieren
+# Optional: Export report
 if ($ExportReport) {
     $reportPath = "BWS_Check_Report_$BCID_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
     $reportData | ConvertTo-Json -Depth 10 | Out-File -FilePath $reportPath -Encoding UTF8
-    Write-Host "Report exportiert nach: $reportPath" -ForegroundColor Green
+    Write-Host "Report exported to: $reportPath" -ForegroundColor Green
     Write-Host ""
 }
 
-# Rückgabe des Report-Objekts
+# Return report object
 return $reportData
 
 
 #============================================================================
-# M365 Check (Platzhalter für zukünftige Erweiterung)
+# M365 Check (Placeholder for future expansion)
 #============================================================================
 
 ## M365
 ### Intune
-# TODO: Intune-Checks implementieren
+# TODO: Implement Intune checks
 
 #============================================================================
-# BWS TA Check (Platzhalter für zukünftige Erweiterung)
+# BWS TA Check (Placeholder for future expansion)
 #============================================================================
 
-# TODO: TA-Checks implementieren
+# TODO: Implement TA checks
