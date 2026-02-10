@@ -7,7 +7,7 @@
     Autor: PowerShell Script
     Datum: 2026-02-10
     Unterstützt Multi-Faktor-Authentifizierung (MFA)
-    Version: 1.1 - Verbesserte Intune-Kompatibilität
+    Version: 1.2 - Verbindungen werden vor Neuanmeldung geschlossen
 #>
 
 Write-Host "=== Azure, M365 und Intune Anmeldescript (MFA-fähig) ===" -ForegroundColor Cyan
@@ -102,7 +102,71 @@ if (-not $allModulesOk) {
 }
 
 Write-Host ""
-Write-Host "Schritt 2: Interaktive Anmeldung bei Azure, Microsoft 365 und Intune" -ForegroundColor Cyan
+Write-Host "Schritt 2: Schließe bestehende Verbindungen" -ForegroundColor Cyan
+Write-Host ""
+
+# Schließe Azure-Verbindung
+Write-Host "Trenne Azure-Verbindung..." -ForegroundColor Yellow
+try {
+    $azContext = Get-AzContext -ErrorAction SilentlyContinue
+    if ($azContext) {
+        Disconnect-AzAccount -ErrorAction SilentlyContinue | Out-Null
+        Write-Host "  Azure-Verbindung getrennt" -ForegroundColor Green
+    } else {
+        Write-Host "  Keine aktive Azure-Verbindung gefunden" -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "  Info: Azure-Verbindung konnte nicht getrennt werden (möglicherweise keine aktiv)" -ForegroundColor Gray
+}
+
+# Schließe Exchange Online-Verbindung
+Write-Host "Trenne Exchange Online-Verbindung..." -ForegroundColor Yellow
+try {
+    $exoConnection = Get-ConnectionInformation -ErrorAction SilentlyContinue
+    if ($exoConnection) {
+        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+        Write-Host "  Exchange Online-Verbindung getrennt" -ForegroundColor Green
+    } else {
+        Write-Host "  Keine aktive Exchange Online-Verbindung gefunden" -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "  Info: Exchange Online-Verbindung konnte nicht getrennt werden (möglicherweise keine aktiv)" -ForegroundColor Gray
+}
+
+# Schließe Microsoft Graph-Verbindung
+Write-Host "Trenne Microsoft Graph-Verbindung..." -ForegroundColor Yellow
+try {
+    $mgContext = Get-MgContext -ErrorAction SilentlyContinue
+    if ($mgContext) {
+        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+        Write-Host "  Microsoft Graph-Verbindung getrennt" -ForegroundColor Green
+    } else {
+        Write-Host "  Keine aktive Microsoft Graph-Verbindung gefunden" -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "  Info: Microsoft Graph-Verbindung konnte nicht getrennt werden (möglicherweise keine aktiv)" -ForegroundColor Gray
+}
+
+# Schließe Azure AD-Verbindung
+Write-Host "Trenne Azure AD-Verbindung..." -ForegroundColor Yellow
+try {
+    $aadSession = Get-AzureADCurrentSessionInfo -ErrorAction SilentlyContinue
+    if ($aadSession) {
+        Disconnect-AzureAD -ErrorAction SilentlyContinue | Out-Null
+        Write-Host "  Azure AD-Verbindung getrennt" -ForegroundColor Green
+    } else {
+        Write-Host "  Keine aktive Azure AD-Verbindung gefunden" -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "  Info: Azure AD-Verbindung konnte nicht getrennt werden (möglicherweise keine aktiv)" -ForegroundColor Gray
+}
+
+Write-Host ""
+Write-Host "Alle bestehenden Verbindungen wurden geschlossen." -ForegroundColor Green
+Write-Host ""
+Start-Sleep -Seconds 2
+
+Write-Host "Schritt 3: Interaktive Anmeldung bei Azure, Microsoft 365 und Intune" -ForegroundColor Cyan
 Write-Host "Hinweis: Sie werden für jeden Service einzeln zur Anmeldung aufgefordert." -ForegroundColor Yellow
 Write-Host "Bitte nutzen Sie bei der Anmeldung Ihre MFA-Methode (z.B. Authenticator-App)." -ForegroundColor Yellow
 Write-Host ""
