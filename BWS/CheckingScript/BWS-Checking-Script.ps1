@@ -5,10 +5,12 @@
     Checks Azure resources and Intune policies for BWS environments
 .PARAMETER BCID
     Business Continuity ID
+.PARAMETER CustomerName
+    Name of the customer (optional, used in HTML report)
 .PARAMETER SubscriptionId
     Azure Subscription ID (optional)
 .PARAMETER ExportReport
-    Export results to JSON file
+    Export results to HTML file
 .PARAMETER SkipIntune
     Skip Intune policy checks
 .PARAMETER SkipEntraID
@@ -24,17 +26,20 @@
 .PARAMETER GUI
     Launch graphical user interface
 .EXAMPLE
-    .\BWS-Checking-Script.ps1 -BCID "1234"
+    .\BWS-Checking-Script.ps1 -BCID "1234" -CustomerName "Contoso AG"
 .EXAMPLE
-    .\BWS-Checking-Script.ps1 -BCID "1234" -GUI
+    .\BWS-Checking-Script.ps1 -BCID "1234" -CustomerName "Contoso AG" -GUI
 .EXAMPLE
-    .\BWS-Checking-Script.ps1 -BCID "1234" -CompactView -ExportReport
+    .\BWS-Checking-Script.ps1 -BCID "1234" -CustomerName "Contoso AG" -ExportReport
 #>
 
 param(
     [Parameter(Mandatory=$false)]
     [ValidateNotNullOrEmpty()]
     [string]$BCID = "0000",
+    
+    [Parameter(Mandatory=$false)]
+    [string]$CustomerName = "",
     
     [Parameter(Mandatory=$false)]
     [string]$SubscriptionId,
@@ -1165,6 +1170,573 @@ function Test-DefenderForEndpoint {
     }
 }
 
+function Export-HTMLReport {
+    param(
+        [string]$BCID,
+        [string]$CustomerName,
+        [string]$SubscriptionName,
+        [object]$AzureResults,
+        [object]$IntuneResults,
+        [object]$EntraIDResults,
+        [object]$IntuneConnResults,
+        [object]$DefenderResults,
+        [bool]$OverallStatus
+    )
+    
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $reportDate = Get-Date -Format "yyyyMMdd_HHmmss"
+    
+    # Include customer name in filename if provided
+    if ($CustomerName) {
+        $safeCustomerName = $CustomerName -replace '[^\w\s-]', '' -replace '\s+', '_'
+        $reportPath = "BWS_Check_Report_${safeCustomerName}_${BCID}_${reportDate}.html"
+    } else {
+        $reportPath = "BWS_Check_Report_${BCID}_${reportDate}.html"
+    }
+    
+    # Build HTML
+    $html = @"
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BWS Check Report - $(if ($CustomerName) { "$CustomerName - " })BCID $BCID</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .header .meta {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 10px 30px;
+            border-radius: 25px;
+            font-weight: bold;
+            font-size: 1.2em;
+            margin-top: 15px;
+            text-transform: uppercase;
+        }
+        
+        .status-pass {
+            background: #10b981;
+            color: white;
+        }
+        
+        .status-fail {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .toc {
+            background: #f8fafc;
+            padding: 30px;
+            border-bottom: 3px solid #e2e8f0;
+        }
+        
+        .toc h2 {
+            color: #1e293b;
+            margin-bottom: 20px;
+            font-size: 1.8em;
+        }
+        
+        .toc ul {
+            list-style: none;
+        }
+        
+        .toc li {
+            margin: 12px 0;
+        }
+        
+        .toc a {
+            color: #667eea;
+            text-decoration: none;
+            font-size: 1.1em;
+            transition: all 0.3s;
+            display: inline-block;
+        }
+        
+        .toc a:hover {
+            color: #764ba2;
+            transform: translateX(5px);
+        }
+        
+        .content {
+            padding: 30px;
+        }
+        
+        .section {
+            margin-bottom: 40px;
+            padding: 25px;
+            background: #f8fafc;
+            border-radius: 8px;
+            border-left: 5px solid #667eea;
+        }
+        
+        .section h2 {
+            color: #1e293b;
+            margin-bottom: 20px;
+            font-size: 1.8em;
+            display: flex;
+            align-items: center;
+        }
+        
+        .section-icon {
+            width: 40px;
+            height: 40px;
+            margin-right: 15px;
+            background: #667eea;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 1.5em;
+        }
+        
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .summary-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .summary-card h3 {
+            color: #64748b;
+            font-size: 0.9em;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+        
+        .summary-card .value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #1e293b;
+        }
+        
+        .summary-card.success .value {
+            color: #10b981;
+        }
+        
+        .summary-card.warning .value {
+            color: #f59e0b;
+        }
+        
+        .summary-card.error .value {
+            color: #ef4444;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        thead {
+            background: #667eea;
+            color: white;
+        }
+        
+        th {
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+        }
+        
+        td {
+            padding: 12px 15px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        
+        tr:last-child td {
+            border-bottom: none;
+        }
+        
+        tbody tr:hover {
+            background: #f8fafc;
+        }
+        
+        .status-icon {
+            font-size: 1.2em;
+            font-weight: bold;
+        }
+        
+        .status-found {
+            color: #10b981;
+        }
+        
+        .status-missing {
+            color: #ef4444;
+        }
+        
+        .status-error {
+            color: #f59e0b;
+        }
+        
+        .info-list {
+            list-style: none;
+            margin: 15px 0;
+        }
+        
+        .info-list li {
+            padding: 10px;
+            margin: 8px 0;
+            background: white;
+            border-radius: 5px;
+            border-left: 3px solid #667eea;
+        }
+        
+        .footer {
+            background: #1e293b;
+            color: white;
+            text-align: center;
+            padding: 20px;
+            font-size: 0.9em;
+        }
+        
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+            
+            .container {
+                box-shadow: none;
+            }
+            
+            .toc a {
+                color: #000;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🛡️ BWS Check Report</h1>
+"@
+    
+    if ($CustomerName) {
+        $html += @"
+            <div style="font-size: 1.8em; font-weight: bold; margin: 15px 0; text-shadow: 1px 1px 2px rgba(0,0,0,0.2);">
+                $CustomerName
+            </div>
+"@
+    }
+    
+    $html += @"
+            <div class="meta">
+                <strong>BCID:</strong> <span style="font-size: 1.3em; font-weight: bold;">$BCID</span> | 
+                <strong>Datum:</strong> $timestamp | 
+                <strong>Subscription:</strong> $SubscriptionName
+            </div>
+            <div class="status-badge $(if ($OverallStatus) { 'status-pass' } else { 'status-fail' })">
+                $(if ($OverallStatus) { '✓ Passed' } else { '✗ Issues Found' })
+            </div>
+        </div>
+        
+        <div class="toc">
+            <h2>📋 Inhaltsverzeichnis</h2>
+            <ul>
+                <li><a href="#summary">→ Gesamtübersicht</a></li>
+                <li><a href="#azure">→ Azure Resources</a></li>
+                <li><a href="#intune">→ Intune Policies</a></li>
+                <li><a href="#entra">→ Entra ID Connect</a></li>
+                <li><a href="#hybrid">→ Hybrid Azure AD Join</a></li>
+                <li><a href="#defender">→ Defender for Endpoint</a></li>
+            </ul>
+        </div>
+        
+        <div class="content">
+"@
+
+    # Summary Section
+    $html += @"
+            <div class="section" id="summary">
+                <h2><span class="section-icon">📊</span>Gesamtübersicht</h2>
+                <div class="summary-grid">
+"@
+
+    if ($AzureResults) {
+        $azureClass = if ($AzureResults.Missing.Count -eq 0) { "success" } else { "error" }
+        $html += @"
+                    <div class="summary-card $azureClass">
+                        <h3>Azure Resources</h3>
+                        <div class="value">$($AzureResults.Found.Count)/$($AzureResults.Total)</div>
+                        <p>Gefunden</p>
+                    </div>
+"@
+    }
+
+    if ($IntuneResults -and $IntuneResults.CheckPerformed) {
+        $intuneClass = if ($IntuneResults.Missing.Count -eq 0) { "success" } else { "error" }
+        $html += @"
+                    <div class="summary-card $intuneClass">
+                        <h3>Intune Policies</h3>
+                        <div class="value">$($IntuneResults.Found.Count)/$($IntuneResults.Total)</div>
+                        <p>Gefunden</p>
+                    </div>
+"@
+    }
+
+    if ($EntraIDResults -and $EntraIDResults.CheckPerformed) {
+        $entraClass = if ($EntraIDResults.Status.IsRunning) { "success" } else { "error" }
+        $html += @"
+                    <div class="summary-card $entraClass">
+                        <h3>Entra ID Sync</h3>
+                        <div class="value">$(if ($EntraIDResults.Status.IsRunning) { '✓' } else { '✗' })</div>
+                        <p>$(if ($EntraIDResults.Status.IsRunning) { 'Aktiv' } else { 'Inaktiv' })</p>
+                    </div>
+"@
+    }
+
+    if ($DefenderResults -and $DefenderResults.CheckPerformed) {
+        $defenderClass = if ($DefenderResults.Status.ConnectorActive -and $DefenderResults.Status.FilesMissing.Count -eq 0) { "success" } elseif ($DefenderResults.Status.ConnectorActive) { "warning" } else { "error" }
+        $html += @"
+                    <div class="summary-card $defenderClass">
+                        <h3>Defender Status</h3>
+                        <div class="value">$(if ($DefenderResults.Status.ConnectorActive) { '✓' } else { '✗' })</div>
+                        <p>$($DefenderResults.Status.FilesFound.Count)/4 Files</p>
+                    </div>
+"@
+    }
+
+    $html += @"
+                </div>
+            </div>
+"@
+
+    # Azure Resources Section
+    if ($AzureResults) {
+        $html += @"
+            <div class="section" id="azure">
+                <h2><span class="section-icon">☁️</span>Azure Resources</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Resource Type</th>
+                            <th>Resource Name</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"@
+
+        foreach ($resource in $AzureResults.Found) {
+            $html += @"
+                        <tr>
+                            <td><span class="status-icon status-found">✓</span></td>
+                            <td>$($resource.Type)</td>
+                            <td>$($resource.Name)</td>
+                        </tr>
+"@
+        }
+
+        foreach ($resource in $AzureResults.Missing) {
+            $html += @"
+                        <tr>
+                            <td><span class="status-icon status-missing">✗</span></td>
+                            <td>$($resource.Type)</td>
+                            <td>$($resource.Name)</td>
+                        </tr>
+"@
+        }
+
+        $html += @"
+                    </tbody>
+                </table>
+            </div>
+"@
+    }
+
+    # Intune Policies Section
+    if ($IntuneResults -and $IntuneResults.CheckPerformed) {
+        $html += @"
+            <div class="section" id="intune">
+                <h2><span class="section-icon">🔒</span>Intune Policies</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Policy Name</th>
+                            <th>Match Type</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"@
+
+        foreach ($policy in $IntuneResults.Found) {
+            $matchType = if ($policy.MatchType) { $policy.MatchType } else { "Exact" }
+            $html += @"
+                        <tr>
+                            <td><span class="status-icon status-found">✓</span></td>
+                            <td>$($policy.PolicyName)</td>
+                            <td>$matchType</td>
+                        </tr>
+"@
+        }
+
+        foreach ($policy in $IntuneResults.Missing) {
+            $html += @"
+                        <tr>
+                            <td><span class="status-icon status-missing">✗</span></td>
+                            <td>$($policy.PolicyName)</td>
+                            <td>Not Found</td>
+                        </tr>
+"@
+        }
+
+        $html += @"
+                    </tbody>
+                </table>
+            </div>
+"@
+    }
+
+    # Entra ID Connect Section
+    if ($EntraIDResults -and $EntraIDResults.CheckPerformed) {
+        $html += @"
+            <div class="section" id="entra">
+                <h2><span class="section-icon">🔗</span>Entra ID Connect</h2>
+                <ul class="info-list">
+                    <li><strong>Sync Enabled:</strong> $(if ($EntraIDResults.Status.IsInstalled) { '<span class="status-found">✓ Yes</span>' } else { '<span class="status-missing">✗ No</span>' })</li>
+                    <li><strong>Sync Active:</strong> $(if ($EntraIDResults.Status.IsRunning) { '<span class="status-found">✓ Yes</span>' } else { '<span class="status-missing">✗ No</span>' })</li>
+"@
+        if ($EntraIDResults.Status.LastSyncTime) {
+            $html += @"
+                    <li><strong>Last Sync:</strong> $($EntraIDResults.Status.LastSyncTime)</li>
+"@
+        }
+        if ($EntraIDResults.Status.SyncErrors.Count -gt 0) {
+            $html += @"
+                    <li><strong>Errors:</strong> <span class="status-error">$($EntraIDResults.Status.SyncErrors.Count)</span></li>
+"@
+        }
+        $html += @"
+                </ul>
+            </div>
+"@
+    }
+
+    # Hybrid Join Section
+    if ($IntuneConnResults -and $IntuneConnResults.CheckPerformed) {
+        $html += @"
+            <div class="section" id="hybrid">
+                <h2><span class="section-icon">🔐</span>Hybrid Azure AD Join</h2>
+                <ul class="info-list">
+                    <li><strong>Check Performed:</strong> <span class="status-found">✓ Yes</span></li>
+                    <li><strong>Errors:</strong> $(if ($IntuneConnResults.Status.Errors.Count -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($IntuneConnResults.Status.Errors.Count)</span>" })</li>
+                </ul>
+            </div>
+"@
+    }
+
+    # Defender Section
+    if ($DefenderResults -and $DefenderResults.CheckPerformed) {
+        $html += @"
+            <div class="section" id="defender">
+                <h2><span class="section-icon">🛡️</span>Microsoft Defender for Endpoint</h2>
+                <ul class="info-list">
+                    <li><strong>Policies Configured:</strong> $($DefenderResults.Status.ConfiguredPolicies)</li>
+                    <li><strong>Compatible Devices:</strong> $($DefenderResults.Status.OnboardedDevices)</li>
+                    <li><strong>Onboarding Files:</strong> $($DefenderResults.Status.FilesFound.Count)/4</li>
+                    <li><strong>Status:</strong> $(if ($DefenderResults.Status.ConnectorActive) { '<span class="status-found">✓ Active</span>' } else { '<span class="status-missing">✗ Not Configured</span>' })</li>
+                </ul>
+"@
+        
+        if ($DefenderResults.Status.FilesFound.Count -gt 0) {
+            $html += @"
+                <h3>Found Onboarding Files:</h3>
+                <ul class="info-list">
+"@
+            foreach ($file in $DefenderResults.Status.FilesFound) {
+                $html += @"
+                    <li><span class="status-found">✓</span> $file</li>
+"@
+            }
+            $html += "</ul>"
+        }
+        
+        if ($DefenderResults.Status.FilesMissing.Count -gt 0) {
+            $html += @"
+                <h3>Missing Onboarding Files:</h3>
+                <ul class="info-list">
+"@
+            foreach ($file in $DefenderResults.Status.FilesMissing) {
+                $html += @"
+                    <li><span class="status-missing">✗</span> $file</li>
+"@
+            }
+            $html += "</ul>"
+        }
+        
+        $html += "</div>"
+    }
+
+    $html += @"
+        </div>
+        
+        <div class="footer">
+            Generated by BWS Checking Script | $timestamp
+        </div>
+    </div>
+</body>
+</html>
+"@
+
+    # Write HTML file
+    $html | Out-File -FilePath $reportPath -Encoding UTF8
+    
+    return $reportPath
+}
+
 #============================================================================
 # GUI Mode
 #============================================================================
@@ -1193,6 +1765,19 @@ if ($GUI) {
     $textBCID.Text = $BCID
     $form.Controls.Add($textBCID)
     
+    # Customer Name Input
+    $labelCustomer = New-Object System.Windows.Forms.Label
+    $labelCustomer.Location = New-Object System.Drawing.Point(400, 20)
+    $labelCustomer.Size = New-Object System.Drawing.Size(100, 20)
+    $labelCustomer.Text = "Kunde (optional):"
+    $form.Controls.Add($labelCustomer)
+    
+    $textCustomer = New-Object System.Windows.Forms.TextBox
+    $textCustomer.Location = New-Object System.Drawing.Point(510, 18)
+    $textCustomer.Size = New-Object System.Drawing.Size(200, 20)
+    $textCustomer.Text = $CustomerName
+    $form.Controls.Add($textCustomer)
+    
     # Subscription ID Input
     $labelSubID = New-Object System.Windows.Forms.Label
     $labelSubID.Location = New-Object System.Drawing.Point(20, 50)
@@ -1202,7 +1787,7 @@ if ($GUI) {
     
     $textSubID = New-Object System.Windows.Forms.TextBox
     $textSubID.Location = New-Object System.Drawing.Point(170, 48)
-    $textSubID.Size = New-Object System.Drawing.Size(400, 20)
+    $textSubID.Size = New-Object System.Drawing.Size(540, 20)
     $textSubID.Text = $SubscriptionId
     $form.Controls.Add($textSubID)
     
@@ -1265,14 +1850,14 @@ if ($GUI) {
     $chkCompact.Location = New-Object System.Drawing.Point(15, 25)
     $chkCompact.Size = New-Object System.Drawing.Size(250, 20)
     $chkCompact.Text = "Compact View"
-    $chkCompact.Checked = $false
+    $chkCompact.Checked = $true
     $groupBoxOptions.Controls.Add($chkCompact)
     
-    # Show All Policies Checkbox
+    # Verbose Checkbox
     $chkShowAll = New-Object System.Windows.Forms.CheckBox
     $chkShowAll.Location = New-Object System.Drawing.Point(15, 50)
     $chkShowAll.Size = New-Object System.Drawing.Size(250, 20)
-    $chkShowAll.Text = "Show All Policies (Debug)"
+    $chkShowAll.Text = "Verbose"
     $chkShowAll.Checked = $false
     $groupBoxOptions.Controls.Add($chkShowAll)
     
@@ -1280,7 +1865,7 @@ if ($GUI) {
     $chkExport = New-Object System.Windows.Forms.CheckBox
     $chkExport.Location = New-Object System.Drawing.Point(15, 75)
     $chkExport.Size = New-Object System.Drawing.Size(250, 20)
-    $chkExport.Text = "Export Report to JSON"
+    $chkExport.Text = "Export HTML Report"
     $chkExport.Checked = $false
     $groupBoxOptions.Controls.Add($chkExport)
     
@@ -1346,6 +1931,7 @@ if ($GUI) {
         $form.Refresh()
         
         $bcid = $textBCID.Text
+        $customerName = $textCustomer.Text
         $subId = $textSubID.Text
         $runAzure = $chkAzure.Checked
         $runIntune = $chkIntune.Checked
@@ -1531,20 +2117,25 @@ if ($GUI) {
             
             # Export report if requested
             if ($export) {
-                $reportData = @{
-                    Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                    BCID = $bcid
-                    AzureResults = $azureResults
-                    IntuneResults = $intuneResults
-                    EntraIDResults = $entraIDResults
-                    IntuneConnectorResults = $intuneConnResults
-                    DefenderResults = $defenderResults
-                }
-                
-                $reportPath = "BWS_Check_Report_${bcid}_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
-                $reportData | ConvertTo-Json -Depth 10 | Out-File -FilePath $reportPath -Encoding UTF8
                 Write-Host ""
-                Write-Host "Report exported to: $reportPath" -ForegroundColor Green
+                Write-Host "Generating HTML Report..." -ForegroundColor Yellow
+                
+                $currentContext = Get-AzContext
+                $subName = if ($currentContext) { $currentContext.Subscription.Name } else { "Unknown" }
+                
+                $overallStatus = ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Count -eq 0) -and 
+                                 (-not $intuneResults -or ($intuneResults.Missing.Count -eq 0 -and $intuneResults.Errors.Count -eq 0)) -and
+                                 (-not $entraIDResults -or ($entraIDResults.Status.IsRunning)) -and
+                                 (-not $intuneConnResults -or ($intuneConnResults.Status.Errors.Count -eq 0)) -and
+                                 (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0))
+                
+                $reportPath = Export-HTMLReport -BCID $bcid -CustomerName $customerName -SubscriptionName $subName `
+                    -AzureResults $azureResults -IntuneResults $intuneResults `
+                    -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
+                    -DefenderResults $defenderResults -OverallStatus $overallStatus
+                
+                Write-Host "HTML Report exported to: $reportPath" -ForegroundColor Green
+                Write-Host ""
             }
             
             $progressBar.Value = 100
@@ -1569,6 +2160,11 @@ if ($GUI) {
 #============================================================================
 # Command Line Mode
 #============================================================================
+
+# Set CompactView as default if not explicitly overridden
+if (-not $PSBoundParameters.ContainsKey('CompactView')) {
+    $CompactView = $true
+}
 
 # Set Subscription Context
 if ($SubscriptionId) {
@@ -1689,23 +2285,13 @@ Write-Host ""
 
 # Export Report
 if ($ExportReport) {
-    $reportData = @{
-        Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        BCID = $BCID
-        SubscriptionId = $currentContext.Subscription.Id
-        SubscriptionName = $currentContext.Subscription.Name
-        AzureResults = $azureResults
-        IntuneResults = $intuneResults
-        EntraIDResults = $entraIDResults
-        IntuneConnectorResults = $intuneConnResults
-        DefenderResults = $defenderResults
-        OverallStatus = $overallStatus
-    }
+    Write-Host "Generating HTML Report..." -ForegroundColor Yellow
     
-    $reportPath = "BWS_Check_Report_${BCID}_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
-    $reportData | ConvertTo-Json -Depth 10 | Out-File -FilePath $reportPath -Encoding UTF8
-    Write-Host "Report exported to: $reportPath" -ForegroundColor Green
+    $reportPath = Export-HTMLReport -BCID $BCID -CustomerName $CustomerName -SubscriptionName $currentContext.Subscription.Name `
+        -AzureResults $azureResults -IntuneResults $intuneResults `
+        -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
+        -DefenderResults $defenderResults -OverallStatus $overallStatus
+    
+    Write-Host "HTML Report exported to: $reportPath" -ForegroundColor Green
     Write-Host ""
 }
-
-return $reportData
