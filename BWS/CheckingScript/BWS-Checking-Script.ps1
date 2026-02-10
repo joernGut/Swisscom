@@ -60,6 +60,16 @@ param(
     [switch]$SkipDefender,
     
     [Parameter(Mandatory=$false)]
+    [switch]$SkipSoftware,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$SkipSharePoint,
+    
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("HTML", "PDF", "Both")]
+    [string]$ExportFormat = "HTML",
+    
+    [Parameter(Mandatory=$false)]
     [switch]$ShowAllPolicies,
     
     [Parameter(Mandatory=$false)]
@@ -1170,6 +1180,455 @@ function Test-DefenderForEndpoint {
     }
 }
 
+function Test-BWSSoftwarePackages {
+    param(
+        [bool]$CompactView = $false
+    )
+    
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  BWS STANDARD SOFTWARE PACKAGES CHECK" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $softwareStatus = @{
+        Total = 7
+        Found = @()
+        Missing = @()
+        Errors = @()
+    }
+    
+    # Define required BWS software packages
+    $requiredSoftware = @(
+        "7-Zip",
+        "Adobe Reader",
+        "Chocolatey",
+        "Cisco AnyConnect",
+        "beyond Trust Remote support",
+        "Microsoft 365 Apps for Windows 10 and later",
+        "UpdateChocoSoftware"
+    )
+    
+    try {
+        Write-Host "Checking BWS Standard Software Packages..." -ForegroundColor Yellow
+        Write-Host ""
+        
+        # Check if Microsoft Graph is connected
+        $graphContext = Get-MgContext -ErrorAction SilentlyContinue
+        
+        if (-not $graphContext) {
+            Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
+            try {
+                Connect-MgGraph -Scopes "DeviceManagementApps.Read.All" -ErrorAction Stop
+                Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
+            } catch {
+                Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
+                $softwareStatus.Errors += "Graph connection failed"
+                return @{
+                    Status = $softwareStatus
+                    CheckPerformed = $false
+                }
+            }
+        }
+        
+        Write-Host ""
+        
+        # Get all Intune Win32 Apps
+        try {
+            Write-Host "  [Software] Retrieving Win32 Apps from Intune..." -ForegroundColor Gray
+            $win32Apps = Get-MgDeviceAppManagementMobileApp -All -Filter "isof('microsoft.graph.win32LobApp')" -ErrorAction SilentlyContinue
+            Write-Host "  [Software] Found $($win32Apps.Count) Win32 Apps" -ForegroundColor Gray
+        } catch {
+            Write-Host "  [Software] Error retrieving Win32 Apps: $($_.Exception.Message)" -ForegroundColor Yellow
+            $win32Apps = @()
+        }
+        
+        # Get all Microsoft Store Apps
+        try {
+            Write-Host "  [Software] Retrieving Microsoft Store Apps from Intune..." -ForegroundColor Gray
+            $storeApps = Get-MgDeviceAppManagementMobileApp -All -Filter "isof('microsoft.graph.winGetApp')" -ErrorAction SilentlyContinue
+            Write-Host "  [Software] Found $($storeApps.Count) Store Apps" -ForegroundColor Gray
+        } catch {
+            Write-Host "  [Software] Error retrieving Store Apps: $($_.Exception.Message)" -ForegroundColor Yellow
+            $storeApps = @()
+        }
+        
+        # Get Microsoft 365 Apps
+        try {
+            Write-Host "  [Software] Retrieving Microsoft 365 Apps from Intune..." -ForegroundColor Gray
+            # Try with filter first
+            $m365Apps = Get-MgDeviceAppManagementMobileApp -All -Filter "isof('microsoft.graph.officeSuiteApp')" -ErrorAction SilentlyContinue
+            
+            # If filter doesn't work, get all apps and filter manually
+            if (-not $m365Apps -or $m365Apps.Count -eq 0) {
+                $allMobileApps = Get-MgDeviceAppManagementMobileApp -All -ErrorAction SilentlyContinue
+                $m365Apps = $allMobileApps | Where-Object { 
+                    $_.'@odata.type' -eq '#microsoft.graph.officeSuiteApp' -or
+                    $_.DisplayName -like '*Microsoft 365 Apps*' -or
+                    $_.DisplayName -like '*Office 365*'
+                }
+            }
+            
+            Write-Host "  [Software] Found $($m365Apps.Count) Office Suite Apps" -ForegroundColor Gray
+        } catch {
+            Write-Host "  [Software] Error retrieving Microsoft 365 Apps: $($_.Exception.Message)" -ForegroundColor Yellow
+            $m365Apps = @()
+        }
+        
+        Write-Host ""
+        
+        # Combine all apps
+        $allApps = @()
+        if ($win32Apps) { $allApps += $win32Apps }
+        if ($storeApps) { $allApps += $storeApps }
+        if ($m365Apps) { $allApps += $m365Apps }
+        
+        Write-Host "Total apps in Intune: $($allApps.Count)" -ForegroundColor White
+        Write-Host ""
+        
+        # Check each required software
+        foreach ($software in $requiredSoftware) {
+            Write-Host "  [Software] " -NoNewline -ForegroundColor Gray
+            Write-Host "Checking for '$software'..." -NoNewline
+            
+            # Search for the software with improved matching logic
+            # Try exact match first, then partial matches
+            $foundApp = $null
+            
+            # Try 1: Exact match (case-insensitive)
+            $foundApp = $allApps | Where-Object { 
+                $_.DisplayName -eq $software
+            } | Select-Object -First 1
+            
+            # Try 2: Case-insensitive partial match
+            if (-not $foundApp) {
+                $foundApp = $allApps | Where-Object { 
+                    $_.DisplayName -like "*$software*"
+                } | Select-Object -First 1
+            }
+            
+            # Try 3: Split software name and match individual words (for complex names)
+            if (-not $foundApp) {
+                $words = $software -split '\s+'
+                foreach ($word in $words) {
+                    if ($word.Length -gt 3) {  # Only use meaningful words
+                        $foundApp = $allApps | Where-Object { 
+                            $_.DisplayName -like "*$word*"
+                        } | Select-Object -First 1
+                        
+                        if ($foundApp) {
+                            # Verify it's a good match by checking if at least 2 words match
+                            $matchCount = 0
+                            foreach ($w in $words) {
+                                if ($foundApp.DisplayName -like "*$w*") {
+                                    $matchCount++
+                                }
+                            }
+                            if ($matchCount -ge 2 -or $words.Count -eq 1) {
+                                break
+                            } else {
+                                $foundApp = $null
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if ($foundApp) {
+                Write-Host " ✓ FOUND" -ForegroundColor Green
+                $matchType = "Partial"
+                if ($foundApp.DisplayName -eq $software) {
+                    $matchType = "Exact"
+                } elseif ($foundApp.DisplayName -like "*$software*") {
+                    $matchType = "Partial"
+                } else {
+                    $matchType = "Fuzzy"
+                }
+                
+                $softwareStatus.Found += @{
+                    SoftwareName = $software
+                    ActualName = $foundApp.DisplayName
+                    AppId = $foundApp.Id
+                    MatchType = $matchType
+                }
+            } else {
+                Write-Host " ✗ MISSING" -ForegroundColor Red
+                $softwareStatus.Missing += @{
+                    SoftwareName = $software
+                }
+            }
+        }
+        
+    } catch {
+        Write-Host "Error during software package check: $($_.Exception.Message)" -ForegroundColor Red
+        $softwareStatus.Errors += "General error: $($_.Exception.Message)"
+    }
+    
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  BWS SOFTWARE PACKAGES SUMMARY" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  Total Required:  $($softwareStatus.Total)" -ForegroundColor White
+    Write-Host "  Found:           $($softwareStatus.Found.Count)" -ForegroundColor $(if ($softwareStatus.Found.Count -eq $softwareStatus.Total) { "Green" } else { "Yellow" })
+    Write-Host "  Missing:         $($softwareStatus.Missing.Count)" -ForegroundColor $(if ($softwareStatus.Missing.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host "  Errors:          $($softwareStatus.Errors.Count)" -ForegroundColor $(if ($softwareStatus.Errors.Count -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    if (-not $CompactView) {
+        if ($softwareStatus.Found.Count -gt 0) {
+            Write-Host "FOUND SOFTWARE PACKAGES:" -ForegroundColor Green
+            Write-Host ""
+            foreach ($app in $softwareStatus.Found) {
+                Write-Host "  ✓ $($app.SoftwareName)" -ForegroundColor Green
+                Write-Host "    Actual Name: $($app.ActualName)" -ForegroundColor Gray
+                Write-Host "    Match Type:  $($app.MatchType)" -ForegroundColor Gray
+                Write-Host ""
+            }
+        }
+        
+        if ($softwareStatus.Missing.Count -gt 0) {
+            Write-Host "MISSING SOFTWARE PACKAGES:" -ForegroundColor Red
+            Write-Host ""
+            foreach ($app in $softwareStatus.Missing) {
+                Write-Host "  ✗ $($app.SoftwareName)" -ForegroundColor Red
+            }
+            Write-Host ""
+        }
+        
+        if ($softwareStatus.Errors.Count -gt 0) {
+            Write-Host "ERRORS/WARNINGS:" -ForegroundColor Yellow
+            Write-Host ""
+            $softwareStatus.Errors | ForEach-Object {
+                Write-Host "  - $_" -ForegroundColor Yellow
+            }
+            Write-Host ""
+        }
+    }
+    
+    return @{
+        Status = $softwareStatus
+        CheckPerformed = $true
+    }
+}
+
+function Test-SharePointConfiguration {
+    param(
+        [bool]$CompactView = $false
+    )
+    
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  SHAREPOINT CONFIGURATION CHECK" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $spConfig = @{
+        Settings = @{
+            ExternalSharing = $null
+            SiteCreation = $null
+            LegacyAuthBlocked = $null
+        }
+        Compliant = $false
+        Errors = @()
+    }
+    
+    try {
+        Write-Host "Checking SharePoint configuration..." -ForegroundColor Yellow
+        Write-Host ""
+        
+        # Check if PnP PowerShell or SPO Management Shell is available
+        $spoModuleAvailable = $false
+        
+        if (Get-Module -ListAvailable -Name "PnP.PowerShell") {
+            $spoModuleAvailable = $true
+            $moduleType = "PnP.PowerShell"
+        } elseif (Get-Module -ListAvailable -Name "Microsoft.Online.SharePoint.PowerShell") {
+            $spoModuleAvailable = $true
+            $moduleType = "SPO"
+        }
+        
+        if ($spoModuleAvailable) {
+            Write-Host "  [SharePoint] Using $moduleType module" -ForegroundColor Gray
+            Write-Host ""
+            
+            # Note: This requires prior connection to SharePoint Online
+            # Connect-PnPOnline or Connect-SPOService must be called before running this check
+            
+            try {
+                # Check External Sharing Settings
+                Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
+                Write-Host "Checking External Sharing settings..." -NoNewline
+                
+                # Try to get tenant settings
+                if ($moduleType -eq "PnP.PowerShell") {
+                    $tenant = Get-PnPTenant -ErrorAction SilentlyContinue
+                } else {
+                    $tenant = Get-SPOTenant -ErrorAction SilentlyContinue
+                }
+                
+                if ($tenant) {
+                    $sharingCapability = $tenant.SharingCapability
+                    
+                    # SharingCapability values:
+                    # 0 = Disabled (Only people in your organization)
+                    # 1 = ExternalUserSharingOnly (Existing guests)
+                    # 2 = ExternalUserAndGuestSharing (New and existing guests)
+                    # 3 = ExistingExternalUserSharingOnly (Anyone)
+                    
+                    if ($sharingCapability -eq 0 -or $sharingCapability -eq "Disabled") {
+                        Write-Host " ✓ COMPLIANT (Only people in organization)" -ForegroundColor Green
+                        $spConfig.Settings.ExternalSharing = "Disabled"
+                    } else {
+                        Write-Host " ⚠ NON-COMPLIANT (External sharing enabled)" -ForegroundColor Yellow
+                        $spConfig.Settings.ExternalSharing = $sharingCapability.ToString()
+                        $spConfig.Errors += "External sharing should be set to 'Only people in your organization'"
+                    }
+                } else {
+                    Write-Host " ⓘ UNABLE TO CHECK (Not connected)" -ForegroundColor Gray
+                    $spConfig.Errors += "Not connected to SharePoint Online tenant"
+                }
+                
+            } catch {
+                Write-Host " ⚠ ERROR" -ForegroundColor Yellow
+                $spConfig.Errors += "Error checking external sharing: $($_.Exception.Message)"
+            }
+            
+            # Check Site Creation Settings
+            try {
+                Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
+                Write-Host "Checking Site Creation settings..." -NoNewline
+                
+                if ($tenant) {
+                    # Check if users can create sites
+                    # Note: Different properties depending on module version
+                    $canCreateSites = $true
+                    
+                    if ($tenant.PSObject.Properties.Name -contains "UsersCanCreateModernSitePages") {
+                        $canCreateSites = $tenant.UsersCanCreateModernSitePages
+                    } elseif ($tenant.PSObject.Properties.Name -contains "UserSelfServiceEnabled") {
+                        $canCreateSites = $tenant.UserSelfServiceEnabled
+                    }
+                    
+                    if ($canCreateSites) {
+                        Write-Host " ✓ ENABLED (Users can create sites)" -ForegroundColor Green
+                        $spConfig.Settings.SiteCreation = "Enabled"
+                    } else {
+                        Write-Host " ⚠ DISABLED" -ForegroundColor Yellow
+                        $spConfig.Settings.SiteCreation = "Disabled"
+                        $spConfig.Errors += "Site creation should be enabled for users"
+                    }
+                } else {
+                    Write-Host " ⓘ UNABLE TO CHECK" -ForegroundColor Gray
+                }
+                
+            } catch {
+                Write-Host " ⚠ ERROR" -ForegroundColor Yellow
+                $spConfig.Errors += "Error checking site creation: $($_.Exception.Message)"
+            }
+            
+            # Check Legacy Authentication / Apps that don't use modern auth
+            try {
+                Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
+                Write-Host "Checking Legacy Authentication blocking..." -NoNewline
+                
+                if ($tenant) {
+                    # Check if legacy auth is blocked
+                    $legacyAuthBlocked = $false
+                    
+                    if ($tenant.PSObject.Properties.Name -contains "LegacyAuthProtocolsEnabled") {
+                        $legacyAuthBlocked = -not $tenant.LegacyAuthProtocolsEnabled
+                    } elseif ($tenant.PSObject.Properties.Name -contains "BlockAccessFromUnmanagedDevices") {
+                        # Alternative check
+                        $legacyAuthBlocked = $tenant.BlockAccessFromUnmanagedDevices
+                    }
+                    
+                    if ($legacyAuthBlocked) {
+                        Write-Host " ✓ BLOCKED (Legacy auth disabled)" -ForegroundColor Green
+                        $spConfig.Settings.LegacyAuthBlocked = $true
+                    } else {
+                        Write-Host " ⚠ NOT BLOCKED" -ForegroundColor Yellow
+                        $spConfig.Settings.LegacyAuthBlocked = $false
+                        $spConfig.Errors += "Apps that don't use modern authentication should be blocked"
+                    }
+                } else {
+                    Write-Host " ⓘ UNABLE TO CHECK" -ForegroundColor Gray
+                }
+                
+            } catch {
+                Write-Host " ⚠ ERROR" -ForegroundColor Yellow
+                $spConfig.Errors += "Error checking legacy auth: $($_.Exception.Message)"
+            }
+            
+        } else {
+            Write-Host "  ⚠ SharePoint PowerShell module not found" -ForegroundColor Yellow
+            Write-Host "  Install with: Install-Module -Name PnP.PowerShell" -ForegroundColor Gray
+            $spConfig.Errors += "SharePoint PowerShell module not installed"
+        }
+        
+        # Determine overall compliance
+        $spConfig.Compliant = ($spConfig.Settings.ExternalSharing -eq "Disabled") -and
+                              ($spConfig.Settings.SiteCreation -eq "Enabled") -and
+                              ($spConfig.Settings.LegacyAuthBlocked -eq $true) -and
+                              ($spConfig.Errors.Count -eq 0)
+        
+    } catch {
+        Write-Host "Error during SharePoint configuration check: $($_.Exception.Message)" -ForegroundColor Red
+        $spConfig.Errors += "General error: $($_.Exception.Message)"
+    }
+    
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  SHAREPOINT CONFIGURATION SUMMARY" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  External Sharing:    " -NoNewline -ForegroundColor White
+    if ($spConfig.Settings.ExternalSharing -eq "Disabled") {
+        Write-Host "Only Organization (✓)" -ForegroundColor Green
+    } elseif ($spConfig.Settings.ExternalSharing) {
+        Write-Host "$($spConfig.Settings.ExternalSharing) (✗)" -ForegroundColor Yellow
+    } else {
+        Write-Host "Not Checked" -ForegroundColor Gray
+    }
+    
+    Write-Host "  Site Creation:       " -NoNewline -ForegroundColor White
+    if ($spConfig.Settings.SiteCreation -eq "Enabled") {
+        Write-Host "Enabled (✓)" -ForegroundColor Green
+    } elseif ($spConfig.Settings.SiteCreation) {
+        Write-Host "$($spConfig.Settings.SiteCreation) (✗)" -ForegroundColor Yellow
+    } else {
+        Write-Host "Not Checked" -ForegroundColor Gray
+    }
+    
+    Write-Host "  Legacy Auth Blocked: " -NoNewline -ForegroundColor White
+    if ($spConfig.Settings.LegacyAuthBlocked -eq $true) {
+        Write-Host "Yes (✓)" -ForegroundColor Green
+    } elseif ($spConfig.Settings.LegacyAuthBlocked -eq $false) {
+        Write-Host "No (✗)" -ForegroundColor Yellow
+    } else {
+        Write-Host "Not Checked" -ForegroundColor Gray
+    }
+    
+    Write-Host "  Overall Compliance:  " -NoNewline -ForegroundColor White
+    Write-Host $(if ($spConfig.Compliant) { "✓ COMPLIANT" } else { "✗ NON-COMPLIANT" }) -ForegroundColor $(if ($spConfig.Compliant) { "Green" } else { "Yellow" })
+    Write-Host "  Errors/Warnings:     $($spConfig.Errors.Count)" -ForegroundColor $(if ($spConfig.Errors.Count -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    if (-not $CompactView -and $spConfig.Errors.Count -gt 0) {
+        Write-Host "CONFIGURATION ISSUES:" -ForegroundColor Yellow
+        Write-Host ""
+        $spConfig.Errors | ForEach-Object {
+            Write-Host "  - $_" -ForegroundColor Yellow
+        }
+        Write-Host ""
+    }
+    
+    return @{
+        Status = $spConfig
+        CheckPerformed = $true
+    }
+}
+
 function Export-HTMLReport {
     param(
         [string]$BCID,
@@ -1180,6 +1639,8 @@ function Export-HTMLReport {
         [object]$EntraIDResults,
         [object]$IntuneConnResults,
         [object]$DefenderResults,
+        [object]$SoftwareResults,
+        [object]$SharePointResults,
         [bool]$OverallStatus
     )
     
@@ -1197,7 +1658,7 @@ function Export-HTMLReport {
     # Build HTML
     $html = @"
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1211,7 +1672,7 @@ function Export-HTMLReport {
         
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #0082C9 0%, #001155 100%);
             padding: 20px;
             color: #333;
         }
@@ -1226,7 +1687,7 @@ function Export-HTMLReport {
         }
         
         .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #0082C9 0%, #001155 100%);
             color: white;
             padding: 30px;
             text-align: center;
@@ -1284,7 +1745,7 @@ function Export-HTMLReport {
         }
         
         .toc a {
-            color: #667eea;
+            color: #0082C9;
             text-decoration: none;
             font-size: 1.1em;
             transition: all 0.3s;
@@ -1292,7 +1753,7 @@ function Export-HTMLReport {
         }
         
         .toc a:hover {
-            color: #764ba2;
+            color: #001155;
             transform: translateX(5px);
         }
         
@@ -1305,7 +1766,7 @@ function Export-HTMLReport {
             padding: 25px;
             background: #f8fafc;
             border-radius: 8px;
-            border-left: 5px solid #667eea;
+            border-left: 5px solid #0082C9;
         }
         
         .section h2 {
@@ -1320,7 +1781,7 @@ function Export-HTMLReport {
             width: 40px;
             height: 40px;
             margin-right: 15px;
-            background: #667eea;
+            background: #0082C9;
             border-radius: 8px;
             display: flex;
             align-items: center;
@@ -1380,7 +1841,7 @@ function Export-HTMLReport {
         }
         
         thead {
-            background: #667eea;
+            background: #0082C9;
             color: white;
         }
         
@@ -1430,7 +1891,7 @@ function Export-HTMLReport {
             margin: 8px 0;
             background: white;
             border-radius: 5px;
-            border-left: 3px solid #667eea;
+            border-left: 3px solid #0082C9;
         }
         
         .footer {
@@ -1474,7 +1935,7 @@ function Export-HTMLReport {
     $html += @"
             <div class="meta">
                 <strong>BCID:</strong> <span style="font-size: 1.3em; font-weight: bold;">$BCID</span> | 
-                <strong>Datum:</strong> $timestamp | 
+                <strong>Date:</strong> $timestamp | 
                 <strong>Subscription:</strong> $SubscriptionName
             </div>
             <div class="status-badge $(if ($OverallStatus) { 'status-pass' } else { 'status-fail' })">
@@ -1483,11 +1944,13 @@ function Export-HTMLReport {
         </div>
         
         <div class="toc">
-            <h2>📋 Inhaltsverzeichnis</h2>
+            <h2>📋 Table of Contents</h2>
             <ul>
-                <li><a href="#summary">→ Gesamtübersicht</a></li>
+                <li><a href="#summary">→ Executive Summary</a></li>
                 <li><a href="#azure">→ Azure Resources</a></li>
                 <li><a href="#intune">→ Intune Policies</a></li>
+                <li><a href="#software">→ BWS Software Packages</a></li>
+                <li><a href="#sharepoint">→ SharePoint Configuration</a></li>
                 <li><a href="#entra">→ Entra ID Connect</a></li>
                 <li><a href="#hybrid">→ Hybrid Azure AD Join</a></li>
                 <li><a href="#defender">→ Defender for Endpoint</a></li>
@@ -1500,7 +1963,7 @@ function Export-HTMLReport {
     # Summary Section
     $html += @"
             <div class="section" id="summary">
-                <h2><span class="section-icon">📊</span>Gesamtübersicht</h2>
+                <h2><span class="section-icon">📊</span>Executive Summary</h2>
                 <div class="summary-grid">
 "@
 
@@ -1510,7 +1973,7 @@ function Export-HTMLReport {
                     <div class="summary-card $azureClass">
                         <h3>Azure Resources</h3>
                         <div class="value">$($AzureResults.Found.Count)/$($AzureResults.Total)</div>
-                        <p>Gefunden</p>
+                        <p>Found</p>
                     </div>
 "@
     }
@@ -1521,7 +1984,7 @@ function Export-HTMLReport {
                     <div class="summary-card $intuneClass">
                         <h3>Intune Policies</h3>
                         <div class="value">$($IntuneResults.Found.Count)/$($IntuneResults.Total)</div>
-                        <p>Gefunden</p>
+                        <p>Found</p>
                     </div>
 "@
     }
@@ -1532,7 +1995,7 @@ function Export-HTMLReport {
                     <div class="summary-card $entraClass">
                         <h3>Entra ID Sync</h3>
                         <div class="value">$(if ($EntraIDResults.Status.IsRunning) { '✓' } else { '✗' })</div>
-                        <p>$(if ($EntraIDResults.Status.IsRunning) { 'Aktiv' } else { 'Inaktiv' })</p>
+                        <p>$(if ($EntraIDResults.Status.IsRunning) { 'Active' } else { 'Inactive' })</p>
                     </div>
 "@
     }
@@ -1544,6 +2007,17 @@ function Export-HTMLReport {
                         <h3>Defender Status</h3>
                         <div class="value">$(if ($DefenderResults.Status.ConnectorActive) { '✓' } else { '✗' })</div>
                         <p>$($DefenderResults.Status.FilesFound.Count)/4 Files</p>
+                    </div>
+"@
+    }
+
+    if ($SoftwareResults -and $SoftwareResults.CheckPerformed) {
+        $softwareClass = if ($SoftwareResults.Status.Missing.Count -eq 0) { "success" } else { "error" }
+        $html += @"
+                    <div class="summary-card $softwareClass">
+                        <h3>BWS Software</h3>
+                        <div class="value">$($SoftwareResults.Status.Found.Count)/$($SoftwareResults.Status.Total)</div>
+                        <p>Packages</p>
                     </div>
 "@
     }
@@ -1629,6 +2103,52 @@ function Export-HTMLReport {
                             <td><span class="status-icon status-missing">✗</span></td>
                             <td>$($policy.PolicyName)</td>
                             <td>Not Found</td>
+                        </tr>
+"@
+        }
+
+        $html += @"
+                    </tbody>
+                </table>
+            </div>
+"@
+    }
+
+    # BWS Software Packages Section
+    if ($SoftwareResults -and $SoftwareResults.CheckPerformed) {
+        $html += @"
+            <div class="section" id="software">
+                <h2><span class="section-icon">📦</span>BWS Standard Software Packages</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Required Software</th>
+                            <th>Actual Name</th>
+                            <th>Match Type</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"@
+
+        foreach ($app in $SoftwareResults.Status.Found) {
+            $html += @"
+                        <tr>
+                            <td><span class="status-icon status-found">✓</span></td>
+                            <td>$($app.SoftwareName)</td>
+                            <td>$($app.ActualName)</td>
+                            <td>$($app.MatchType)</td>
+                        </tr>
+"@
+        }
+
+        foreach ($app in $SoftwareResults.Status.Missing) {
+            $html += @"
+                        <tr>
+                            <td><span class="status-icon status-missing">✗</span></td>
+                            <td>$($app.SoftwareName)</td>
+                            <td>Not Found</td>
+                            <td>-</td>
                         </tr>
 "@
         }
@@ -1794,7 +2314,7 @@ if ($GUI) {
     # GroupBox for Check Selection
     $groupBoxChecks = New-Object System.Windows.Forms.GroupBox
     $groupBoxChecks.Location = New-Object System.Drawing.Point(20, 85)
-    $groupBoxChecks.Size = New-Object System.Drawing.Size(300, 175)
+    $groupBoxChecks.Size = New-Object System.Drawing.Size(300, 200)
     $groupBoxChecks.Text = "Select Checks to Run"
     $form.Controls.Add($groupBoxChecks)
     
@@ -1838,10 +2358,18 @@ if ($GUI) {
     $chkDefender.Checked = $true
     $groupBoxChecks.Controls.Add($chkDefender)
     
+    # Software Packages Check Checkbox
+    $chkSoftware = New-Object System.Windows.Forms.CheckBox
+    $chkSoftware.Location = New-Object System.Drawing.Point(15, 150)
+    $chkSoftware.Size = New-Object System.Drawing.Size(280, 20)
+    $chkSoftware.Text = "BWS Software Packages Check"
+    $chkSoftware.Checked = $true
+    $groupBoxChecks.Controls.Add($chkSoftware)
+    
     # Options GroupBox
     $groupBoxOptions = New-Object System.Windows.Forms.GroupBox
     $groupBoxOptions.Location = New-Object System.Drawing.Point(340, 85)
-    $groupBoxOptions.Size = New-Object System.Drawing.Size(300, 175)
+    $groupBoxOptions.Size = New-Object System.Drawing.Size(300, 200)
     $groupBoxOptions.Text = "Options"
     $form.Controls.Add($groupBoxOptions)
     
@@ -1880,14 +2408,14 @@ if ($GUI) {
     
     # Clear Button
     $btnClear = New-Object System.Windows.Forms.Button
-    $btnClear.Location = New-Object System.Drawing.Point(660, 155)
+    $btnClear.Location = New-Object System.Drawing.Point(660, 180)
     $btnClear.Size = New-Object System.Drawing.Size(150, 30)
     $btnClear.Text = "Clear Output"
     $form.Controls.Add($btnClear)
     
     # Status Label
     $labelStatus = New-Object System.Windows.Forms.Label
-    $labelStatus.Location = New-Object System.Drawing.Point(20, 270)
+    $labelStatus.Location = New-Object System.Drawing.Point(20, 295)
     $labelStatus.Size = New-Object System.Drawing.Size(800, 20)
     $labelStatus.Text = "Ready - Please select checks and click 'Run Check'"
     $labelStatus.ForeColor = [System.Drawing.Color]::Blue
@@ -1895,15 +2423,15 @@ if ($GUI) {
     
     # Progress Bar
     $progressBar = New-Object System.Windows.Forms.ProgressBar
-    $progressBar.Location = New-Object System.Drawing.Point(20, 295)
+    $progressBar.Location = New-Object System.Drawing.Point(20, 320)
     $progressBar.Size = New-Object System.Drawing.Size(950, 20)
     $progressBar.Style = "Continuous"
     $form.Controls.Add($progressBar)
     
     # Output TextBox
     $textOutput = New-Object System.Windows.Forms.TextBox
-    $textOutput.Location = New-Object System.Drawing.Point(20, 325)
-    $textOutput.Size = New-Object System.Drawing.Size(950, 365)
+    $textOutput.Location = New-Object System.Drawing.Point(20, 350)
+    $textOutput.Size = New-Object System.Drawing.Size(950, 340)
     $textOutput.Multiline = $true
     $textOutput.ScrollBars = "Both"
     $textOutput.Font = New-Object System.Drawing.Font("Consolas", 9)
@@ -1938,6 +2466,7 @@ if ($GUI) {
         $runEntraID = $chkEntraID.Checked
         $runIntuneConn = $chkIntuneConn.Checked
         $runDefender = $chkDefender.Checked
+        $runSoftware = $chkSoftware.Checked
         $compact = $chkCompact.Checked
         $showAll = $chkShowAll.Checked
         $export = $chkExport.Checked
@@ -1999,8 +2528,9 @@ if ($GUI) {
             $entraIDResults = $null
             $intuneConnResults = $null
             $defenderResults = $null
+            $softwareResults = $null
             
-            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int])
+            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int])
             $currentCheck = 0
             $progressIncrement = if ($totalChecks -gt 0) { 80 / $totalChecks } else { 0 }
             
@@ -2059,6 +2589,17 @@ if ($GUI) {
                 $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
             }
             
+            # Run BWS Software Packages Check
+            if ($runSoftware) {
+                $labelStatus.Text = "Running BWS Software Packages Check..."
+                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $form.Refresh()
+                
+                $softwareResults = Test-BWSSoftwarePackages -CompactView $compact
+                $currentCheck++
+                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+            }
+            
             # Overall Summary
             Write-Host ""
             Write-Host "======================================================" -ForegroundColor Cyan
@@ -2108,6 +2649,14 @@ if ($GUI) {
                 Write-Host $(if ($defenderResults.Status.ConnectorActive) { "Active" } else { "Not Configured" }) -ForegroundColor $(if ($defenderResults.Status.ConnectorActive) { "Green" } else { "Yellow" })
             }
             
+            if ($runSoftware -and $softwareResults -and $softwareResults.CheckPerformed) {
+                Write-Host ""
+                Write-Host "  BWS Software Packages:" -ForegroundColor White
+                Write-Host "    Total:        $($softwareResults.Status.Total)" -ForegroundColor White
+                Write-Host "    Found:        $($softwareResults.Status.Found.Count)" -ForegroundColor $(if ($softwareResults.Status.Found.Count -eq $softwareResults.Status.Total) { "Green" } else { "Yellow" })
+                Write-Host "    Missing:      $($softwareResults.Status.Missing.Count)" -ForegroundColor $(if ($softwareResults.Status.Missing.Count -eq 0) { "Green" } else { "Red" })
+            }
+            
             Write-Host "======================================================" -ForegroundColor Cyan
             
             if ($compact) {
@@ -2127,12 +2676,13 @@ if ($GUI) {
                                  (-not $intuneResults -or ($intuneResults.Missing.Count -eq 0 -and $intuneResults.Errors.Count -eq 0)) -and
                                  (-not $entraIDResults -or ($entraIDResults.Status.IsRunning)) -and
                                  (-not $intuneConnResults -or ($intuneConnResults.Status.Errors.Count -eq 0)) -and
-                                 (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0))
+                                 (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0)) -and
+                                 (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0))
                 
                 $reportPath = Export-HTMLReport -BCID $bcid -CustomerName $customerName -SubscriptionName $subName `
                     -AzureResults $azureResults -IntuneResults $intuneResults `
                     -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
-                    -DefenderResults $defenderResults -OverallStatus $overallStatus
+                    -DefenderResults $defenderResults -SoftwareResults $softwareResults -OverallStatus $overallStatus
                 
                 Write-Host "HTML Report exported to: $reportPath" -ForegroundColor Green
                 Write-Host ""
@@ -2213,6 +2763,12 @@ if (-not $SkipDefender) {
     $defenderResults = Test-DefenderForEndpoint -BCID $BCID -CompactView $CompactView
 }
 
+# Run BWS Software Packages Check
+$softwareResults = $null
+if (-not $SkipSoftware) {
+    $softwareResults = Test-BWSSoftwarePackages -CompactView $CompactView
+}
+
 # Overall Summary
 $currentContext = Get-AzContext
 Write-Host ""
@@ -2261,12 +2817,21 @@ if ($defenderResults -and $defenderResults.CheckPerformed) {
     Write-Host $(if ($defenderResults.Status.ConnectorActive) { "Active" } else { "Not Configured" }) -ForegroundColor $(if ($defenderResults.Status.ConnectorActive) { "Green" } else { "Yellow" })
 }
 
+if ($softwareResults -and $softwareResults.CheckPerformed) {
+    Write-Host ""
+    Write-Host "  BWS Software Packages:" -ForegroundColor White
+    Write-Host "    Total:        $($softwareResults.Status.Total)" -ForegroundColor White
+    Write-Host "    Found:        $($softwareResults.Status.Found.Count)" -ForegroundColor $(if ($softwareResults.Status.Found.Count -eq $softwareResults.Status.Total) { "Green" } else { "Yellow" })
+    Write-Host "    Missing:      $($softwareResults.Status.Missing.Count)" -ForegroundColor $(if ($softwareResults.Status.Missing.Count -eq 0) { "Green" } else { "Red" })
+}
+
 Write-Host ""
 $overallStatus = ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Count -eq 0) -and 
                  (-not $intuneResults -or ($intuneResults.Missing.Count -eq 0 -and $intuneResults.Errors.Count -eq 0)) -and
                  (-not $entraIDResults -or ($entraIDResults.Status.IsRunning)) -and
                  (-not $intuneConnResults -or ($intuneConnResults.Status.Errors.Count -eq 0)) -and
-                 (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0))
+                 (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0)) -and
+                 (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0))
 
 Write-Host "  Overall Status: " -NoNewline -ForegroundColor White
 if ($overallStatus) {
@@ -2290,7 +2855,7 @@ if ($ExportReport) {
     $reportPath = Export-HTMLReport -BCID $BCID -CustomerName $CustomerName -SubscriptionName $currentContext.Subscription.Name `
         -AzureResults $azureResults -IntuneResults $intuneResults `
         -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
-        -DefenderResults $defenderResults -OverallStatus $overallStatus
+        -DefenderResults $defenderResults -SoftwareResults $softwareResults -OverallStatus $overallStatus
     
     Write-Host "HTML Report exported to: $reportPath" -ForegroundColor Green
     Write-Host ""
