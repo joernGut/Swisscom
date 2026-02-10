@@ -1,16 +1,17 @@
 <#
 .SYNOPSIS
-    Azure, Microsoft 365 und Intune Anmeldescript mit MFA-Unterstützung
+    Azure, Microsoft 365, Intune und SharePoint Online Anmeldescript mit MFA-Unterstützung
 .DESCRIPTION
-    Installiert benötigte Module (falls nicht vorhanden) und meldet sich interaktiv bei Azure, Microsoft 365 und Intune an
+    Installiert benötigte Module (falls nicht vorhanden) und meldet sich interaktiv bei 
+    Azure, Microsoft 365, Intune und SharePoint Online an
 .NOTES
-    Autor: PowerShell Script
+    Autor: BWS PowerShell Script
     Datum: 2026-02-10
     Unterstützt Multi-Faktor-Authentifizierung (MFA)
-    Version: 1.2 - Verbindungen werden vor Neuanmeldung geschlossen
+    Version: 2.0 - SharePoint Online Support hinzugefügt
 #>
 
-Write-Host "=== Azure, M365 und Intune Anmeldescript (MFA-fähig) ===" -ForegroundColor Cyan
+Write-Host "=== Azure, M365, Intune und SharePoint Online Anmeldescript ===" -ForegroundColor Cyan
 Write-Host ""
 
 # Funktion zum Prüfen und Installieren von Modulen
@@ -58,12 +59,13 @@ $requiredModules = @(
     "Microsoft.Graph.Users",                # Microsoft Graph Users
     "Microsoft.Graph.Groups",               # Microsoft Graph Groups
     "Microsoft.Graph.DeviceManagement",     # Intune Device Management
-    "AzureAD"                               # Azure AD
+    "AzureAD",                              # Azure AD
+    "PnP.PowerShell"                        # SharePoint Online (PnP - Modern)
 )
 
-# Optionale Beta-Module
-$optionalModules = @(
-    "Microsoft.Graph.Beta.DeviceManagement" # Beta-Features für Intune (optional)
+# Alternative SharePoint Module
+$alternativeModules = @(
+    "Microsoft.Online.SharePoint.PowerShell"  # SharePoint Online (Legacy)
 )
 
 $allModulesOk = $true
@@ -75,21 +77,23 @@ foreach ($module in $requiredModules) {
     Write-Host ""
 }
 
-# Versuche optionale Module zu installieren
-Write-Host "Installiere optionale Module..." -ForegroundColor Cyan
-foreach ($module in $optionalModules) {
-    Write-Host "Prüfe optionales Modul: $module..." -ForegroundColor Yellow
-    try {
-        if (-not (Get-Module -ListAvailable -Name $module)) {
-            Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
-            Write-Host "  Optionales Modul '$module' installiert." -ForegroundColor Green
-        } else {
-            Write-Host "  Optionales Modul '$module' bereits vorhanden." -ForegroundColor Green
+# Versuche alternative SharePoint Module wenn PnP.PowerShell fehlschlägt
+if (-not (Get-Module -ListAvailable -Name "PnP.PowerShell")) {
+    Write-Host "PnP.PowerShell nicht verfügbar, versuche alternative SharePoint Module..." -ForegroundColor Yellow
+    foreach ($module in $alternativeModules) {
+        Write-Host "Prüfe alternatives Modul: $module..." -ForegroundColor Yellow
+        try {
+            if (-not (Get-Module -ListAvailable -Name $module)) {
+                Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
+                Write-Host "  Alternatives Modul '$module' installiert." -ForegroundColor Green
+            } else {
+                Write-Host "  Alternatives Modul '$module' bereits vorhanden." -ForegroundColor Green
+            }
+        } catch {
+            Write-Host "  Info: Alternatives Modul '$module' nicht verfügbar" -ForegroundColor Yellow
         }
-    } catch {
-        Write-Host "  Info: Optionales Modul '$module' nicht verfügbar (nicht kritisch)" -ForegroundColor Yellow
+        Write-Host ""
     }
-    Write-Host ""
 }
 
 if (-not $allModulesOk) {
@@ -102,71 +106,7 @@ if (-not $allModulesOk) {
 }
 
 Write-Host ""
-Write-Host "Schritt 2: Schließe bestehende Verbindungen" -ForegroundColor Cyan
-Write-Host ""
-
-# Schließe Azure-Verbindung
-Write-Host "Trenne Azure-Verbindung..." -ForegroundColor Yellow
-try {
-    $azContext = Get-AzContext -ErrorAction SilentlyContinue
-    if ($azContext) {
-        Disconnect-AzAccount -ErrorAction SilentlyContinue | Out-Null
-        Write-Host "  Azure-Verbindung getrennt" -ForegroundColor Green
-    } else {
-        Write-Host "  Keine aktive Azure-Verbindung gefunden" -ForegroundColor Gray
-    }
-} catch {
-    Write-Host "  Info: Azure-Verbindung konnte nicht getrennt werden (möglicherweise keine aktiv)" -ForegroundColor Gray
-}
-
-# Schließe Exchange Online-Verbindung
-Write-Host "Trenne Exchange Online-Verbindung..." -ForegroundColor Yellow
-try {
-    $exoConnection = Get-ConnectionInformation -ErrorAction SilentlyContinue
-    if ($exoConnection) {
-        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-        Write-Host "  Exchange Online-Verbindung getrennt" -ForegroundColor Green
-    } else {
-        Write-Host "  Keine aktive Exchange Online-Verbindung gefunden" -ForegroundColor Gray
-    }
-} catch {
-    Write-Host "  Info: Exchange Online-Verbindung konnte nicht getrennt werden (möglicherweise keine aktiv)" -ForegroundColor Gray
-}
-
-# Schließe Microsoft Graph-Verbindung
-Write-Host "Trenne Microsoft Graph-Verbindung..." -ForegroundColor Yellow
-try {
-    $mgContext = Get-MgContext -ErrorAction SilentlyContinue
-    if ($mgContext) {
-        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
-        Write-Host "  Microsoft Graph-Verbindung getrennt" -ForegroundColor Green
-    } else {
-        Write-Host "  Keine aktive Microsoft Graph-Verbindung gefunden" -ForegroundColor Gray
-    }
-} catch {
-    Write-Host "  Info: Microsoft Graph-Verbindung konnte nicht getrennt werden (möglicherweise keine aktiv)" -ForegroundColor Gray
-}
-
-# Schließe Azure AD-Verbindung
-Write-Host "Trenne Azure AD-Verbindung..." -ForegroundColor Yellow
-try {
-    $aadSession = Get-AzureADCurrentSessionInfo -ErrorAction SilentlyContinue
-    if ($aadSession) {
-        Disconnect-AzureAD -ErrorAction SilentlyContinue | Out-Null
-        Write-Host "  Azure AD-Verbindung getrennt" -ForegroundColor Green
-    } else {
-        Write-Host "  Keine aktive Azure AD-Verbindung gefunden" -ForegroundColor Gray
-    }
-} catch {
-    Write-Host "  Info: Azure AD-Verbindung konnte nicht getrennt werden (möglicherweise keine aktiv)" -ForegroundColor Gray
-}
-
-Write-Host ""
-Write-Host "Alle bestehenden Verbindungen wurden geschlossen." -ForegroundColor Green
-Write-Host ""
-Start-Sleep -Seconds 2
-
-Write-Host "Schritt 3: Interaktive Anmeldung bei Azure, Microsoft 365 und Intune" -ForegroundColor Cyan
+Write-Host "Schritt 2: Interaktive Anmeldung bei Azure, Microsoft 365, Intune und SharePoint" -ForegroundColor Cyan
 Write-Host "Hinweis: Sie werden für jeden Service einzeln zur Anmeldung aufgefordert." -ForegroundColor Yellow
 Write-Host "Bitte nutzen Sie bei der Anmeldung Ihre MFA-Methode (z.B. Authenticator-App)." -ForegroundColor Yellow
 Write-Host ""
@@ -255,9 +195,96 @@ try {
     Write-Host "   FEHLER bei Azure AD-Anmeldung: $_" -ForegroundColor Red
 }
 Write-Host ""
+Start-Sleep -Seconds 1
+
+# SharePoint Online Anmeldung
+Write-Host "5. Melde bei SharePoint Online an..." -ForegroundColor Cyan
+Write-Host "   Ein Browser-Fenster wird geöffnet..." -ForegroundColor Yellow
+
+# Ermittle SharePoint Admin-URL aus Tenant
+$sharePointConnected = $false
+$sharePointMethod = ""
+
+if ($tenantDetail) {
+    # Extrahiere Tenant-Name aus Domäne
+    $tenantDomains = Get-AzureADDomain -ErrorAction SilentlyContinue
+    $onMicrosoftDomain = $tenantDomains | Where-Object { $_.Name -like "*.onmicrosoft.com" -and $_.Name -notlike "*.mail.onmicrosoft.com" } | Select-Object -First 1
+    
+    if ($onMicrosoftDomain) {
+        $tenantName = $onMicrosoftDomain.Name -replace "\.onmicrosoft\.com", ""
+        $sharePointAdminUrl = "https://$tenantName-admin.sharepoint.com"
+        
+        Write-Host "   SharePoint Admin URL: $sharePointAdminUrl" -ForegroundColor Gray
+        
+        # Versuche mit PnP.PowerShell (bevorzugt)
+        if (Get-Module -ListAvailable -Name "PnP.PowerShell") {
+            Write-Host "   Verwende PnP.PowerShell..." -ForegroundColor Gray
+            try {
+                Connect-PnPOnline -Url $sharePointAdminUrl -Interactive -ErrorAction Stop
+                $sharePointConnected = $true
+                $sharePointMethod = "PnP.PowerShell"
+                Write-Host "   Erfolgreich bei SharePoint Online angemeldet (PnP)!" -ForegroundColor Green
+            } catch {
+                Write-Host "   PnP Verbindung fehlgeschlagen, versuche Legacy-Modul..." -ForegroundColor Yellow
+            }
+        }
+        
+        # Fallback auf Microsoft.Online.SharePoint.PowerShell
+        if (-not $sharePointConnected -and (Get-Module -ListAvailable -Name "Microsoft.Online.SharePoint.PowerShell")) {
+            Write-Host "   Verwende Microsoft.Online.SharePoint.PowerShell..." -ForegroundColor Gray
+            try {
+                Import-Module Microsoft.Online.SharePoint.PowerShell -DisableNameChecking -ErrorAction Stop
+                Connect-SPOService -Url $sharePointAdminUrl -ErrorAction Stop
+                $sharePointConnected = $true
+                $sharePointMethod = "Microsoft.Online.SharePoint.PowerShell"
+                Write-Host "   Erfolgreich bei SharePoint Online angemeldet (Legacy)!" -ForegroundColor Green
+            } catch {
+                Write-Host "   FEHLER bei SharePoint Online-Anmeldung: $_" -ForegroundColor Red
+            }
+        }
+        
+        if (-not $sharePointConnected) {
+            Write-Host "   WARNUNG: Konnte nicht mit SharePoint verbinden" -ForegroundColor Yellow
+            Write-Host "   Bitte installieren Sie eines der Module:" -ForegroundColor Yellow
+            Write-Host "     - PnP.PowerShell (empfohlen)" -ForegroundColor Gray
+            Write-Host "     - Microsoft.Online.SharePoint.PowerShell" -ForegroundColor Gray
+        } else {
+            Write-Host "   Methode: $sharePointMethod" -ForegroundColor Gray
+            
+            # Teste SharePoint-Zugriff
+            try {
+                if ($sharePointMethod -eq "PnP.PowerShell") {
+                    $tenant = Get-PnPTenant -ErrorAction SilentlyContinue
+                    if ($tenant) {
+                        Write-Host "   SharePoint Tenant: $($tenant.Title)" -ForegroundColor Gray
+                    }
+                } else {
+                    $tenant = Get-SPOTenant -ErrorAction SilentlyContinue
+                    if ($tenant) {
+                        Write-Host "   SharePoint Root URL: $($tenant.SharePointUrl)" -ForegroundColor Gray
+                    }
+                }
+            } catch {
+                Write-Host "   Hinweis: SharePoint Tenant-Informationen nicht verfügbar" -ForegroundColor Yellow
+            }
+        }
+    } else {
+        Write-Host "   WARNUNG: Konnte Tenant-Domäne nicht ermitteln" -ForegroundColor Yellow
+        Write-Host "   Bitte melden Sie sich manuell an:" -ForegroundColor Yellow
+        Write-Host "     Connect-PnPOnline -Url https://YOURTENANT-admin.sharepoint.com -Interactive" -ForegroundColor Gray
+        Write-Host "   oder" -ForegroundColor Yellow
+        Write-Host "     Connect-SPOService -Url https://YOURTENANT-admin.sharepoint.com" -ForegroundColor Gray
+    }
+} else {
+    Write-Host "   WARNUNG: Azure AD Tenant-Details nicht verfügbar" -ForegroundColor Yellow
+    Write-Host "   SharePoint-Anmeldung übersprungen" -ForegroundColor Yellow
+}
+
+Write-Host ""
+Start-Sleep -Seconds 1
 
 # Intune Verbindung testen (mit Fallback-Mechanismen)
-Write-Host "5. Teste Intune-Verbindung..." -ForegroundColor Cyan
+Write-Host "6. Teste Intune-Verbindung..." -ForegroundColor Cyan
 $intuneWorking = $false
 $intuneMethod = ""
 
@@ -286,36 +313,6 @@ try {
 
 if ($intuneWorking) {
     Write-Host "   Zugriffsmethode: $intuneMethod" -ForegroundColor Gray
-    
-    # Zeige Intune-Informationen
-    try {
-        # Versuche Geräteanzahl zu ermitteln
-        if ($intuneMethod -eq "Standard Cmdlets") {
-            $allDevices = Get-MgDeviceManagementManagedDevice -All -ErrorAction SilentlyContinue
-            if ($allDevices) {
-                Write-Host "   Verwaltete Geräte: $($allDevices.Count)" -ForegroundColor Gray
-            }
-        } else {
-            # Verwende Graph API für Geräteanzahl
-            $graphUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/`$count"
-            $deviceCount = Invoke-MgGraphRequest -Uri $graphUri -Method GET -ErrorAction SilentlyContinue
-            if ($deviceCount) {
-                Write-Host "   Verwaltete Geräte: $deviceCount" -ForegroundColor Gray
-            }
-        }
-        
-        # Teste auch Policy-Zugriff
-        try {
-            $configUri = "https://graph.microsoft.com/v1.0/deviceManagement/deviceConfigurations?`$top=1"
-            $configTest = Invoke-MgGraphRequest -Uri $configUri -Method GET -ErrorAction Stop
-            Write-Host "   Policy-Zugriff: Verfügbar" -ForegroundColor Gray
-        } catch {
-            Write-Host "   Policy-Zugriff: Eingeschränkt" -ForegroundColor Yellow
-        }
-        
-    } catch {
-        Write-Host "   Hinweis: Erweiterte Intune-Informationen nicht verfügbar" -ForegroundColor Yellow
-    }
 }
 
 Write-Host ""
@@ -348,6 +345,10 @@ try {
         $connections += "✓ Azure AD"
     }
 } catch {}
+
+if ($sharePointConnected) {
+    $connections += "✓ SharePoint Online (via $sharePointMethod)"
+}
 
 if ($intuneWorking) {
     $connections += "✓ Intune (via $intuneMethod)"
@@ -385,23 +386,16 @@ Write-Host "  # Azure AD" -ForegroundColor Cyan
 Write-Host "  Get-AzureADUser -Top 10                                 # Benutzer anzeigen" -ForegroundColor Gray
 Write-Host "  Get-AzureADTenantDetail                                 # Tenant-Details" -ForegroundColor Gray
 Write-Host ""
+Write-Host "  # SharePoint Online (PnP.PowerShell)" -ForegroundColor Cyan
+Write-Host "  Get-PnPTenant                                           # Tenant-Einstellungen" -ForegroundColor Gray
+Write-Host "  Get-PnPSite                                             # Sites anzeigen" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  # SharePoint Online (Legacy)" -ForegroundColor Cyan
+Write-Host "  Get-SPOTenant                                           # Tenant-Einstellungen" -ForegroundColor Gray
+Write-Host "  Get-SPOSite                                             # Sites anzeigen" -ForegroundColor Gray
+Write-Host ""
 Write-Host "  # Intune (Microsoft Graph - Standard Cmdlets)" -ForegroundColor Cyan
 Write-Host "  Get-MgDeviceManagementManagedDevice -Top 10             # Verwaltete Geräte" -ForegroundColor Gray
 Write-Host "  Get-MgDeviceManagementDeviceConfiguration               # Gerätekonfigurationen" -ForegroundColor Gray
 Write-Host "  Get-MgDeviceManagementDeviceCompliancePolicy            # Compliance-Richtlinien" -ForegroundColor Gray
-Write-Host ""
-Write-Host "  # Intune (Graph API - Fallback-Methode)" -ForegroundColor Cyan
-Write-Host "  # Verwenden Sie diese, wenn Standard-Cmdlets nicht verfügbar sind:" -ForegroundColor Yellow
-Write-Host "  Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices' -Method GET" -ForegroundColor Gray
-Write-Host "  Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/beta/deviceManagement/configurationPolicies' -Method GET" -ForegroundColor Gray
-Write-Host ""
-
-# Zeige installierte Graph-Module
-Write-Host "Installierte Microsoft.Graph Module:" -ForegroundColor Cyan
-$graphModules = Get-Module -ListAvailable -Name "Microsoft.Graph*" | Select-Object Name, Version | Sort-Object Name
-if ($graphModules) {
-    $graphModules | Format-Table -AutoSize
-} else {
-    Write-Host "  Keine Microsoft.Graph Module gefunden" -ForegroundColor Yellow
-}
 Write-Host ""

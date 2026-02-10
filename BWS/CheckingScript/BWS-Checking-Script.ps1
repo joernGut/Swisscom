@@ -2305,101 +2305,133 @@ function Export-PDFReport {
         [string]$HTMLPath
     )
     
+    # Validate input
+    if ([string]::IsNullOrWhiteSpace($HTMLPath)) {
+        Write-Host "  ✗ Error: HTML path is empty" -ForegroundColor Red
+        return $null
+    }
+    
+    if (-not (Test-Path $HTMLPath)) {
+        Write-Host "  ✗ Error: HTML file not found: $HTMLPath" -ForegroundColor Red
+        return $null
+    }
+    
     Write-Host "Converting HTML to PDF..." -ForegroundColor Yellow
     
-    $pdfPath = $HTMLPath -replace '\.html$', '.pdf'
-    
-    # Try multiple PDF conversion methods
+    # Get absolute paths
+    $htmlItem = Get-Item $HTMLPath
+    $htmlFullPath = $htmlItem.FullName
+    $pdfPath = $htmlFullPath -replace '\.html$', '.pdf'
     $conversionSuccess = $false
     
-    # Method 1: wkhtmltopdf (if installed)
-    if (Get-Command "wkhtmltopdf" -ErrorAction SilentlyContinue) {
+    # Method 1: wkhtmltopdf
+    $wkhtmltopdf = Get-Command "wkhtmltopdf" -ErrorAction SilentlyContinue
+    if ($wkhtmltopdf) {
         Write-Host "  Using wkhtmltopdf..." -ForegroundColor Gray
         try {
-            $process = Start-Process -FilePath "wkhtmltopdf" -ArgumentList "--enable-local-file-access", "--no-stop-slow-scripts", "--javascript-delay", "1000", $HTMLPath, $pdfPath -Wait -PassThru -NoNewWindow
+            $process = Start-Process -FilePath $wkhtmltopdf.Source `
+                -ArgumentList "--enable-local-file-access", "--no-stop-slow-scripts", "--javascript-delay", "1000", "`"$htmlFullPath`"", "`"$pdfPath`"" `
+                -Wait -PassThru -NoNewWindow -ErrorAction Stop
+            
             if ($process.ExitCode -eq 0 -and (Test-Path $pdfPath)) {
                 $conversionSuccess = $true
-                Write-Host "  ✓ PDF created successfully" -ForegroundColor Green
+                Write-Host "  ✓ PDF created successfully with wkhtmltopdf" -ForegroundColor Green
             }
         } catch {
-            Write-Host "  ✗ wkhtmltopdf conversion failed" -ForegroundColor Yellow
+            Write-Host "  ✗ wkhtmltopdf error: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
     
-    # Method 2: Chrome/Edge Headless (if wkhtmltopdf not available)
+    # Method 2: Chrome/Edge Headless
     if (-not $conversionSuccess) {
         $chromePaths = @(
-            "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
+            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
             "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
-            "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",
-            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+            "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+            "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
         )
         
-        $chromePath = $chromePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+        $chromePath = $null
+        foreach ($path in $chromePaths) {
+            if (Test-Path $path) {
+                $chromePath = $path
+                break
+            }
+        }
         
         if ($chromePath) {
             Write-Host "  Using Chrome/Edge Headless..." -ForegroundColor Gray
+            
             try {
-                $htmlFullPath = (Resolve-Path $HTMLPath).Path
-                $pdfFullPath = (Resolve-Path -Path (Split-Path $pdfPath -Parent)).Path + "\" + (Split-Path $pdfPath -Leaf)
+                # Chrome needs file:/// URL
+                $htmlFileUrl = "file:///$($htmlFullPath.Replace('\', '/'))"
                 
-                $arguments = @(
-                    "--headless",
-                    "--disable-gpu",
-                    "--print-to-pdf=`"$pdfFullPath`"",
-                    "`"$htmlFullPath`""
+                $chromeArgs = @(
+                    "--headless=new"
+                    "--disable-gpu"
+                    "--no-sandbox"
+                    "--print-to-pdf=`"$pdfPath`""
+                    "`"$htmlFileUrl`""
                 )
                 
-                $process = Start-Process -FilePath $chromePath -ArgumentList $arguments -Wait -PassThru -NoNewWindow -RedirectStandardOutput "NUL" -RedirectStandardError "NUL"
+                $process = Start-Process -FilePath $chromePath -ArgumentList $chromeArgs `
+                    -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
                 
-                Start-Sleep -Seconds 2
+                # Wait for PDF
+                $waitCount = 0
+                while (-not (Test-Path $pdfPath) -and $waitCount -lt 10) {
+                    Start-Sleep -Milliseconds 500
+                    $waitCount++
+                }
                 
                 if (Test-Path $pdfPath) {
                     $conversionSuccess = $true
-                    Write-Host "  ✓ PDF created successfully" -ForegroundColor Green
+                    Write-Host "  ✓ PDF created successfully with Chrome/Edge" -ForegroundColor Green
                 }
             } catch {
-                Write-Host "  ✗ Chrome/Edge conversion failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host "  ✗ Chrome/Edge error: $($_.Exception.Message)" -ForegroundColor Yellow
             }
         }
     }
     
-    # Method 3: PowerShell Print-to-PDF (Windows 10+)
-    if (-not $conversionSuccess -and $PSVersionTable.PSVersion.Major -ge 5) {
-        Write-Host "  Trying Windows Print-to-PDF..." -ForegroundColor Gray
+    # Method 3: Microsoft Word
+    if (-not $conversionSuccess) {
+        Write-Host "  Trying Microsoft Word..." -ForegroundColor Gray
         try {
-            # This requires IE/Edge print capabilities
             $word = New-Object -ComObject Word.Application -ErrorAction Stop
             $word.Visible = $false
-            $doc = $word.Documents.Open($HTMLPath)
-            $doc.SaveAs([ref]$pdfPath, [ref]17)  # 17 = wdFormatPDF
+            $doc = $word.Documents.Open($htmlFullPath)
+            $doc.SaveAs([ref]$pdfPath, [ref]17)
             $doc.Close()
             $word.Quit()
+            [System.Runtime.Interopservices.Marshal]::ReleaseComObject($doc) | Out-Null
             [System.Runtime.Interopservices.Marshal]::ReleaseComObject($word) | Out-Null
+            [System.GC]::Collect()
             
             if (Test-Path $pdfPath) {
                 $conversionSuccess = $true
-                Write-Host "  ✓ PDF created successfully" -ForegroundColor Green
+                Write-Host "  ✓ PDF created successfully with Word" -ForegroundColor Green
             }
         } catch {
-            Write-Host "  ✗ Word COM conversion failed" -ForegroundColor Yellow
+            Write-Host "  ✗ Word error: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
     
+    # Failed
     if (-not $conversionSuccess) {
         Write-Host ""
-        Write-Host "  ⚠ PDF conversion not available" -ForegroundColor Yellow
-        Write-Host "  Install one of the following:" -ForegroundColor Gray
-        Write-Host "    - wkhtmltopdf: https://wkhtmltopdf.org/" -ForegroundColor Gray
-        Write-Host "    - Google Chrome or Microsoft Edge" -ForegroundColor Gray
-        Write-Host "    - Microsoft Word" -ForegroundColor Gray
+        Write-Host "  ⚠ PDF conversion failed" -ForegroundColor Yellow
+        Write-Host "  Install wkhtmltopdf: https://wkhtmltopdf.org/downloads.html" -ForegroundColor Gray
+        Write-Host "  Or use: winget install wkhtmltopdf" -ForegroundColor Gray
         Write-Host ""
-        Write-Host "  HTML report is available at: $HTMLPath" -ForegroundColor Cyan
+        Write-Host "  HTML report: $htmlFullPath" -ForegroundColor Cyan
         return $null
     }
     
     return $pdfPath
 }
+
 
 #============================================================================
 # GUI Mode
