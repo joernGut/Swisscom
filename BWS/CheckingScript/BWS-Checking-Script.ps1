@@ -2022,6 +2022,17 @@ function Export-HTMLReport {
 "@
     }
 
+    if ($SharePointResults -and $SharePointResults.CheckPerformed) {
+        $spClass = if ($SharePointResults.Status.Compliant) { "success" } else { "warning" }
+        $html += @"
+                    <div class="summary-card $spClass">
+                        <h3>SharePoint Config</h3>
+                        <div class="value">$(if ($SharePointResults.Status.Compliant) { '✓' } else { '⚠' })</div>
+                        <p>$(if ($SharePointResults.Status.Compliant) { 'Compliant' } else { 'Issues' })</p>
+                    </div>
+"@
+    }
+
     $html += @"
                 </div>
             </div>
@@ -2160,6 +2171,38 @@ function Export-HTMLReport {
 "@
     }
 
+    # SharePoint Configuration Section
+    if ($SharePointResults -and $SharePointResults.CheckPerformed) {
+        $html += @"
+            <div class="section" id="sharepoint">
+                <h2><span class="section-icon">🌐</span>SharePoint Configuration</h2>
+                <ul class="info-list">
+                    <li><strong>External Sharing:</strong> $(if ($SharePointResults.Status.Settings.ExternalSharing -eq 'Disabled') { '<span class="status-found">✓ Only Organization</span>' } elseif ($SharePointResults.Status.Settings.ExternalSharing) { "<span class='status-error'>⚠ $($SharePointResults.Status.Settings.ExternalSharing)</span>" } else { '<span class="status-error">Not Checked</span>' })</li>
+                    <li><strong>Site Creation:</strong> $(if ($SharePointResults.Status.Settings.SiteCreation -eq 'Enabled') { '<span class="status-found">✓ Enabled</span>' } elseif ($SharePointResults.Status.Settings.SiteCreation) { "<span class='status-error'>✗ $($SharePointResults.Status.Settings.SiteCreation)</span>" } else { '<span class="status-error">Not Checked</span>' })</li>
+                    <li><strong>Legacy Auth Blocked:</strong> $(if ($SharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { '<span class="status-found">✓ Yes</span>' } elseif ($SharePointResults.Status.Settings.LegacyAuthBlocked -eq $false) { '<span class="status-error">✗ No</span>' } else { '<span class="status-error">Not Checked</span>' })</li>
+                    <li><strong>Overall Compliance:</strong> $(if ($SharePointResults.Status.Compliant) { '<span class="status-found">✓ Compliant</span>' } else { '<span class="status-error">⚠ Non-Compliant</span>' })</li>
+"@
+        
+        if ($SharePointResults.Status.Errors.Count -gt 0) {
+            $html += @"
+                    <li><strong>Issues Found:</strong> <span class="status-error">$($SharePointResults.Status.Errors.Count)</span></li>
+                </ul>
+                <h3>Configuration Issues:</h3>
+                <ul class="info-list">
+"@
+            foreach ($error in $SharePointResults.Status.Errors) {
+                $html += @"
+                    <li><span class="status-error">⚠</span> $error</li>
+"@
+            }
+            $html += "</ul>"
+        } else {
+            $html += "</ul>"
+        }
+        
+        $html += "</div>"
+    }
+
     # Entra ID Connect Section
     if ($EntraIDResults -and $EntraIDResults.CheckPerformed) {
         $html += @"
@@ -2257,6 +2300,107 @@ function Export-HTMLReport {
     return $reportPath
 }
 
+function Export-PDFReport {
+    param(
+        [string]$HTMLPath
+    )
+    
+    Write-Host "Converting HTML to PDF..." -ForegroundColor Yellow
+    
+    $pdfPath = $HTMLPath -replace '\.html$', '.pdf'
+    
+    # Try multiple PDF conversion methods
+    $conversionSuccess = $false
+    
+    # Method 1: wkhtmltopdf (if installed)
+    if (Get-Command "wkhtmltopdf" -ErrorAction SilentlyContinue) {
+        Write-Host "  Using wkhtmltopdf..." -ForegroundColor Gray
+        try {
+            $process = Start-Process -FilePath "wkhtmltopdf" -ArgumentList "--enable-local-file-access", "--no-stop-slow-scripts", "--javascript-delay", "1000", $HTMLPath, $pdfPath -Wait -PassThru -NoNewWindow
+            if ($process.ExitCode -eq 0 -and (Test-Path $pdfPath)) {
+                $conversionSuccess = $true
+                Write-Host "  ✓ PDF created successfully" -ForegroundColor Green
+            }
+        } catch {
+            Write-Host "  ✗ wkhtmltopdf conversion failed" -ForegroundColor Yellow
+        }
+    }
+    
+    # Method 2: Chrome/Edge Headless (if wkhtmltopdf not available)
+    if (-not $conversionSuccess) {
+        $chromePaths = @(
+            "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+        )
+        
+        $chromePath = $chromePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+        
+        if ($chromePath) {
+            Write-Host "  Using Chrome/Edge Headless..." -ForegroundColor Gray
+            try {
+                $htmlFullPath = (Resolve-Path $HTMLPath).Path
+                $pdfFullPath = (Resolve-Path -Path (Split-Path $pdfPath -Parent)).Path + "\" + (Split-Path $pdfPath -Leaf)
+                
+                $arguments = @(
+                    "--headless",
+                    "--disable-gpu",
+                    "--print-to-pdf=`"$pdfFullPath`"",
+                    "`"$htmlFullPath`""
+                )
+                
+                $process = Start-Process -FilePath $chromePath -ArgumentList $arguments -Wait -PassThru -NoNewWindow -RedirectStandardOutput "NUL" -RedirectStandardError "NUL"
+                
+                Start-Sleep -Seconds 2
+                
+                if (Test-Path $pdfPath) {
+                    $conversionSuccess = $true
+                    Write-Host "  ✓ PDF created successfully" -ForegroundColor Green
+                }
+            } catch {
+                Write-Host "  ✗ Chrome/Edge conversion failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    }
+    
+    # Method 3: PowerShell Print-to-PDF (Windows 10+)
+    if (-not $conversionSuccess -and $PSVersionTable.PSVersion.Major -ge 5) {
+        Write-Host "  Trying Windows Print-to-PDF..." -ForegroundColor Gray
+        try {
+            # This requires IE/Edge print capabilities
+            $word = New-Object -ComObject Word.Application -ErrorAction Stop
+            $word.Visible = $false
+            $doc = $word.Documents.Open($HTMLPath)
+            $doc.SaveAs([ref]$pdfPath, [ref]17)  # 17 = wdFormatPDF
+            $doc.Close()
+            $word.Quit()
+            [System.Runtime.Interopservices.Marshal]::ReleaseComObject($word) | Out-Null
+            
+            if (Test-Path $pdfPath) {
+                $conversionSuccess = $true
+                Write-Host "  ✓ PDF created successfully" -ForegroundColor Green
+            }
+        } catch {
+            Write-Host "  ✗ Word COM conversion failed" -ForegroundColor Yellow
+        }
+    }
+    
+    if (-not $conversionSuccess) {
+        Write-Host ""
+        Write-Host "  ⚠ PDF conversion not available" -ForegroundColor Yellow
+        Write-Host "  Install one of the following:" -ForegroundColor Gray
+        Write-Host "    - wkhtmltopdf: https://wkhtmltopdf.org/" -ForegroundColor Gray
+        Write-Host "    - Google Chrome or Microsoft Edge" -ForegroundColor Gray
+        Write-Host "    - Microsoft Word" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "  HTML report is available at: $HTMLPath" -ForegroundColor Cyan
+        return $null
+    }
+    
+    return $pdfPath
+}
+
 #============================================================================
 # GUI Mode
 #============================================================================
@@ -2314,7 +2458,7 @@ if ($GUI) {
     # GroupBox for Check Selection
     $groupBoxChecks = New-Object System.Windows.Forms.GroupBox
     $groupBoxChecks.Location = New-Object System.Drawing.Point(20, 85)
-    $groupBoxChecks.Size = New-Object System.Drawing.Size(300, 200)
+    $groupBoxChecks.Size = New-Object System.Drawing.Size(300, 225)
     $groupBoxChecks.Text = "Select Checks to Run"
     $form.Controls.Add($groupBoxChecks)
     
@@ -2366,10 +2510,18 @@ if ($GUI) {
     $chkSoftware.Checked = $true
     $groupBoxChecks.Controls.Add($chkSoftware)
     
+    # SharePoint Configuration Check Checkbox
+    $chkSharePoint = New-Object System.Windows.Forms.CheckBox
+    $chkSharePoint.Location = New-Object System.Drawing.Point(15, 175)
+    $chkSharePoint.Size = New-Object System.Drawing.Size(280, 20)
+    $chkSharePoint.Text = "SharePoint Configuration Check"
+    $chkSharePoint.Checked = $true
+    $groupBoxChecks.Controls.Add($chkSharePoint)
+    
     # Options GroupBox
     $groupBoxOptions = New-Object System.Windows.Forms.GroupBox
     $groupBoxOptions.Location = New-Object System.Drawing.Point(340, 85)
-    $groupBoxOptions.Size = New-Object System.Drawing.Size(300, 200)
+    $groupBoxOptions.Size = New-Object System.Drawing.Size(300, 225)
     $groupBoxOptions.Text = "Options"
     $form.Controls.Add($groupBoxOptions)
     
@@ -2393,9 +2545,40 @@ if ($GUI) {
     $chkExport = New-Object System.Windows.Forms.CheckBox
     $chkExport.Location = New-Object System.Drawing.Point(15, 75)
     $chkExport.Size = New-Object System.Drawing.Size(250, 20)
-    $chkExport.Text = "Export HTML Report"
+    $chkExport.Text = "Export Report"
     $chkExport.Checked = $false
     $groupBoxOptions.Controls.Add($chkExport)
+    
+    # Export Format Label
+    $lblExportFormat = New-Object System.Windows.Forms.Label
+    $lblExportFormat.Location = New-Object System.Drawing.Point(15, 100)
+    $lblExportFormat.Size = New-Object System.Drawing.Size(100, 20)
+    $lblExportFormat.Text = "Export Format:"
+    $groupBoxOptions.Controls.Add($lblExportFormat)
+    
+    # HTML Radio Button
+    $radioHTML = New-Object System.Windows.Forms.RadioButton
+    $radioHTML.Location = New-Object System.Drawing.Point(30, 120)
+    $radioHTML.Size = New-Object System.Drawing.Size(70, 20)
+    $radioHTML.Text = "HTML"
+    $radioHTML.Checked = $true
+    $groupBoxOptions.Controls.Add($radioHTML)
+    
+    # PDF Radio Button
+    $radioPDF = New-Object System.Windows.Forms.RadioButton
+    $radioPDF.Location = New-Object System.Drawing.Point(110, 120)
+    $radioPDF.Size = New-Object System.Drawing.Size(60, 20)
+    $radioPDF.Text = "PDF"
+    $radioPDF.Checked = $false
+    $groupBoxOptions.Controls.Add($radioPDF)
+    
+    # Both Radio Button
+    $radioBoth = New-Object System.Windows.Forms.RadioButton
+    $radioBoth.Location = New-Object System.Drawing.Point(180, 120)
+    $radioBoth.Size = New-Object System.Drawing.Size(60, 20)
+    $radioBoth.Text = "Both"
+    $radioBoth.Checked = $false
+    $groupBoxOptions.Controls.Add($radioBoth)
     
     # Run Button
     $btnRun = New-Object System.Windows.Forms.Button
@@ -2408,14 +2591,14 @@ if ($GUI) {
     
     # Clear Button
     $btnClear = New-Object System.Windows.Forms.Button
-    $btnClear.Location = New-Object System.Drawing.Point(660, 180)
+    $btnClear.Location = New-Object System.Drawing.Point(660, 205)
     $btnClear.Size = New-Object System.Drawing.Size(150, 30)
     $btnClear.Text = "Clear Output"
     $form.Controls.Add($btnClear)
     
     # Status Label
     $labelStatus = New-Object System.Windows.Forms.Label
-    $labelStatus.Location = New-Object System.Drawing.Point(20, 295)
+    $labelStatus.Location = New-Object System.Drawing.Point(20, 320)
     $labelStatus.Size = New-Object System.Drawing.Size(800, 20)
     $labelStatus.Text = "Ready - Please select checks and click 'Run Check'"
     $labelStatus.ForeColor = [System.Drawing.Color]::Blue
@@ -2423,15 +2606,15 @@ if ($GUI) {
     
     # Progress Bar
     $progressBar = New-Object System.Windows.Forms.ProgressBar
-    $progressBar.Location = New-Object System.Drawing.Point(20, 320)
+    $progressBar.Location = New-Object System.Drawing.Point(20, 345)
     $progressBar.Size = New-Object System.Drawing.Size(950, 20)
     $progressBar.Style = "Continuous"
     $form.Controls.Add($progressBar)
     
     # Output TextBox
     $textOutput = New-Object System.Windows.Forms.TextBox
-    $textOutput.Location = New-Object System.Drawing.Point(20, 350)
-    $textOutput.Size = New-Object System.Drawing.Size(950, 340)
+    $textOutput.Location = New-Object System.Drawing.Point(20, 375)
+    $textOutput.Size = New-Object System.Drawing.Size(950, 315)
     $textOutput.Multiline = $true
     $textOutput.ScrollBars = "Both"
     $textOutput.Font = New-Object System.Drawing.Font("Consolas", 9)
@@ -2467,9 +2650,15 @@ if ($GUI) {
         $runIntuneConn = $chkIntuneConn.Checked
         $runDefender = $chkDefender.Checked
         $runSoftware = $chkSoftware.Checked
+        $runSharePoint = $chkSharePoint.Checked
         $compact = $chkCompact.Checked
         $showAll = $chkShowAll.Checked
         $export = $chkExport.Checked
+        
+        # Determine export format
+        $exportFormat = "HTML"
+        if ($radioPDF.Checked) { $exportFormat = "PDF" }
+        if ($radioBoth.Checked) { $exportFormat = "Both" }
         
         try {
             # Set subscription context if provided
@@ -2529,8 +2718,9 @@ if ($GUI) {
             $intuneConnResults = $null
             $defenderResults = $null
             $softwareResults = $null
+            $sharePointResults = $null
             
-            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int])
+            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int]) + ($runSharePoint -as [int])
             $currentCheck = 0
             $progressIncrement = if ($totalChecks -gt 0) { 80 / $totalChecks } else { 0 }
             
@@ -2600,6 +2790,17 @@ if ($GUI) {
                 $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
             }
             
+            # Run SharePoint Configuration Check
+            if ($runSharePoint) {
+                $labelStatus.Text = "Running SharePoint Configuration Check..."
+                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $form.Refresh()
+                
+                $sharePointResults = Test-SharePointConfiguration -CompactView $compact
+                $currentCheck++
+                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+            }
+            
             # Overall Summary
             Write-Host ""
             Write-Host "======================================================" -ForegroundColor Cyan
@@ -2657,6 +2858,19 @@ if ($GUI) {
                 Write-Host "    Missing:      $($softwareResults.Status.Missing.Count)" -ForegroundColor $(if ($softwareResults.Status.Missing.Count -eq 0) { "Green" } else { "Red" })
             }
             
+            if ($runSharePoint -and $sharePointResults -and $sharePointResults.CheckPerformed) {
+                Write-Host ""
+                Write-Host "  SharePoint Configuration:" -ForegroundColor White
+                Write-Host "    External Sharing:  " -NoNewline -ForegroundColor White
+                Write-Host $(if ($sharePointResults.Status.Settings.ExternalSharing -eq "Disabled") { "Only Organization (✓)" } else { "$($sharePointResults.Status.Settings.ExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.ExternalSharing -eq "Disabled") { "Green" } else { "Yellow" })
+                Write-Host "    Site Creation:     " -NoNewline -ForegroundColor White  
+                Write-Host $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Enabled") { "Enabled (✓)" } else { "Disabled (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Enabled") { "Green" } else { "Yellow" })
+                Write-Host "    Legacy Auth Block: " -NoNewline -ForegroundColor White
+                Write-Host $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { "Yes (✓)" } else { "No (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked) { "Green" } else { "Yellow" })
+                Write-Host "    Compliance:        " -NoNewline -ForegroundColor White
+                Write-Host $(if ($sharePointResults.Status.Compliant) { "✓ Compliant" } else { "✗ Issues Found" }) -ForegroundColor $(if ($sharePointResults.Status.Compliant) { "Green" } else { "Yellow" })
+            }
+            
             Write-Host "======================================================" -ForegroundColor Cyan
             
             if ($compact) {
@@ -2667,7 +2881,6 @@ if ($GUI) {
             # Export report if requested
             if ($export) {
                 Write-Host ""
-                Write-Host "Generating HTML Report..." -ForegroundColor Yellow
                 
                 $currentContext = Get-AzContext
                 $subName = if ($currentContext) { $currentContext.Subscription.Name } else { "Unknown" }
@@ -2677,14 +2890,43 @@ if ($GUI) {
                                  (-not $entraIDResults -or ($entraIDResults.Status.IsRunning)) -and
                                  (-not $intuneConnResults -or ($intuneConnResults.Status.Errors.Count -eq 0)) -and
                                  (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0)) -and
-                                 (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0))
+                                 (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0)) -and
+                                 (-not $sharePointResults -or ($sharePointResults.Status.Compliant))
                 
-                $reportPath = Export-HTMLReport -BCID $bcid -CustomerName $customerName -SubscriptionName $subName `
-                    -AzureResults $azureResults -IntuneResults $intuneResults `
-                    -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
-                    -DefenderResults $defenderResults -SoftwareResults $softwareResults -OverallStatus $overallStatus
+                # Generate HTML report
+                if ($exportFormat -eq "HTML" -or $exportFormat -eq "Both") {
+                    Write-Host "Generating HTML Report..." -ForegroundColor Yellow
+                    $htmlPath = Export-HTMLReport -BCID $bcid -CustomerName $customerName -SubscriptionName $subName `
+                        -AzureResults $azureResults -IntuneResults $intuneResults `
+                        -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
+                        -DefenderResults $defenderResults -SoftwareResults $softwareResults `
+                        -SharePointResults $sharePointResults -OverallStatus $overallStatus
+                    
+                    Write-Host "HTML Report exported to: $htmlPath" -ForegroundColor Green
+                }
                 
-                Write-Host "HTML Report exported to: $reportPath" -ForegroundColor Green
+                # Generate PDF report
+                if ($exportFormat -eq "PDF" -or $exportFormat -eq "Both") {
+                    if (-not $htmlPath) {
+                        # Need HTML first for PDF conversion
+                        $htmlPath = Export-HTMLReport -BCID $bcid -CustomerName $customerName -SubscriptionName $subName `
+                            -AzureResults $azureResults -IntuneResults $intuneResults `
+                            -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
+                            -DefenderResults $defenderResults -SoftwareResults $softwareResults `
+                            -SharePointResults $sharePointResults -OverallStatus $overallStatus
+                    }
+                    
+                    $pdfPath = Export-PDFReport -HTMLPath $htmlPath
+                    if ($pdfPath) {
+                        Write-Host "PDF Report exported to: $pdfPath" -ForegroundColor Green
+                    }
+                    
+                    # Clean up temp HTML if only PDF was requested
+                    if ($exportFormat -eq "PDF" -and $htmlPath -and (Test-Path $htmlPath)) {
+                        Remove-Item $htmlPath -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                
                 Write-Host ""
             }
             
@@ -2769,6 +3011,12 @@ if (-not $SkipSoftware) {
     $softwareResults = Test-BWSSoftwarePackages -CompactView $CompactView
 }
 
+# Run SharePoint Configuration Check
+$sharePointResults = $null
+if (-not $SkipSharePoint) {
+    $sharePointResults = Test-SharePointConfiguration -CompactView $CompactView
+}
+
 # Overall Summary
 $currentContext = Get-AzContext
 Write-Host ""
@@ -2825,13 +3073,27 @@ if ($softwareResults -and $softwareResults.CheckPerformed) {
     Write-Host "    Missing:      $($softwareResults.Status.Missing.Count)" -ForegroundColor $(if ($softwareResults.Status.Missing.Count -eq 0) { "Green" } else { "Red" })
 }
 
+if ($sharePointResults -and $sharePointResults.CheckPerformed) {
+    Write-Host ""
+    Write-Host "  SharePoint Configuration:" -ForegroundColor White
+    Write-Host "    External Sharing:  " -NoNewline -ForegroundColor White
+    Write-Host $(if ($sharePointResults.Status.Settings.ExternalSharing -eq "Disabled") { "Only Organization (✓)" } else { "$($sharePointResults.Status.Settings.ExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.ExternalSharing -eq "Disabled") { "Green" } else { "Yellow" })
+    Write-Host "    Site Creation:     " -NoNewline -ForegroundColor White  
+    Write-Host $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Enabled") { "Enabled (✓)" } else { "Disabled (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Enabled") { "Green" } else { "Yellow" })
+    Write-Host "    Legacy Auth Block: " -NoNewline -ForegroundColor White
+    Write-Host $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { "Yes (✓)" } else { "No (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked) { "Green" } else { "Yellow" })
+    Write-Host "    Compliance:        " -NoNewline -ForegroundColor White
+    Write-Host $(if ($sharePointResults.Status.Compliant) { "✓ Compliant" } else { "✗ Issues Found" }) -ForegroundColor $(if ($sharePointResults.Status.Compliant) { "Green" } else { "Yellow" })
+}
+
 Write-Host ""
 $overallStatus = ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Count -eq 0) -and 
                  (-not $intuneResults -or ($intuneResults.Missing.Count -eq 0 -and $intuneResults.Errors.Count -eq 0)) -and
                  (-not $entraIDResults -or ($entraIDResults.Status.IsRunning)) -and
                  (-not $intuneConnResults -or ($intuneConnResults.Status.Errors.Count -eq 0)) -and
                  (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0)) -and
-                 (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0))
+                 (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0)) -and
+                 (-not $sharePointResults -or ($sharePointResults.Status.Compliant))
 
 Write-Host "  Overall Status: " -NoNewline -ForegroundColor White
 if ($overallStatus) {
@@ -2850,12 +3112,41 @@ Write-Host ""
 
 # Export Report
 if ($ExportReport) {
-    Write-Host "Generating HTML Report..." -ForegroundColor Yellow
     
-    $reportPath = Export-HTMLReport -BCID $BCID -CustomerName $CustomerName -SubscriptionName $currentContext.Subscription.Name `
-        -AzureResults $azureResults -IntuneResults $intuneResults `
-        -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
-        -DefenderResults $defenderResults -SoftwareResults $softwareResults -OverallStatus $overallStatus
+    # Generate HTML report
+    if ($ExportFormat -eq "HTML" -or $ExportFormat -eq "Both") {
+        Write-Host "Generating HTML Report..." -ForegroundColor Yellow
+        
+        $htmlPath = Export-HTMLReport -BCID $BCID -CustomerName $CustomerName -SubscriptionName $currentContext.Subscription.Name `
+            -AzureResults $azureResults -IntuneResults $intuneResults `
+            -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
+            -DefenderResults $defenderResults -SoftwareResults $softwareResults `
+            -SharePointResults $sharePointResults -OverallStatus $overallStatus
+        
+        Write-Host "HTML Report exported to: $htmlPath" -ForegroundColor Green
+    }
+    
+    # Generate PDF report
+    if ($ExportFormat -eq "PDF" -or $ExportFormat -eq "Both") {
+        if (-not $htmlPath) {
+            # Need HTML first for PDF conversion
+            $htmlPath = Export-HTMLReport -BCID $BCID -CustomerName $CustomerName -SubscriptionName $currentContext.Subscription.Name `
+                -AzureResults $azureResults -IntuneResults $intuneResults `
+                -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
+                -DefenderResults $defenderResults -SoftwareResults $softwareResults `
+                -SharePointResults $sharePointResults -OverallStatus $overallStatus
+        }
+        
+        $pdfPath = Export-PDFReport -HTMLPath $htmlPath
+        if ($pdfPath) {
+            Write-Host "PDF Report exported to: $pdfPath" -ForegroundColor Green
+        }
+        
+        # Clean up temp HTML if only PDF was requested
+        if ($ExportFormat -eq "PDF" -and $htmlPath -and (Test-Path $htmlPath)) {
+            Remove-Item $htmlPath -Force -ErrorAction SilentlyContinue
+        }
+    }
     
     Write-Host "HTML Report exported to: $reportPath" -ForegroundColor Green
     Write-Host ""
