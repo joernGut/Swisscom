@@ -5,8 +5,9 @@
     Installiert benötigte Module (falls nicht vorhanden) und meldet sich interaktiv bei Azure, Microsoft 365 und Intune an
 .NOTES
     Autor: PowerShell Script
-    Datum: 2026-02-09
+    Datum: 2026-02-10
     Unterstützt Multi-Faktor-Authentifizierung (MFA)
+    Version: 1.1 - Verbesserte Intune-Kompatibilität
 #>
 
 Write-Host "=== Azure, M365 und Intune Anmeldescript (MFA-fähig) ===" -ForegroundColor Cyan
@@ -50,12 +51,19 @@ Write-Host ""
 
 # Liste der benötigten Module
 $requiredModules = @(
-    "Az.Accounts",                  # Azure PowerShell
-    "Az.Resources",                 # Azure Ressourcen
-    "ExchangeOnlineManagement",     # Exchange Online
-    "Microsoft.Graph",              # Microsoft Graph
-    "Microsoft.Graph.Intune",       # Intune (Teil von Graph)
-    "AzureAD"                       # Azure AD
+    "Az.Accounts",                          # Azure PowerShell
+    "Az.Resources",                         # Azure Ressourcen
+    "ExchangeOnlineManagement",             # Exchange Online
+    "Microsoft.Graph.Authentication",       # Microsoft Graph Authentication
+    "Microsoft.Graph.Users",                # Microsoft Graph Users
+    "Microsoft.Graph.Groups",               # Microsoft Graph Groups
+    "Microsoft.Graph.DeviceManagement",     # Intune Device Management
+    "AzureAD"                               # Azure AD
+)
+
+# Optionale Beta-Module
+$optionalModules = @(
+    "Microsoft.Graph.Beta.DeviceManagement" # Beta-Features für Intune (optional)
 )
 
 $allModulesOk = $true
@@ -63,6 +71,23 @@ $allModulesOk = $true
 foreach ($module in $requiredModules) {
     if (-not (Install-RequiredModule -ModuleName $module)) {
         $allModulesOk = $false
+    }
+    Write-Host ""
+}
+
+# Versuche optionale Module zu installieren
+Write-Host "Installiere optionale Module..." -ForegroundColor Cyan
+foreach ($module in $optionalModules) {
+    Write-Host "Prüfe optionales Modul: $module..." -ForegroundColor Yellow
+    try {
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+            Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
+            Write-Host "  Optionales Modul '$module' installiert." -ForegroundColor Green
+        } else {
+            Write-Host "  Optionales Modul '$module' bereits vorhanden." -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "  Info: Optionales Modul '$module' nicht verfügbar (nicht kritisch)" -ForegroundColor Yellow
     }
     Write-Host ""
 }
@@ -131,10 +156,10 @@ try {
         "Group.Read.All",
         "Directory.Read.All",
         "Organization.Read.All",
-        "DeviceManagementApps.ReadWrite.All",           # Intune Apps
-        "DeviceManagementConfiguration.ReadWrite.All",  # Intune Konfiguration
-        "DeviceManagementManagedDevices.ReadWrite.All", # Intune Geräte
-        "DeviceManagementServiceConfig.ReadWrite.All"   # Intune Service-Konfiguration
+        "DeviceManagementApps.Read.All",                # Intune Apps (Read)
+        "DeviceManagementConfiguration.Read.All",       # Intune Konfiguration (Read)
+        "DeviceManagementManagedDevices.Read.All",      # Intune Geräte (Read)
+        "DeviceManagementServiceConfig.Read.All"        # Intune Service-Konfiguration (Read)
     )
     
     Connect-MgGraph -Scopes $graphScopes -ErrorAction Stop
@@ -167,22 +192,68 @@ try {
 }
 Write-Host ""
 
-# Intune Verbindung testen
+# Intune Verbindung testen (mit Fallback-Mechanismen)
 Write-Host "5. Teste Intune-Verbindung..." -ForegroundColor Cyan
+$intuneWorking = $false
+$intuneMethod = ""
+
 try {
-    # Test Intune-Zugriff über Graph
+    # Methode 1: Versuche Standard-Cmdlet
+    Write-Host "   Teste Standard-Cmdlets..." -ForegroundColor Gray
     $intuneDevices = Get-MgDeviceManagementManagedDevice -Top 1 -ErrorAction Stop
-    Write-Host "   Intune-Zugriff erfolgreich verifiziert!" -ForegroundColor Green
+    $intuneWorking = $true
+    $intuneMethod = "Standard Cmdlets"
+    Write-Host "   Intune-Zugriff erfolgreich verifiziert (Standard-Cmdlets)!" -ForegroundColor Green
+} catch {
+    Write-Host "   Standard-Cmdlets nicht verfügbar, versuche Graph API direkt..." -ForegroundColor Yellow
+    
+    # Methode 2: Fallback auf direkte Graph API Aufrufe
+    try {
+        $graphUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$top=1"
+        $result = Invoke-MgGraphRequest -Uri $graphUri -Method GET -ErrorAction Stop
+        $intuneWorking = $true
+        $intuneMethod = "Graph API (Direct)"
+        Write-Host "   Intune-Zugriff erfolgreich verifiziert (Graph API)!" -ForegroundColor Green
+    } catch {
+        Write-Host "   WARNUNG: Intune-Zugriff konnte nicht verifiziert werden: $_" -ForegroundColor Yellow
+        Write-Host "   Möglicherweise fehlen Intune-Lizenzen oder Berechtigungen" -ForegroundColor Yellow
+    }
+}
+
+if ($intuneWorking) {
+    Write-Host "   Zugriffsmethode: $intuneMethod" -ForegroundColor Gray
     
     # Zeige Intune-Informationen
-    $allDevices = Get-MgDeviceManagementManagedDevice -All -ErrorAction SilentlyContinue
-    if ($allDevices) {
-        Write-Host "   Verwaltete Geräte: $($allDevices.Count)" -ForegroundColor Gray
+    try {
+        # Versuche Geräteanzahl zu ermitteln
+        if ($intuneMethod -eq "Standard Cmdlets") {
+            $allDevices = Get-MgDeviceManagementManagedDevice -All -ErrorAction SilentlyContinue
+            if ($allDevices) {
+                Write-Host "   Verwaltete Geräte: $($allDevices.Count)" -ForegroundColor Gray
+            }
+        } else {
+            # Verwende Graph API für Geräteanzahl
+            $graphUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/`$count"
+            $deviceCount = Invoke-MgGraphRequest -Uri $graphUri -Method GET -ErrorAction SilentlyContinue
+            if ($deviceCount) {
+                Write-Host "   Verwaltete Geräte: $deviceCount" -ForegroundColor Gray
+            }
+        }
+        
+        # Teste auch Policy-Zugriff
+        try {
+            $configUri = "https://graph.microsoft.com/v1.0/deviceManagement/deviceConfigurations?`$top=1"
+            $configTest = Invoke-MgGraphRequest -Uri $configUri -Method GET -ErrorAction Stop
+            Write-Host "   Policy-Zugriff: Verfügbar" -ForegroundColor Gray
+        } catch {
+            Write-Host "   Policy-Zugriff: Eingeschränkt" -ForegroundColor Yellow
+        }
+        
+    } catch {
+        Write-Host "   Hinweis: Erweiterte Intune-Informationen nicht verfügbar" -ForegroundColor Yellow
     }
-} catch {
-    Write-Host "   WARNUNG: Intune-Zugriff konnte nicht verifiziert werden: $_" -ForegroundColor Yellow
-    Write-Host "   Möglicherweise fehlen Intune-Lizenzen oder Berechtigungen" -ForegroundColor Yellow
 }
+
 Write-Host ""
 
 # Zusammenfassung
@@ -193,38 +264,35 @@ Write-Host ""
 $connections = @()
 
 if (Get-AzContext -ErrorAction SilentlyContinue) {
-    $connections += "Azure (Az)"
+    $connections += "✓ Azure (Az)"
 }
 
 try {
     $exoTest = Get-OrganizationConfig -ErrorAction SilentlyContinue
     if ($exoTest) {
-        $connections += "Exchange Online"
+        $connections += "✓ Exchange Online"
     }
 } catch {}
 
 if (Get-MgContext -ErrorAction SilentlyContinue) {
-    $connections += "Microsoft Graph"
+    $connections += "✓ Microsoft Graph"
 }
 
 try {
     $aadTest = Get-AzureADTenantDetail -ErrorAction SilentlyContinue
     if ($aadTest) {
-        $connections += "Azure AD"
+        $connections += "✓ Azure AD"
     }
 } catch {}
 
-try {
-    $intuneTest = Get-MgDeviceManagementManagedDevice -Top 1 -ErrorAction SilentlyContinue
-    if ($intuneTest -or $?) {
-        $connections += "Intune (via Graph)"
-    }
-} catch {}
+if ($intuneWorking) {
+    $connections += "✓ Intune (via $intuneMethod)"
+}
 
 if ($connections.Count -gt 0) {
     Write-Host "Erfolgreich angemeldet bei:" -ForegroundColor Green
     foreach ($conn in $connections) {
-        Write-Host "  ✓ $conn" -ForegroundColor White
+        Write-Host "  $conn" -ForegroundColor White
     }
 } else {
     Write-Host "WARNUNG: Keine erfolgreichen Verbindungen hergestellt!" -ForegroundColor Red
@@ -236,21 +304,40 @@ Write-Host ""
 
 # Optionale Anzeige von Hilfe-Befehlen
 Write-Host "Nützliche Befehle zum Testen:" -ForegroundColor Yellow
+Write-Host ""
 Write-Host "  # Azure" -ForegroundColor Cyan
-Write-Host "  Get-AzSubscription                              # Abonnements anzeigen" -ForegroundColor Gray
+Write-Host "  Get-AzSubscription                                      # Abonnements anzeigen" -ForegroundColor Gray
+Write-Host "  Get-AzResource | Select-Object -First 10                # Ressourcen anzeigen" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  # Exchange Online" -ForegroundColor Cyan
-Write-Host "  Get-Mailbox -ResultSize 10                      # Postfächer anzeigen" -ForegroundColor Gray
+Write-Host "  Get-Mailbox -ResultSize 10                              # Postfächer anzeigen" -ForegroundColor Gray
+Write-Host "  Get-OrganizationConfig                                  # Org-Konfiguration" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  # Microsoft Graph" -ForegroundColor Cyan
-Write-Host "  Get-MgUser -Top 10                              # Benutzer anzeigen" -ForegroundColor Gray
+Write-Host "  Get-MgUser -Top 10                                      # Benutzer anzeigen" -ForegroundColor Gray
+Write-Host "  Get-MgGroup -Top 10                                     # Gruppen anzeigen" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  # Azure AD" -ForegroundColor Cyan
-Write-Host "  Get-AzureADUser -Top 10                         # Benutzer anzeigen" -ForegroundColor Gray
+Write-Host "  Get-AzureADUser -Top 10                                 # Benutzer anzeigen" -ForegroundColor Gray
+Write-Host "  Get-AzureADTenantDetail                                 # Tenant-Details" -ForegroundColor Gray
 Write-Host ""
-Write-Host "  # Intune (Microsoft Graph)" -ForegroundColor Cyan
-Write-Host "  Get-MgDeviceManagementManagedDevice -Top 10     # Verwaltete Geräte" -ForegroundColor Gray
-Write-Host "  Get-MgDeviceAppManagement                       # Intune Apps" -ForegroundColor Gray
-Write-Host "  Get-MgDeviceManagementDeviceConfiguration       # Gerätekonfigurationen" -ForegroundColor Gray
-Write-Host "  Get-MgDeviceManagementDeviceCompliancePolicy    # Compliance-Richtlinien" -ForegroundColor Gray
+Write-Host "  # Intune (Microsoft Graph - Standard Cmdlets)" -ForegroundColor Cyan
+Write-Host "  Get-MgDeviceManagementManagedDevice -Top 10             # Verwaltete Geräte" -ForegroundColor Gray
+Write-Host "  Get-MgDeviceManagementDeviceConfiguration               # Gerätekonfigurationen" -ForegroundColor Gray
+Write-Host "  Get-MgDeviceManagementDeviceCompliancePolicy            # Compliance-Richtlinien" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  # Intune (Graph API - Fallback-Methode)" -ForegroundColor Cyan
+Write-Host "  # Verwenden Sie diese, wenn Standard-Cmdlets nicht verfügbar sind:" -ForegroundColor Yellow
+Write-Host "  Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices' -Method GET" -ForegroundColor Gray
+Write-Host "  Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/beta/deviceManagement/configurationPolicies' -Method GET" -ForegroundColor Gray
+Write-Host ""
+
+# Zeige installierte Graph-Module
+Write-Host "Installierte Microsoft.Graph Module:" -ForegroundColor Cyan
+$graphModules = Get-Module -ListAvailable -Name "Microsoft.Graph*" | Select-Object Name, Version | Sort-Object Name
+if ($graphModules) {
+    $graphModules | Format-Table -AutoSize
+} else {
+    Write-Host "  Keine Microsoft.Graph Module gefunden" -ForegroundColor Yellow
+}
 Write-Host ""
