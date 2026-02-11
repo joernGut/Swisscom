@@ -1624,7 +1624,6 @@ function Test-SharePointConfiguration {
                 
                 # ============================================================
                 # CHECK 2: Site Creation
-                # JGU - START - Bitte hier anpassen
                 # ============================================================
                 try {
                     Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
@@ -1691,8 +1690,7 @@ function Test-SharePointConfiguration {
                     $spConfig.Settings.SiteCreation = "Error"
                     $spConfig.Errors += "Error checking site creation: $($_.Exception.Message)"
                 }
-                # JGU - END - Site Creation Check
-                
+                               
                 # ============================================================
                 # CHECK 3: Legacy Browser Auth
                 # ============================================================
