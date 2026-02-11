@@ -1867,11 +1867,11 @@ function Test-TeamsConfiguration {
                 Write-Host ""
                 
                 # ============================================================
-                # CHECK 1: External Access (Unmanaged Teams)
+                # CHECK 1: Meetings with unmanaged MS Accounts
                 # ============================================================
                 try {
                     Write-Host "  [Teams] " -NoNewline -ForegroundColor Gray
-                    Write-Host "Checking External Access settings..." -NoNewline
+                    Write-Host "Checking Meetings with unmanaged MS Accounts..." -NoNewline
                     
                     $federationConfig = Get-CsTenantFederationConfiguration -ErrorAction Stop
                     $externalAccessEnabled = $federationConfig.AllowTeamsConsumer
@@ -1905,39 +1905,44 @@ function Test-TeamsConfiguration {
                     $enabledProviders = @()
                     
                     # Citrix Files
-                    if ($clientConfig.AllowCitrixContentSharing -eq $true) {
+                    $citrixValue = $clientConfig.AllowCitrixContentSharing
+                    if ($citrixValue -eq $true -or $citrixValue -eq "Enabled") {
                         $allDisabled = $false
                         $enabledProviders += "Citrix"
                     }
-                    $teamsConfig.Settings.CloudStorageCitrix = $clientConfig.AllowCitrixContentSharing
+                    $teamsConfig.Settings.CloudStorageCitrix = if ($citrixValue -eq $false -or $citrixValue -eq "Disabled") { "Disabled" } else { "Enabled" }
                     
                     # Dropbox
-                    if ($clientConfig.AllowDropBox -eq $true) {
+                    $dropboxValue = $clientConfig.AllowDropBox
+                    if ($dropboxValue -eq $true -or $dropboxValue -eq "Enabled") {
                         $allDisabled = $false
                         $enabledProviders += "Dropbox"
                     }
-                    $teamsConfig.Settings.CloudStorageDropbox = $clientConfig.AllowDropBox
+                    $teamsConfig.Settings.CloudStorageDropbox = if ($dropboxValue -eq $false -or $dropboxValue -eq "Disabled") { "Disabled" } else { "Enabled" }
                     
                     # Box
-                    if ($clientConfig.AllowBox -eq $true) {
+                    $boxValue = $clientConfig.AllowBox
+                    if ($boxValue -eq $true -or $boxValue -eq "Enabled") {
                         $allDisabled = $false
                         $enabledProviders += "Box"
                     }
-                    $teamsConfig.Settings.CloudStorageBox = $clientConfig.AllowBox
+                    $teamsConfig.Settings.CloudStorageBox = if ($boxValue -eq $false -or $boxValue -eq "Disabled") { "Disabled" } else { "Enabled" }
                     
                     # Google Drive
-                    if ($clientConfig.AllowGoogleDrive -eq $true) {
+                    $googleValue = $clientConfig.AllowGoogleDrive
+                    if ($googleValue -eq $true -or $googleValue -eq "Enabled") {
                         $allDisabled = $false
                         $enabledProviders += "Google Drive"
                     }
-                    $teamsConfig.Settings.CloudStorageGoogleDrive = $clientConfig.AllowGoogleDrive
+                    $teamsConfig.Settings.CloudStorageGoogleDrive = if ($googleValue -eq $false -or $googleValue -eq "Disabled") { "Disabled" } else { "Enabled" }
                     
                     # Egnyte
-                    if ($clientConfig.AllowEgnyte -eq $true) {
+                    $egnyteValue = $clientConfig.AllowEgnyte
+                    if ($egnyteValue -eq $true -or $egnyteValue -eq "Enabled") {
                         $allDisabled = $false
                         $enabledProviders += "Egnyte"
                     }
-                    $teamsConfig.Settings.CloudStorageEgnyte = $clientConfig.AllowEgnyte
+                    $teamsConfig.Settings.CloudStorageEgnyte = if ($egnyteValue -eq $false -or $egnyteValue -eq "Disabled") { "Disabled" } else { "Enabled" }
                     
                     if ($allDisabled) {
                         Write-Host " ✓ ALL DISABLED" -ForegroundColor Green
@@ -1962,11 +1967,11 @@ function Test-TeamsConfiguration {
                     
                     # Anonymous users can join
                     $anonymousCanJoin = $meetingConfig.DisableAnonymousJoin -eq $false
-                    $teamsConfig.Settings.AnonymousUsersCanJoin = $anonymousCanJoin
+                    $teamsConfig.Settings.AnonymousUsersCanJoin = if ($anonymousCanJoin) { "Enabled" } else { "Disabled" }
                     
                     # Anonymous users can start meeting
                     $anonymousCanStart = -not $meetingConfig.EnabledAnonymousUsersRequireLobby
-                    $teamsConfig.Settings.AnonymousUsersCanStartMeeting = $anonymousCanStart
+                    $teamsConfig.Settings.AnonymousUsersCanStartMeeting = if ($anonymousCanStart) { "Enabled" } else { "Disabled" }
                     
                     $meetingIssues = @()
                     
@@ -1987,6 +1992,8 @@ function Test-TeamsConfiguration {
                     
                 } catch {
                     Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    $teamsConfig.Settings.AnonymousUsersCanJoin = "Error"
+                    $teamsConfig.Settings.AnonymousUsersCanStartMeeting = "Error"
                     $teamsConfig.Errors += "Error checking meeting settings: $($_.Exception.Message)"
                 }
                 
@@ -2029,13 +2036,13 @@ function Test-TeamsConfiguration {
         
         # Determine overall compliance
         $teamsConfig.Compliant = ($teamsConfig.Settings.ExternalAccessEnabled -eq $false) -and
-                                  ($teamsConfig.Settings.CloudStorageCitrix -eq $false) -and
-                                  ($teamsConfig.Settings.CloudStorageDropbox -eq $false) -and
-                                  ($teamsConfig.Settings.CloudStorageBox -eq $false) -and
-                                  ($teamsConfig.Settings.CloudStorageGoogleDrive -eq $false) -and
-                                  ($teamsConfig.Settings.CloudStorageEgnyte -eq $false) -and
-                                  ($teamsConfig.Settings.AnonymousUsersCanJoin -eq $false) -and
-                                  ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq $false) -and
+                                  ($teamsConfig.Settings.CloudStorageCitrix -eq "Disabled") -and
+                                  ($teamsConfig.Settings.CloudStorageDropbox -eq "Disabled") -and
+                                  ($teamsConfig.Settings.CloudStorageBox -eq "Disabled") -and
+                                  ($teamsConfig.Settings.CloudStorageGoogleDrive -eq "Disabled") -and
+                                  ($teamsConfig.Settings.CloudStorageEgnyte -eq "Disabled") -and
+                                  ($teamsConfig.Settings.AnonymousUsersCanJoin -eq "Disabled") -and
+                                  ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq "Disabled") -and
                                   ($teamsConfig.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") -and
                                   ($teamsConfig.Errors.Count -eq 0)
         
@@ -2049,7 +2056,7 @@ function Test-TeamsConfiguration {
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  TEAMS CONFIGURATION SUMMARY" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
-    Write-Host "  External Access:         " -NoNewline -ForegroundColor White
+    Write-Host "  Meetings w/ unmanaged MS: " -NoNewline -ForegroundColor White
     if ($teamsConfig.Settings.ExternalAccessEnabled -eq $false) {
         Write-Host "Disabled (✓)" -ForegroundColor Green
     } elseif ($teamsConfig.Settings.ExternalAccessEnabled -eq $true) {
@@ -2059,31 +2066,48 @@ function Test-TeamsConfiguration {
     }
     
     Write-Host "  Cloud Storage:           " -NoNewline -ForegroundColor White
-    $allStorageDisabled = ($teamsConfig.Settings.CloudStorageCitrix -eq $false) -and
-                          ($teamsConfig.Settings.CloudStorageDropbox -eq $false) -and
-                          ($teamsConfig.Settings.CloudStorageBox -eq $false) -and
-                          ($teamsConfig.Settings.CloudStorageGoogleDrive -eq $false) -and
-                          ($teamsConfig.Settings.CloudStorageEgnyte -eq $false)
+    $allStorageDisabled = ($teamsConfig.Settings.CloudStorageCitrix -eq "Disabled") -and
+                          ($teamsConfig.Settings.CloudStorageDropbox -eq "Disabled") -and
+                          ($teamsConfig.Settings.CloudStorageBox -eq "Disabled") -and
+                          ($teamsConfig.Settings.CloudStorageGoogleDrive -eq "Disabled") -and
+                          ($teamsConfig.Settings.CloudStorageEgnyte -eq "Disabled")
+    
     if ($allStorageDisabled) {
         Write-Host "All Disabled (✓)" -ForegroundColor Green
     } else {
-        Write-Host "Some Enabled (✗)" -ForegroundColor Yellow
+        # Build list of enabled providers
+        $enabledList = @()
+        if ($teamsConfig.Settings.CloudStorageCitrix -eq "Enabled") { $enabledList += "Citrix" }
+        if ($teamsConfig.Settings.CloudStorageDropbox -eq "Enabled") { $enabledList += "Dropbox" }
+        if ($teamsConfig.Settings.CloudStorageBox -eq "Enabled") { $enabledList += "Box" }
+        if ($teamsConfig.Settings.CloudStorageGoogleDrive -eq "Enabled") { $enabledList += "Google Drive" }
+        if ($teamsConfig.Settings.CloudStorageEgnyte -eq "Enabled") { $enabledList += "Egnyte" }
+        
+        if ($enabledList.Count -gt 0) {
+            Write-Host "Enabled: $($enabledList -join ', ') (✗)" -ForegroundColor Yellow
+        } else {
+            Write-Host "Unknown" -ForegroundColor Gray
+        }
     }
     
     Write-Host "  Anonymous Join:          " -NoNewline -ForegroundColor White
-    if ($teamsConfig.Settings.AnonymousUsersCanJoin -eq $false) {
+    if ($teamsConfig.Settings.AnonymousUsersCanJoin -eq "Disabled") {
         Write-Host "Disabled (✓)" -ForegroundColor Green
-    } elseif ($teamsConfig.Settings.AnonymousUsersCanJoin -eq $true) {
+    } elseif ($teamsConfig.Settings.AnonymousUsersCanJoin -eq "Enabled") {
         Write-Host "Enabled (✗)" -ForegroundColor Yellow
+    } elseif ($teamsConfig.Settings.AnonymousUsersCanJoin -eq "Error") {
+        Write-Host "Error - Could not check" -ForegroundColor Red
     } else {
         Write-Host "Not Checked" -ForegroundColor Gray
     }
     
     Write-Host "  Anonymous Can Start:     " -NoNewline -ForegroundColor White
-    if ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq $false) {
+    if ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq "Disabled") {
         Write-Host "Disabled (✓)" -ForegroundColor Green
-    } elseif ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq $true) {
+    } elseif ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq "Enabled") {
         Write-Host "Enabled (✗)" -ForegroundColor Yellow
+    } elseif ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq "Error") {
+        Write-Host "Error - Could not check" -ForegroundColor Red
     } else {
         Write-Host "Not Checked" -ForegroundColor Gray
     }
@@ -2140,7 +2164,7 @@ function Export-HTMLReport {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BWS Check Report - $(if ($CustomerName) { "$CustomerName - " })BCID $BCID</title>
+    <title>Business Workplace Services Check Report - $(if ($CustomerName) { "$CustomerName - " })BCID $BCID</title>
     <style>
         * {
             margin: 0;
@@ -2399,7 +2423,7 @@ function Export-HTMLReport {
 <body>
     <div class="container">
         <div class="header">
-            <h1>🛡️ BWS Check Report</h1>
+            <h1>🛡️ Business Workplace Services Check Report</h1>
 "@
     
     if ($CustomerName) {
@@ -2708,18 +2732,18 @@ function Export-HTMLReport {
                 <h2><span class="section-icon">💬</span>Teams Configuration</h2>
                 <h3>Configuration Settings:</h3>
                 <ul class="info-list">
-                    <li><strong>External Access (Unmanaged Teams):</strong> $(if ($TeamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.ExternalAccessEnabled -eq $true) { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>Meetings with unmanaged MS Accounts:</strong> $(if ($TeamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.ExternalAccessEnabled -eq $true) { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
                     <li><strong>Cloud Storage Providers:</strong>
                         <ul style="margin-top: 5px;">
-                            <li>Citrix Files: $(if ($TeamsResults.Status.Settings.CloudStorageCitrix -eq $false) { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
-                            <li>Dropbox: $(if ($TeamsResults.Status.Settings.CloudStorageDropbox -eq $false) { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
-                            <li>Box: $(if ($TeamsResults.Status.Settings.CloudStorageBox -eq $false) { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
-                            <li>Google Drive: $(if ($TeamsResults.Status.Settings.CloudStorageGoogleDrive -eq $false) { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
-                            <li>Egnyte: $(if ($TeamsResults.Status.Settings.CloudStorageEgnyte -eq $false) { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
+                            <li>Citrix Files: $(if ($TeamsResults.Status.Settings.CloudStorageCitrix -eq "Disabled") { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
+                            <li>Dropbox: $(if ($TeamsResults.Status.Settings.CloudStorageDropbox -eq "Disabled") { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
+                            <li>Box: $(if ($TeamsResults.Status.Settings.CloudStorageBox -eq "Disabled") { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
+                            <li>Google Drive: $(if ($TeamsResults.Status.Settings.CloudStorageGoogleDrive -eq "Disabled") { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
+                            <li>Egnyte: $(if ($TeamsResults.Status.Settings.CloudStorageEgnyte -eq "Disabled") { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
                         </ul>
                     </li>
-                    <li><strong>Anonymous Users Can Join:</strong> $(if ($TeamsResults.Status.Settings.AnonymousUsersCanJoin -eq $false) { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.AnonymousUsersCanJoin -eq $true) { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
-                    <li><strong>Anonymous Users Can Start Meeting:</strong> $(if ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq $false) { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq $true) { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>Anonymous Users Can Join:</strong> $(if ($TeamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Enabled") { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>Anonymous Users Can Start Meeting:</strong> $(if ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq "Disabled") { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq "Enabled") { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
                     <li><strong>Who Can Present:</strong> $(if ($TeamsResults.Status.Settings.DefaultPresenterRole -eq 'EveryoneUserOverride') { '<span class="status-found">✓ Everyone (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.DefaultPresenterRole) { "<span class='status-error'>✗ $($TeamsResults.Status.Settings.DefaultPresenterRole) (Non-Compliant)</span>" } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
                 </ul>
             </div>
@@ -3476,15 +3500,25 @@ if ($GUI) {
             if ($runTeams -and $teamsResults -and $teamsResults.CheckPerformed) {
                 Write-Host ""
                 Write-Host "  Teams Configuration:" -ForegroundColor White
-                Write-Host "    External Access:   " -NoNewline -ForegroundColor White
+                Write-Host "    Meetings w/ unmanaged MS: " -NoNewline -ForegroundColor White
                 Write-Host $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Green" } else { "Yellow" })
                 
-                $allStorageDisabled = ($teamsResults.Status.Settings.CloudStorageCitrix -eq $false) -and ($teamsResults.Status.Settings.CloudStorageDropbox -eq $false) -and ($teamsResults.Status.Settings.CloudStorageBox -eq $false) -and ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq $false) -and ($teamsResults.Status.Settings.CloudStorageEgnyte -eq $false)
+                $allStorageDisabled = ($teamsResults.Status.Settings.CloudStorageCitrix -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageDropbox -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageBox -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageEgnyte -eq "Disabled")
                 Write-Host "    Cloud Storage:     " -NoNewline -ForegroundColor White
-                Write-Host $(if ($allStorageDisabled) { "All Disabled (✓)" } else { "Some Enabled (✗)" }) -ForegroundColor $(if ($allStorageDisabled) { "Green" } else { "Yellow" })
+                if ($allStorageDisabled) {
+                    Write-Host "All Disabled (✓)" -ForegroundColor Green
+                } else {
+                    $enabledList = @()
+                    if ($teamsResults.Status.Settings.CloudStorageCitrix -eq "Enabled") { $enabledList += "Citrix" }
+                    if ($teamsResults.Status.Settings.CloudStorageDropbox -eq "Enabled") { $enabledList += "Dropbox" }
+                    if ($teamsResults.Status.Settings.CloudStorageBox -eq "Enabled") { $enabledList += "Box" }
+                    if ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq "Enabled") { $enabledList += "Google Drive" }
+                    if ($teamsResults.Status.Settings.CloudStorageEgnyte -eq "Enabled") { $enabledList += "Egnyte" }
+                    Write-Host "Enabled: $($enabledList -join ', ') (✗)" -ForegroundColor Yellow
+                }
                 
                 Write-Host "    Anonymous Join:    " -NoNewline -ForegroundColor White
-                Write-Host $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq $false) { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq $false) { "Green" } else { "Yellow" })
+                Write-Host $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Green" } else { "Yellow" })
                 
                 Write-Host "    Who Can Present:   " -NoNewline -ForegroundColor White
                 Write-Host $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Everyone (✓)" } else { "$($teamsResults.Status.Settings.DefaultPresenterRole) (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Green" } else { "Yellow" })
@@ -3510,7 +3544,8 @@ if ($GUI) {
                                  (-not $intuneConnResults -or ($intuneConnResults.Status.Errors.Count -eq 0)) -and
                                  (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0)) -and
                                  (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0)) -and
-                                 (-not $sharePointResults -or ($sharePointResults.Status.Compliant))
+                                 (-not $sharePointResults -or ($sharePointResults.Status.Compliant)) -and
+                                 (-not $teamsResults -or ($teamsResults.Status.Compliant))
                 
                 # Generate HTML report
                 if ($exportFormat -eq "HTML" -or $exportFormat -eq "Both") {
@@ -3721,15 +3756,25 @@ if ($sharePointResults -and $sharePointResults.CheckPerformed) {
 if ($teamsResults -and $teamsResults.CheckPerformed) {
     Write-Host ""
     Write-Host "  Teams Configuration:" -ForegroundColor White
-    Write-Host "    External Access:   " -NoNewline -ForegroundColor White
+    Write-Host "    Meetings w/ unmanaged MS: " -NoNewline -ForegroundColor White
     Write-Host $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Green" } else { "Yellow" })
     
-    $allStorageDisabled = ($teamsResults.Status.Settings.CloudStorageCitrix -eq $false) -and ($teamsResults.Status.Settings.CloudStorageDropbox -eq $false) -and ($teamsResults.Status.Settings.CloudStorageBox -eq $false) -and ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq $false) -and ($teamsResults.Status.Settings.CloudStorageEgnyte -eq $false)
+    $allStorageDisabled = ($teamsResults.Status.Settings.CloudStorageCitrix -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageDropbox -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageBox -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageEgnyte -eq "Disabled")
     Write-Host "    Cloud Storage:     " -NoNewline -ForegroundColor White
-    Write-Host $(if ($allStorageDisabled) { "All Disabled (✓)" } else { "Some Enabled (✗)" }) -ForegroundColor $(if ($allStorageDisabled) { "Green" } else { "Yellow" })
+    if ($allStorageDisabled) {
+        Write-Host "All Disabled (✓)" -ForegroundColor Green
+    } else {
+        $enabledList = @()
+        if ($teamsResults.Status.Settings.CloudStorageCitrix -eq "Enabled") { $enabledList += "Citrix" }
+        if ($teamsResults.Status.Settings.CloudStorageDropbox -eq "Enabled") { $enabledList += "Dropbox" }
+        if ($teamsResults.Status.Settings.CloudStorageBox -eq "Enabled") { $enabledList += "Box" }
+        if ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq "Enabled") { $enabledList += "Google Drive" }
+        if ($teamsResults.Status.Settings.CloudStorageEgnyte -eq "Enabled") { $enabledList += "Egnyte" }
+        Write-Host "Enabled: $($enabledList -join ', ') (✗)" -ForegroundColor Yellow
+    }
     
     Write-Host "    Anonymous Join:    " -NoNewline -ForegroundColor White
-    Write-Host $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq $false) { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq $false) { "Green" } else { "Yellow" })
+    Write-Host $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Green" } else { "Yellow" })
     
     Write-Host "    Who Can Present:   " -NoNewline -ForegroundColor White
     Write-Host $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Everyone (✓)" } else { "$($teamsResults.Status.Settings.DefaultPresenterRole) (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Green" } else { "Yellow" })
@@ -3742,7 +3787,8 @@ $overallStatus = ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Co
                  (-not $intuneConnResults -or ($intuneConnResults.Status.Errors.Count -eq 0)) -and
                  (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0)) -and
                  (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0)) -and
-                 (-not $sharePointResults -or ($sharePointResults.Status.Compliant))
+                 (-not $sharePointResults -or ($sharePointResults.Status.Compliant)) -and
+                 (-not $teamsResults -or ($teamsResults.Status.Compliant))
 
 Write-Host "  Overall Status: " -NoNewline -ForegroundColor White
 if ($overallStatus) {

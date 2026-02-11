@@ -535,6 +535,7 @@ $btnConnect.Add_Click({
     if ($services.Teams) {
         $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
         $textOutput.AppendText("6. Microsoft Teams Anmeldung...`r`n")
+        $textOutput.AppendText("   Ein Login-Fenster wird geöffnet - bitte anmelden`r`n")
         $textOutput.ScrollToCaret()
         [System.Windows.Forms.Application]::DoEvents()
         
@@ -542,17 +543,65 @@ $btnConnect.Add_Click({
             # Importiere Modul explizit
             Import-Module MicrosoftTeams -ErrorAction Stop
             
-            # Verbinde zu Teams
-            Connect-MicrosoftTeams -ErrorAction Stop | Out-Null
+            $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+            $textOutput.AppendText("   → Warte auf Anmeldung...`r`n")
+            $textOutput.AppendText("   (Falls kein Fenster erscheint, prüfen Sie die Taskleiste)`r`n")
+            $textOutput.ScrollToCaret()
             
-            # Teste Verbindung mit Get-CsTeamsClientConfiguration
-            $teamsConfig = Get-CsTeamsClientConfiguration -ErrorAction Stop
+            # GUI responsive halten während Login
+            $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+            [System.Windows.Forms.Application]::DoEvents()
             
-            $textOutput.SelectionColor = [System.Drawing.Color]::Green
-            $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
-            $textOutput.AppendText("`r`n")
-            $connections += "✓ Microsoft Teams"
+            # Verbinde zu Teams - Standard Browser Auth (mit MFA)
+            # Kein -UseDeviceAuthentication = normaler Browser-Login
+            $teamsConnection = $null
+            
+            # Login in separatem Thread um GUI nicht zu blockieren
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.Open()
+            $runspace.SessionStateProxy.SetVariable("textOutput", $textOutput)
+            
+            $powershell = [powershell]::Create()
+            $powershell.Runspace = $runspace
+            $powershell.AddScript({
+                Import-Module MicrosoftTeams
+                Connect-MicrosoftTeams
+            })
+            
+            $asyncResult = $powershell.BeginInvoke()
+            
+            # Warte auf Fertigstellung, aber halte GUI responsive
+            while (-not $asyncResult.IsCompleted) {
+                [System.Windows.Forms.Application]::DoEvents()
+                Start-Sleep -Milliseconds 100
+            }
+            
+            $teamsConnection = $powershell.EndInvoke($asyncResult)
+            $powershell.Dispose()
+            $runspace.Close()
+            
+            $form.Cursor = [System.Windows.Forms.Cursors]::Default
+            
+            if ($teamsConnection) {
+                # Teste Verbindung
+                $teamsConfig = Get-CsTeamsClientConfiguration -ErrorAction Stop
+                
+                $textOutput.SelectionColor = [System.Drawing.Color]::Green
+                $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
+                if ($teamsConnection.TenantId) {
+                    $textOutput.AppendText("   Tenant ID: $($teamsConnection.TenantId)`r`n")
+                }
+                if ($teamsConnection.Account) {
+                    $textOutput.AppendText("   Account: $($teamsConnection.Account)`r`n")
+                }
+                $textOutput.AppendText("`r`n")
+                $connections += "✓ Microsoft Teams"
+            } else {
+                $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+                $textOutput.AppendText("   ⚠ Anmeldung abgebrochen oder fehlgeschlagen`r`n`r`n")
+            }
         } catch {
+            $form.Cursor = [System.Windows.Forms.Cursors]::Default
             $textOutput.SelectionColor = [System.Drawing.Color]::Red
             $textOutput.AppendText("   ✗ Fehler: $($_.Exception.Message)`r`n")
             $textOutput.AppendText("   Tipp: Prüfen Sie Ihre Berechtigungen (Teams Administrator erforderlich)`r`n`r`n")
@@ -720,7 +769,8 @@ Write-Host "Module werden geladen..." -ForegroundColor Yellow
     "Microsoft.Graph.Groups",
     "Microsoft.Graph.DeviceManagement",
     "AzureAD",
-    "Microsoft.Online.SharePoint.PowerShell"
+    "Microsoft.Online.SharePoint.PowerShell",
+    "MicrosoftTeams"
 )
 
 foreach (`$module in `$modulesToLoad) {
@@ -739,6 +789,7 @@ Write-Host "Nützliche Befehle:" -ForegroundColor Yellow
 Write-Host "  Get-AzContext                  # Azure Kontext" -ForegroundColor Gray
 Write-Host "  Get-MgContext                  # Graph Kontext" -ForegroundColor Gray
 Write-Host "  Get-SPOTenant                  # SharePoint Tenant" -ForegroundColor Gray
+Write-Host "  Get-CsTeamsClientConfiguration # Teams Configuration" -ForegroundColor Gray
 Write-Host "  Get-Mailbox -ResultSize 10     # Exchange Mailboxen" -ForegroundColor Gray
 Write-Host ""
 Write-Host "SharePoint Online Module (nur PS 5.1):" -ForegroundColor Cyan
@@ -905,6 +956,7 @@ Write-Host "Module werden geladen..." -ForegroundColor Yellow
     "Microsoft.Graph.Users",
     "Microsoft.Graph.Groups",
     "Microsoft.Graph.DeviceManagement",
+    "MicrosoftTeams",
     "PnP.PowerShell"  # Verwende PnP statt SPO für PS7
 )
 
@@ -923,6 +975,7 @@ Write-Host ""
 Write-Host "Nützliche Befehle:" -ForegroundColor Yellow
 Write-Host "  Get-AzContext                  # Azure Kontext" -ForegroundColor Gray
 Write-Host "  Get-MgContext                  # Graph Kontext" -ForegroundColor Gray
+Write-Host "  Get-CsTeamsClientConfiguration # Teams Configuration" -ForegroundColor Gray
 Write-Host "  Get-Mailbox -ResultSize 10     # Exchange Mailboxen" -ForegroundColor Gray
 Write-Host ""
 Write-Host "SharePoint Online Kompatibilität:" -ForegroundColor Cyan
