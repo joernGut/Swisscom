@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-    Azure, M365, Intune und SharePoint Login-Script mit GUI
+    Azure, M365, Intune, SharePoint und Teams Login-Script mit GUI
 .DESCRIPTION
-    GUI-basiertes oder konsolenbasiertes Anmeldescript für Azure, Microsoft 365, Intune und SharePoint Online
+    GUI-basiertes oder konsolenbasiertes Anmeldescript für Azure, Microsoft 365, Intune, SharePoint Online und Microsoft Teams
     - Auswahl der gewünschten Dienste per Checkbox oder Parameter
     - SharePoint-URL manuell eingeben
     - Automatische Modul-Installation
@@ -19,18 +19,20 @@
     Melde bei Azure AD an (nur im Konsolen-Modus)
 .PARAMETER SharePoint
     Melde bei SharePoint Online an (nur im Konsolen-Modus)
+.PARAMETER Teams
+    Melde bei Microsoft Teams an (nur im Konsolen-Modus)
 .PARAMETER SharePointUrl
     SharePoint Admin URL (Standard: auto-detect aus Tenant)
 .NOTES
-    Version: 1.0.0.0
+    Version: 1.1.0
     Datum: 2025-02-11
     Autor: BWS PowerShell Script
 .EXAMPLE
     .\Azure-M365-Login-GUI.ps1
     Startet die GUI
 .EXAMPLE
-    .\Azure-M365-Login-GUI.ps1 -Console -Azure -Graph -SharePoint -SharePointUrl "https://contoso-admin.sharepoint.com"
-    Startet im Konsolen-Modus und meldet bei Azure, Graph und SharePoint an
+    .\Azure-M365-Login-GUI.ps1 -Console -Azure -Graph -SharePoint -Teams
+    Startet im Konsolen-Modus und meldet bei Azure, Graph, SharePoint und Teams an
 #>
 
 param(
@@ -53,11 +55,14 @@ param(
     [switch]$SharePoint,
     
     [Parameter(Mandatory=$false)]
+    [switch]$Teams,
+    
+    [Parameter(Mandatory=$false)]
     [string]$SharePointUrl = ""
 )
 
 # Script Version
-$script:Version = "1.0.0.0"
+$script:Version = "1.1.0"
 
 # Requires PowerShell 5.1 or higher
 #Requires -Version 5.1
@@ -158,7 +163,7 @@ $form.Controls.Add($labelHeader)
 # GroupBox für Service-Auswahl
 $groupBoxServices = New-Object System.Windows.Forms.GroupBox
 $groupBoxServices.Location = New-Object System.Drawing.Point(20, 60)
-$groupBoxServices.Size = New-Object System.Drawing.Size(640, 200)
+$groupBoxServices.Size = New-Object System.Drawing.Size(640, 230)
 $groupBoxServices.Text = "Dienste"
 $form.Controls.Add($groupBoxServices)
 
@@ -216,9 +221,17 @@ $textSPUrl.Size = New-Object System.Drawing.Size(200, 20)
 $textSPUrl.Text = "https://TENANT-admin.sharepoint.com"
 $groupBoxServices.Controls.Add($textSPUrl)
 
+# Checkbox: Microsoft Teams
+$chkTeams = New-Object System.Windows.Forms.CheckBox
+$chkTeams.Location = New-Object System.Drawing.Point(20, 180)
+$chkTeams.Size = New-Object System.Drawing.Size(280, 20)
+$chkTeams.Text = "Microsoft Teams"
+$chkTeams.Checked = $true
+$groupBoxServices.Controls.Add($chkTeams)
+
 # Info Label
 $labelInfo = New-Object System.Windows.Forms.Label
-$labelInfo.Location = New-Object System.Drawing.Point(20, 270)
+$labelInfo.Location = New-Object System.Drawing.Point(20, 300)
 $labelInfo.Size = New-Object System.Drawing.Size(640, 40)
 $labelInfo.Text = "Hinweis: Fehlende Module werden automatisch installiert. Sie werden für jeden Service zur Anmeldung aufgefordert (MFA-Unterstützung)."
 $labelInfo.ForeColor = [System.Drawing.Color]::DarkBlue
@@ -226,7 +239,7 @@ $form.Controls.Add($labelInfo)
 
 # Connect Button
 $btnConnect = New-Object System.Windows.Forms.Button
-$btnConnect.Location = New-Object System.Drawing.Point(20, 320)
+$btnConnect.Location = New-Object System.Drawing.Point(20, 350)
 $btnConnect.Size = New-Object System.Drawing.Size(120, 35)
 $btnConnect.Text = "Anmelden"
 $btnConnect.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -236,7 +249,7 @@ $form.Controls.Add($btnConnect)
 
 # PowerShell 5.1 Console Button
 $btnConsolePS5 = New-Object System.Windows.Forms.Button
-$btnConsolePS5.Location = New-Object System.Drawing.Point(150, 320)
+$btnConsolePS5.Location = New-Object System.Drawing.Point(150, 350)
 $btnConsolePS5.Size = New-Object System.Drawing.Size(100, 35)
 $btnConsolePS5.Text = "PowerShell 5.1"
 $btnConsolePS5.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
@@ -246,7 +259,7 @@ $form.Controls.Add($btnConsolePS5)
 
 # PowerShell 7 Console Button
 $btnConsolePS7 = New-Object System.Windows.Forms.Button
-$btnConsolePS7.Location = New-Object System.Drawing.Point(260, 320)
+$btnConsolePS7.Location = New-Object System.Drawing.Point(260, 350)
 $btnConsolePS7.Size = New-Object System.Drawing.Size(100, 35)
 $btnConsolePS7.Text = "PowerShell 7"
 $btnConsolePS7.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
@@ -256,7 +269,7 @@ $form.Controls.Add($btnConsolePS7)
 
 # Disconnect Button
 $btnDisconnect = New-Object System.Windows.Forms.Button
-$btnDisconnect.Location = New-Object System.Drawing.Point(370, 320)
+$btnDisconnect.Location = New-Object System.Drawing.Point(370, 350)
 $btnDisconnect.Size = New-Object System.Drawing.Size(140, 35)
 $btnDisconnect.Text = "Verbindungen trennen"
 $btnDisconnect.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
@@ -266,22 +279,22 @@ $form.Controls.Add($btnDisconnect)
 
 # Clear Button
 $btnClear = New-Object System.Windows.Forms.Button
-$btnClear.Location = New-Object System.Drawing.Point(520, 320)
+$btnClear.Location = New-Object System.Drawing.Point(520, 350)
 $btnClear.Size = New-Object System.Drawing.Size(70, 35)
 $btnClear.Text = "Löschen"
 $form.Controls.Add($btnClear)
 
 # Close Button
 $btnClose = New-Object System.Windows.Forms.Button
-$btnClose.Location = New-Object System.Drawing.Point(600, 320)
+$btnClose.Location = New-Object System.Drawing.Point(600, 350)
 $btnClose.Size = New-Object System.Drawing.Size(60, 35)
 $btnClose.Text = "Schließen"
 $form.Controls.Add($btnClose)
 
 # Output RichTextBox
 $textOutput = New-Object System.Windows.Forms.RichTextBox
-$textOutput.Location = New-Object System.Drawing.Point(20, 370)
-$textOutput.Size = New-Object System.Drawing.Size(640, 330)
+$textOutput.Location = New-Object System.Drawing.Point(20, 400)
+$textOutput.Size = New-Object System.Drawing.Size(640, 300)
 $textOutput.Multiline = $true
 $textOutput.ScrollBars = "Both"
 $textOutput.Font = New-Object System.Drawing.Font("Consolas", 9)
@@ -311,6 +324,7 @@ $btnConnect.Add_Click({
         AzureAD = $chkAzureAD.Checked
         SharePoint = $chkSharePoint.Checked
         SharePointUrl = $textSPUrl.Text
+        Teams = $chkTeams.Checked
     }
     
     # ========================================================================
@@ -339,6 +353,10 @@ $btnConnect.Add_Click({
     }
     if ($services.SharePoint) {
         $modulesToInstall += "Microsoft.Online.SharePoint.PowerShell"
+    }
+    
+    if ($services.Teams) {
+        $modulesToInstall += "MicrosoftTeams"
     }
     
     # Installiere Module
@@ -513,6 +531,35 @@ $btnConnect.Add_Click({
         [System.Windows.Forms.Application]::DoEvents()
     }
     
+    # Microsoft Teams
+    if ($services.Teams) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+        $textOutput.AppendText("6. Microsoft Teams Anmeldung...`r`n")
+        $textOutput.ScrollToCaret()
+        [System.Windows.Forms.Application]::DoEvents()
+        
+        try {
+            # Importiere Modul explizit
+            Import-Module MicrosoftTeams -ErrorAction Stop
+            
+            # Verbinde zu Teams
+            Connect-MicrosoftTeams -ErrorAction Stop | Out-Null
+            
+            # Teste Verbindung mit Get-CsTeamsClientConfiguration
+            $teamsConfig = Get-CsTeamsClientConfiguration -ErrorAction Stop
+            
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
+            $textOutput.AppendText("`r`n")
+            $connections += "✓ Microsoft Teams"
+        } catch {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("   ✗ Fehler: $($_.Exception.Message)`r`n")
+            $textOutput.AppendText("   Tipp: Prüfen Sie Ihre Berechtigungen (Teams Administrator erforderlich)`r`n`r`n")
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    
     # ========================================================================
     # Zusammenfassung
     # ========================================================================
@@ -598,6 +645,14 @@ $btnConsolePS5.Add_Click({
             }
         } catch {}
     }
+    
+    # Microsoft Teams
+    try {
+        $teamsConfig = Get-CsTeamsClientConfiguration -ErrorAction SilentlyContinue
+        if ($teamsConfig) {
+            $activeConnections += "Microsoft Teams"
+        }
+    } catch {}
     
     # Zeige aktive Verbindungen
     if ($activeConnections.Count -gt 0) {
