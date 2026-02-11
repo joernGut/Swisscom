@@ -1,401 +1,1255 @@
 <#
 .SYNOPSIS
-    Azure, Microsoft 365, Intune und SharePoint Online Anmeldescript mit MFA-Unterstützung
+    Azure, M365, Intune und SharePoint Login-Script mit GUI
 .DESCRIPTION
-    Installiert benötigte Module (falls nicht vorhanden) und meldet sich interaktiv bei 
-    Azure, Microsoft 365, Intune und SharePoint Online an
+    GUI-basiertes oder konsolenbasiertes Anmeldescript für Azure, Microsoft 365, Intune und SharePoint Online
+    - Auswahl der gewünschten Dienste per Checkbox oder Parameter
+    - SharePoint-URL manuell eingeben
+    - Automatische Modul-Installation
+    - PowerShell 5.1 und 7 Konsolen-Support
+.PARAMETER Console
+    Starte im Konsolen-Modus ohne GUI
+.PARAMETER Azure
+    Melde bei Azure an (nur im Konsolen-Modus)
+.PARAMETER Exchange
+    Melde bei Exchange Online an (nur im Konsolen-Modus)
+.PARAMETER Graph
+    Melde bei Microsoft Graph an (nur im Konsolen-Modus)
+.PARAMETER AzureAD
+    Melde bei Azure AD an (nur im Konsolen-Modus)
+.PARAMETER SharePoint
+    Melde bei SharePoint Online an (nur im Konsolen-Modus)
+.PARAMETER SharePointUrl
+    SharePoint Admin URL (Standard: auto-detect aus Tenant)
 .NOTES
+    Version: 1.0.0.0
+    Datum: 2025-02-11
     Autor: BWS PowerShell Script
-    Datum: 2026-02-10
-    Unterstützt Multi-Faktor-Authentifizierung (MFA)
-    Version: 2.0 - SharePoint Online Support hinzugefügt
+.EXAMPLE
+    .\Azure-M365-Login-GUI.ps1
+    Startet die GUI
+.EXAMPLE
+    .\Azure-M365-Login-GUI.ps1 -Console -Azure -Graph -SharePoint -SharePointUrl "https://contoso-admin.sharepoint.com"
+    Startet im Konsolen-Modus und meldet bei Azure, Graph und SharePoint an
 #>
 
-Write-Host "=== Azure, M365, Intune und SharePoint Online Anmeldescript ===" -ForegroundColor Cyan
-Write-Host ""
+param(
+    [Parameter(Mandatory=$false)]
+    [switch]$Console,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$Azure,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$Exchange,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$Graph,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$AzureAD,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$SharePoint,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$SharePointUrl = ""
+)
 
-# Funktion zum Prüfen und Installieren von Modulen
+# Script Version
+$script:Version = "1.0.0.0"
+
+# Requires PowerShell 5.1 or higher
+#Requires -Version 5.1
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# ============================================================================
+# Modul-Installation Funktionen
+# ============================================================================
+
 function Install-RequiredModule {
     param(
-        [string]$ModuleName
+        [string]$ModuleName,
+        [System.Windows.Forms.RichTextBox]$OutputBox
     )
     
-    Write-Host "Prüfe Modul: $ModuleName..." -ForegroundColor Yellow
+    $OutputBox.SelectionColor = [System.Drawing.Color]::DarkCyan
+    $OutputBox.AppendText("Prüfe Modul: $ModuleName...`r`n")
+    $OutputBox.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
     
     if (Get-Module -ListAvailable -Name $ModuleName) {
-        Write-Host "  Modul '$ModuleName' ist bereits installiert." -ForegroundColor Green
+        $OutputBox.SelectionColor = [System.Drawing.Color]::Green
+        $OutputBox.AppendText("  ✓ Modul '$ModuleName' bereits installiert`r`n")
     } else {
-        Write-Host "  Modul '$ModuleName' wird installiert..." -ForegroundColor Yellow
+        $OutputBox.SelectionColor = [System.Drawing.Color]::Orange
+        $OutputBox.AppendText("  ⚙ Installiere Modul '$ModuleName'...`r`n")
+        $OutputBox.ScrollToCaret()
+        [System.Windows.Forms.Application]::DoEvents()
+        
         try {
             Install-Module -Name $ModuleName -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
-            Write-Host "  Modul '$ModuleName' erfolgreich installiert." -ForegroundColor Green
+            $OutputBox.SelectionColor = [System.Drawing.Color]::Green
+            $OutputBox.AppendText("  ✓ Modul '$ModuleName' erfolgreich installiert`r`n")
         } catch {
-            Write-Host "  FEHLER beim Installieren von '$ModuleName': $_" -ForegroundColor Red
+            $OutputBox.SelectionColor = [System.Drawing.Color]::Red
+            $OutputBox.AppendText("  ✗ FEHLER beim Installieren: $_`r`n")
             return $false
         }
     }
     
     # Modul importieren
-    Write-Host "  Importiere Modul '$ModuleName'..." -ForegroundColor Yellow
     try {
-        Import-Module $ModuleName -ErrorAction Stop -WarningAction SilentlyContinue
-        Write-Host "  Modul '$ModuleName' erfolgreich importiert." -ForegroundColor Green
+        Import-Module $ModuleName -ErrorAction Stop -WarningAction SilentlyContinue -DisableNameChecking
+        $OutputBox.SelectionColor = [System.Drawing.Color]::Green
+        $OutputBox.AppendText("  ✓ Modul importiert`r`n")
         return $true
     } catch {
-        Write-Host "  FEHLER beim Importieren von '$ModuleName': $_" -ForegroundColor Red
+        $OutputBox.SelectionColor = [System.Drawing.Color]::Red
+        $OutputBox.AppendText("  ✗ Fehler beim Importieren: $_`r`n")
         return $false
     }
 }
 
-Write-Host "Schritt 1: Überprüfung und Installation der benötigten Module" -ForegroundColor Cyan
-Write-Host ""
+# ============================================================================
+# Console Mode Check
+# ============================================================================
 
-# Liste der benötigten Module
-$requiredModules = @(
-    "Az.Accounts",                          # Azure PowerShell
-    "Az.Resources",                         # Azure Ressourcen
-    "ExchangeOnlineManagement",             # Exchange Online
-    "Microsoft.Graph.Authentication",       # Microsoft Graph Authentication
-    "Microsoft.Graph.Users",                # Microsoft Graph Users
-    "Microsoft.Graph.Groups",               # Microsoft Graph Groups
-    "Microsoft.Graph.DeviceManagement",     # Intune Device Management
-    "AzureAD",                              # Azure AD
-    "PnP.PowerShell"                        # SharePoint Online (PnP - Modern)
-)
-
-# Alternative SharePoint Module
-$alternativeModules = @(
-    "Microsoft.Online.SharePoint.PowerShell"  # SharePoint Online (Legacy)
-)
-
-$allModulesOk = $true
-
-foreach ($module in $requiredModules) {
-    if (-not (Install-RequiredModule -ModuleName $module)) {
-        $allModulesOk = $false
-    }
+if ($Console) {
+    # Run in console mode
     Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  Azure & M365 Login Manager" -ForegroundColor Cyan
+    Write-Host "  Version: $script:Version" -ForegroundColor Cyan
+    Write-Host "  Konsolen-Modus" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Import console mode script
+    . "$PSScriptRoot\Azure-M365-Intune-SharePoint-Login.ps1"
+    
+    # Exit after console mode
+    exit
 }
 
-# Versuche alternative SharePoint Module wenn PnP.PowerShell fehlschlägt
-if (-not (Get-Module -ListAvailable -Name "PnP.PowerShell")) {
-    Write-Host "PnP.PowerShell nicht verfügbar, versuche alternative SharePoint Module..." -ForegroundColor Yellow
-    foreach ($module in $alternativeModules) {
-        Write-Host "Prüfe alternatives Modul: $module..." -ForegroundColor Yellow
+# ============================================================================
+# GUI erstellen
+# ============================================================================
+
+Write-Host "Azure & M365 Login Manager v$script:Version wird gestartet..." -ForegroundColor Cyan
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Azure & M365 Login Manager"
+$form.Size = New-Object System.Drawing.Size(700, 750)
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = "FixedDialog"
+$form.MaximizeBox = $false
+
+# Header Label
+$labelHeader = New-Object System.Windows.Forms.Label
+$labelHeader.Location = New-Object System.Drawing.Point(20, 20)
+$labelHeader.Size = New-Object System.Drawing.Size(640, 30)
+$labelHeader.Text = "Wählen Sie die Dienste aus, bei denen Sie sich anmelden möchten:"
+$labelHeader.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$form.Controls.Add($labelHeader)
+
+# GroupBox für Service-Auswahl
+$groupBoxServices = New-Object System.Windows.Forms.GroupBox
+$groupBoxServices.Location = New-Object System.Drawing.Point(20, 60)
+$groupBoxServices.Size = New-Object System.Drawing.Size(640, 200)
+$groupBoxServices.Text = "Dienste"
+$form.Controls.Add($groupBoxServices)
+
+# Checkbox: Azure
+$chkAzure = New-Object System.Windows.Forms.CheckBox
+$chkAzure.Location = New-Object System.Drawing.Point(20, 30)
+$chkAzure.Size = New-Object System.Drawing.Size(280, 20)
+$chkAzure.Text = "Azure (Az Module)"
+$chkAzure.Checked = $true
+$groupBoxServices.Controls.Add($chkAzure)
+
+# Checkbox: Exchange Online
+$chkExchange = New-Object System.Windows.Forms.CheckBox
+$chkExchange.Location = New-Object System.Drawing.Point(20, 60)
+$chkExchange.Size = New-Object System.Drawing.Size(280, 20)
+$chkExchange.Text = "Exchange Online"
+$chkExchange.Checked = $true
+$groupBoxServices.Controls.Add($chkExchange)
+
+# Checkbox: Microsoft Graph (Intune)
+$chkGraph = New-Object System.Windows.Forms.CheckBox
+$chkGraph.Location = New-Object System.Drawing.Point(20, 90)
+$chkGraph.Size = New-Object System.Drawing.Size(280, 20)
+$chkGraph.Text = "Microsoft Graph (inkl. Intune)"
+$chkGraph.Checked = $true
+$groupBoxServices.Controls.Add($chkGraph)
+
+# Checkbox: Azure AD
+$chkAzureAD = New-Object System.Windows.Forms.CheckBox
+$chkAzureAD.Location = New-Object System.Drawing.Point(20, 120)
+$chkAzureAD.Size = New-Object System.Drawing.Size(280, 20)
+$chkAzureAD.Text = "Azure AD"
+$chkAzureAD.Checked = $true
+$groupBoxServices.Controls.Add($chkAzureAD)
+
+# Checkbox: SharePoint Online
+$chkSharePoint = New-Object System.Windows.Forms.CheckBox
+$chkSharePoint.Location = New-Object System.Drawing.Point(20, 150)
+$chkSharePoint.Size = New-Object System.Drawing.Size(280, 20)
+$chkSharePoint.Text = "SharePoint Online"
+$chkSharePoint.Checked = $true
+$groupBoxServices.Controls.Add($chkSharePoint)
+
+# SharePoint URL Label
+$labelSPUrl = New-Object System.Windows.Forms.Label
+$labelSPUrl.Location = New-Object System.Drawing.Point(320, 150)
+$labelSPUrl.Size = New-Object System.Drawing.Size(100, 20)
+$labelSPUrl.Text = "Admin-URL:"
+$groupBoxServices.Controls.Add($labelSPUrl)
+
+# SharePoint URL TextBox
+$textSPUrl = New-Object System.Windows.Forms.TextBox
+$textSPUrl.Location = New-Object System.Drawing.Point(420, 148)
+$textSPUrl.Size = New-Object System.Drawing.Size(200, 20)
+$textSPUrl.Text = "https://TENANT-admin.sharepoint.com"
+$groupBoxServices.Controls.Add($textSPUrl)
+
+# Info Label
+$labelInfo = New-Object System.Windows.Forms.Label
+$labelInfo.Location = New-Object System.Drawing.Point(20, 270)
+$labelInfo.Size = New-Object System.Drawing.Size(640, 40)
+$labelInfo.Text = "Hinweis: Fehlende Module werden automatisch installiert. Sie werden für jeden Service zur Anmeldung aufgefordert (MFA-Unterstützung)."
+$labelInfo.ForeColor = [System.Drawing.Color]::DarkBlue
+$form.Controls.Add($labelInfo)
+
+# Connect Button
+$btnConnect = New-Object System.Windows.Forms.Button
+$btnConnect.Location = New-Object System.Drawing.Point(20, 320)
+$btnConnect.Size = New-Object System.Drawing.Size(120, 35)
+$btnConnect.Text = "Anmelden"
+$btnConnect.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$btnConnect.BackColor = [System.Drawing.Color]::Green
+$btnConnect.ForeColor = [System.Drawing.Color]::White
+$form.Controls.Add($btnConnect)
+
+# PowerShell 5.1 Console Button
+$btnConsolePS5 = New-Object System.Windows.Forms.Button
+$btnConsolePS5.Location = New-Object System.Drawing.Point(150, 320)
+$btnConsolePS5.Size = New-Object System.Drawing.Size(100, 35)
+$btnConsolePS5.Text = "PowerShell 5.1"
+$btnConsolePS5.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+$btnConsolePS5.BackColor = [System.Drawing.Color]::DodgerBlue
+$btnConsolePS5.ForeColor = [System.Drawing.Color]::White
+$form.Controls.Add($btnConsolePS5)
+
+# PowerShell 7 Console Button
+$btnConsolePS7 = New-Object System.Windows.Forms.Button
+$btnConsolePS7.Location = New-Object System.Drawing.Point(260, 320)
+$btnConsolePS7.Size = New-Object System.Drawing.Size(100, 35)
+$btnConsolePS7.Text = "PowerShell 7"
+$btnConsolePS7.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+$btnConsolePS7.BackColor = [System.Drawing.Color]::MediumPurple
+$btnConsolePS7.ForeColor = [System.Drawing.Color]::White
+$form.Controls.Add($btnConsolePS7)
+
+# Disconnect Button
+$btnDisconnect = New-Object System.Windows.Forms.Button
+$btnDisconnect.Location = New-Object System.Drawing.Point(370, 320)
+$btnDisconnect.Size = New-Object System.Drawing.Size(140, 35)
+$btnDisconnect.Text = "Verbindungen trennen"
+$btnDisconnect.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+$btnDisconnect.BackColor = [System.Drawing.Color]::OrangeRed
+$btnDisconnect.ForeColor = [System.Drawing.Color]::White
+$form.Controls.Add($btnDisconnect)
+
+# Clear Button
+$btnClear = New-Object System.Windows.Forms.Button
+$btnClear.Location = New-Object System.Drawing.Point(520, 320)
+$btnClear.Size = New-Object System.Drawing.Size(70, 35)
+$btnClear.Text = "Löschen"
+$form.Controls.Add($btnClear)
+
+# Close Button
+$btnClose = New-Object System.Windows.Forms.Button
+$btnClose.Location = New-Object System.Drawing.Point(600, 320)
+$btnClose.Size = New-Object System.Drawing.Size(60, 35)
+$btnClose.Text = "Schließen"
+$form.Controls.Add($btnClose)
+
+# Output RichTextBox
+$textOutput = New-Object System.Windows.Forms.RichTextBox
+$textOutput.Location = New-Object System.Drawing.Point(20, 370)
+$textOutput.Size = New-Object System.Drawing.Size(640, 330)
+$textOutput.Multiline = $true
+$textOutput.ScrollBars = "Both"
+$textOutput.Font = New-Object System.Drawing.Font("Consolas", 9)
+$textOutput.ReadOnly = $true
+$textOutput.BackColor = [System.Drawing.Color]::Black
+$textOutput.ForeColor = [System.Drawing.Color]::LightGray
+$form.Controls.Add($textOutput)
+
+# ============================================================================
+# Event Handlers
+# ============================================================================
+
+$btnConnect.Add_Click({
+    $btnConnect.Enabled = $false
+    $textOutput.Clear()
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+    $textOutput.AppendText("=== Azure & M365 Login Manager ===`r`n`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Sammle ausgewählte Services
+    $services = @{
+        Azure = $chkAzure.Checked
+        Exchange = $chkExchange.Checked
+        Graph = $chkGraph.Checked
+        AzureAD = $chkAzureAD.Checked
+        SharePoint = $chkSharePoint.Checked
+        SharePointUrl = $textSPUrl.Text
+    }
+    
+    # ========================================================================
+    # Schritt 1: Module installieren
+    # ========================================================================
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+    $textOutput.AppendText("Schritt 1: Module installieren`r`n")
+    $textOutput.AppendText("=" * 50 + "`r`n")
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    $modulesToInstall = @()
+    
+    if ($services.Azure) {
+        $modulesToInstall += "Az.Accounts", "Az.Resources"
+    }
+    if ($services.Exchange) {
+        $modulesToInstall += "ExchangeOnlineManagement"
+    }
+    if ($services.Graph) {
+        $modulesToInstall += "Microsoft.Graph.Authentication", "Microsoft.Graph.Users", 
+                             "Microsoft.Graph.Groups", "Microsoft.Graph.DeviceManagement"
+    }
+    if ($services.AzureAD) {
+        $modulesToInstall += "AzureAD"
+    }
+    if ($services.SharePoint) {
+        $modulesToInstall += "Microsoft.Online.SharePoint.PowerShell"
+    }
+    
+    # Installiere Module
+    $allModulesOk = $true
+    foreach ($module in $modulesToInstall) {
+        if (-not (Install-RequiredModule -ModuleName $module -OutputBox $textOutput)) {
+            $allModulesOk = $false
+        }
+        $textOutput.AppendText("`r`n")
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    
+    if (-not $allModulesOk) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("`r`n⚠ WARNUNG: Nicht alle Module konnten installiert werden!`r`n")
+        $textOutput.AppendText("Einige Anmeldungen könnten fehlschlagen.`r`n`r`n")
+    }
+    
+    # ========================================================================
+    # Schritt 2: Anmeldungen durchführen
+    # ========================================================================
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+    $textOutput.AppendText("`r`nSchritt 2: Anmeldungen durchführen`r`n")
+    $textOutput.AppendText("=" * 50 + "`r`n")
+    $textOutput.AppendText("Sie werden für jeden Service zur Anmeldung aufgefordert...`r`n`r`n")
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    Start-Sleep -Seconds 1
+    
+    $connections = @()
+    
+    # Azure
+    if ($services.Azure) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+        $textOutput.AppendText("1. Azure Anmeldung...`r`n")
+        $textOutput.ScrollToCaret()
+        [System.Windows.Forms.Application]::DoEvents()
+        
         try {
-            if (-not (Get-Module -ListAvailable -Name $module)) {
-                Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
-                Write-Host "  Alternatives Modul '$module' installiert." -ForegroundColor Green
-            } else {
-                Write-Host "  Alternatives Modul '$module' bereits vorhanden." -ForegroundColor Green
-            }
+            Connect-AzAccount -ErrorAction Stop | Out-Null
+            $context = Get-AzContext
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
+            $textOutput.AppendText("   Benutzer: $($context.Account.Id)`r`n")
+            $textOutput.AppendText("   Tenant: $($context.Tenant.Id)`r`n`r`n")
+            $connections += "✓ Azure"
         } catch {
-            Write-Host "  Info: Alternatives Modul '$module' nicht verfügbar" -ForegroundColor Yellow
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("   ✗ Fehler: $($_.Exception.Message)`r`n`r`n")
         }
-        Write-Host ""
+        [System.Windows.Forms.Application]::DoEvents()
     }
-}
-
-if (-not $allModulesOk) {
-    Write-Host "WARNUNG: Nicht alle Module konnten installiert werden." -ForegroundColor Yellow
-    $continue = Read-Host "Möchten Sie trotzdem fortfahren? (J/N)"
-    if ($continue -ne "J" -and $continue -ne "j") {
-        Write-Host "Script abgebrochen." -ForegroundColor Red
-        exit
-    }
-}
-
-Write-Host ""
-Write-Host "Schritt 2: Interaktive Anmeldung bei Azure, Microsoft 365, Intune und SharePoint" -ForegroundColor Cyan
-Write-Host "Hinweis: Sie werden für jeden Service einzeln zur Anmeldung aufgefordert." -ForegroundColor Yellow
-Write-Host "Bitte nutzen Sie bei der Anmeldung Ihre MFA-Methode (z.B. Authenticator-App)." -ForegroundColor Yellow
-Write-Host ""
-
-Start-Sleep -Seconds 2
-
-# Azure Anmeldung
-Write-Host "1. Melde bei Azure an..." -ForegroundColor Cyan
-Write-Host "   Ein Browser-Fenster wird geöffnet..." -ForegroundColor Yellow
-try {
-    Connect-AzAccount -ErrorAction Stop
-    Write-Host "   Erfolgreich bei Azure angemeldet!" -ForegroundColor Green
     
-    # Zeige Abonnement-Informationen
-    $context = Get-AzContext
-    Write-Host "   Benutzer: $($context.Account.Id)" -ForegroundColor Gray
-    Write-Host "   Abonnement: $($context.Subscription.Name)" -ForegroundColor Gray
-    Write-Host "   Tenant: $($context.Tenant.Id)" -ForegroundColor Gray
-} catch {
-    Write-Host "   FEHLER bei Azure-Anmeldung: $_" -ForegroundColor Red
-}
-Write-Host ""
-Start-Sleep -Seconds 1
-
-# Exchange Online Anmeldung
-Write-Host "2. Melde bei Exchange Online an..." -ForegroundColor Cyan
-Write-Host "   Ein Browser-Fenster wird geöffnet..." -ForegroundColor Yellow
-try {
-    Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
-    Write-Host "   Erfolgreich bei Exchange Online angemeldet!" -ForegroundColor Green
-    
-    # Zeige Organisations-Informationen
-    $orgConfig = Get-OrganizationConfig -ErrorAction SilentlyContinue
-    if ($orgConfig) {
-        Write-Host "   Organisation: $($orgConfig.DisplayName)" -ForegroundColor Gray
-    }
-} catch {
-    Write-Host "   FEHLER bei Exchange Online-Anmeldung: $_" -ForegroundColor Red
-}
-Write-Host ""
-Start-Sleep -Seconds 1
-
-# Microsoft Graph Anmeldung (inkl. Intune-Berechtigungen)
-Write-Host "3. Melde bei Microsoft Graph (inkl. Intune) an..." -ForegroundColor Cyan
-Write-Host "   Ein Browser-Fenster wird geöffnet..." -ForegroundColor Yellow
-Write-Host "   Hinweis: Intune-Zugriff erfolgt über Microsoft Graph" -ForegroundColor Yellow
-try {
-    # Erweiterte Berechtigungen für Graph inkl. Intune
-    $graphScopes = @(
-        "User.Read.All",
-        "Group.Read.All",
-        "Directory.Read.All",
-        "Organization.Read.All",
-        "DeviceManagementApps.Read.All",                # Intune Apps (Read)
-        "DeviceManagementConfiguration.Read.All",       # Intune Konfiguration (Read)
-        "DeviceManagementManagedDevices.Read.All",      # Intune Geräte (Read)
-        "DeviceManagementServiceConfig.Read.All"        # Intune Service-Konfiguration (Read)
-    )
-    
-    Connect-MgGraph -Scopes $graphScopes -ErrorAction Stop
-    Write-Host "   Erfolgreich bei Microsoft Graph angemeldet!" -ForegroundColor Green
-    
-    # Zeige Kontext-Informationen
-    $mgContext = Get-MgContext
-    Write-Host "   Benutzer: $($mgContext.Account)" -ForegroundColor Gray
-    Write-Host "   Tenant: $($mgContext.TenantId)" -ForegroundColor Gray
-    Write-Host "   Scopes: Intune-Berechtigungen inkludiert" -ForegroundColor Gray
-} catch {
-    Write-Host "   FEHLER bei Microsoft Graph-Anmeldung: $_" -ForegroundColor Red
-}
-Write-Host ""
-Start-Sleep -Seconds 1
-
-# Azure AD Anmeldung
-Write-Host "4. Melde bei Azure AD an..." -ForegroundColor Cyan
-Write-Host "   Ein Browser-Fenster wird geöffnet..." -ForegroundColor Yellow
-try {
-    Connect-AzureAD -ErrorAction Stop
-    Write-Host "   Erfolgreich bei Azure AD angemeldet!" -ForegroundColor Green
-    
-    # Zeige Tenant-Informationen
-    $tenantDetail = Get-AzureADTenantDetail
-    Write-Host "   Tenant Name: $($tenantDetail.DisplayName)" -ForegroundColor Gray
-    Write-Host "   Tenant ID: $($tenantDetail.ObjectId)" -ForegroundColor Gray
-} catch {
-    Write-Host "   FEHLER bei Azure AD-Anmeldung: $_" -ForegroundColor Red
-}
-Write-Host ""
-Start-Sleep -Seconds 1
-
-# SharePoint Online Anmeldung
-Write-Host "5. Melde bei SharePoint Online an..." -ForegroundColor Cyan
-Write-Host "   Ein Browser-Fenster wird geöffnet..." -ForegroundColor Yellow
-
-# Ermittle SharePoint Admin-URL aus Tenant
-$sharePointConnected = $false
-$sharePointMethod = ""
-
-if ($tenantDetail) {
-    # Extrahiere Tenant-Name aus Domäne
-    $tenantDomains = Get-AzureADDomain -ErrorAction SilentlyContinue
-    $onMicrosoftDomain = $tenantDomains | Where-Object { $_.Name -like "*.onmicrosoft.com" -and $_.Name -notlike "*.mail.onmicrosoft.com" } | Select-Object -First 1
-    
-    if ($onMicrosoftDomain) {
-        $tenantName = $onMicrosoftDomain.Name -replace "\.onmicrosoft\.com", ""
-        $sharePointAdminUrl = "https://$tenantName-admin.sharepoint.com"
+    # Exchange Online
+    if ($services.Exchange) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+        $textOutput.AppendText("2. Exchange Online Anmeldung...`r`n")
+        $textOutput.ScrollToCaret()
+        [System.Windows.Forms.Application]::DoEvents()
         
-        Write-Host "   SharePoint Admin URL: $sharePointAdminUrl" -ForegroundColor Gray
-        
-        # Versuche mit PnP.PowerShell (bevorzugt)
-        if (Get-Module -ListAvailable -Name "PnP.PowerShell") {
-            Write-Host "   Verwende PnP.PowerShell..." -ForegroundColor Gray
-            try {
-                Connect-PnPOnline -Url $sharePointAdminUrl -Interactive -ErrorAction Stop
-                $sharePointConnected = $true
-                $sharePointMethod = "PnP.PowerShell"
-                Write-Host "   Erfolgreich bei SharePoint Online angemeldet (PnP)!" -ForegroundColor Green
-            } catch {
-                Write-Host "   PnP Verbindung fehlgeschlagen, versuche Legacy-Modul..." -ForegroundColor Yellow
+        try {
+            Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+            $orgConfig = Get-OrganizationConfig -ErrorAction SilentlyContinue
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
+            if ($orgConfig) {
+                $textOutput.AppendText("   Organisation: $($orgConfig.DisplayName)`r`n")
             }
+            $textOutput.AppendText("`r`n")
+            $connections += "✓ Exchange Online"
+        } catch {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("   ✗ Fehler: $($_.Exception.Message)`r`n`r`n")
         }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    
+    # Microsoft Graph
+    if ($services.Graph) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+        $textOutput.AppendText("3. Microsoft Graph Anmeldung (inkl. Intune)...`r`n")
+        $textOutput.ScrollToCaret()
+        [System.Windows.Forms.Application]::DoEvents()
         
-        # Fallback auf Microsoft.Online.SharePoint.PowerShell
-        if (-not $sharePointConnected -and (Get-Module -ListAvailable -Name "Microsoft.Online.SharePoint.PowerShell")) {
-            Write-Host "   Verwende Microsoft.Online.SharePoint.PowerShell..." -ForegroundColor Gray
-            try {
-                Import-Module Microsoft.Online.SharePoint.PowerShell -DisableNameChecking -ErrorAction Stop
-                Connect-SPOService -Url $sharePointAdminUrl -ErrorAction Stop
-                $sharePointConnected = $true
-                $sharePointMethod = "Microsoft.Online.SharePoint.PowerShell"
-                Write-Host "   Erfolgreich bei SharePoint Online angemeldet (Legacy)!" -ForegroundColor Green
-            } catch {
-                Write-Host "   FEHLER bei SharePoint Online-Anmeldung: $_" -ForegroundColor Red
-            }
-        }
-        
-        if (-not $sharePointConnected) {
-            Write-Host "   WARNUNG: Konnte nicht mit SharePoint verbinden" -ForegroundColor Yellow
-            Write-Host "   Bitte installieren Sie eines der Module:" -ForegroundColor Yellow
-            Write-Host "     - PnP.PowerShell (empfohlen)" -ForegroundColor Gray
-            Write-Host "     - Microsoft.Online.SharePoint.PowerShell" -ForegroundColor Gray
-        } else {
-            Write-Host "   Methode: $sharePointMethod" -ForegroundColor Gray
+        try {
+            $graphScopes = @(
+                "User.Read.All",
+                "Group.Read.All",
+                "Directory.Read.All",
+                "Organization.Read.All",
+                "DeviceManagementApps.Read.All",
+                "DeviceManagementConfiguration.Read.All",
+                "DeviceManagementManagedDevices.Read.All",
+                "DeviceManagementServiceConfig.Read.All"
+            )
             
-            # Teste SharePoint-Zugriff
+            Connect-MgGraph -Scopes $graphScopes -ErrorAction Stop | Out-Null
+            $mgContext = Get-MgContext
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
+            $textOutput.AppendText("   Benutzer: $($mgContext.Account)`r`n")
+            $textOutput.AppendText("   Tenant: $($mgContext.TenantId)`r`n")
+            $textOutput.AppendText("   Scopes: Intune-Berechtigungen inkludiert`r`n`r`n")
+            $connections += "✓ Microsoft Graph"
+        } catch {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("   ✗ Fehler: $($_.Exception.Message)`r`n`r`n")
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    
+    # Azure AD
+    if ($services.AzureAD) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+        $textOutput.AppendText("4. Azure AD Anmeldung...`r`n")
+        $textOutput.ScrollToCaret()
+        [System.Windows.Forms.Application]::DoEvents()
+        
+        try {
+            Connect-AzureAD -ErrorAction Stop | Out-Null
+            $tenantDetail = Get-AzureADTenantDetail
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
+            $textOutput.AppendText("   Tenant: $($tenantDetail.DisplayName)`r`n")
+            $textOutput.AppendText("   Tenant ID: $($tenantDetail.ObjectId)`r`n`r`n")
+            $connections += "✓ Azure AD"
+        } catch {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("   ✗ Fehler: $($_.Exception.Message)`r`n`r`n")
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    
+    # SharePoint Online
+    if ($services.SharePoint) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+        $textOutput.AppendText("5. SharePoint Online Anmeldung...`r`n")
+        $textOutput.AppendText("   URL: $($services.SharePointUrl)`r`n")
+        $textOutput.ScrollToCaret()
+        [System.Windows.Forms.Application]::DoEvents()
+        
+        # Validiere URL
+        if ($services.SharePointUrl -notmatch "https://.+-admin\.sharepoint\.com") {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("   ✗ Ungültige SharePoint Admin URL!`r`n")
+            $textOutput.AppendText("   Format: https://TENANT-admin.sharepoint.com`r`n`r`n")
+        } else {
             try {
-                if ($sharePointMethod -eq "PnP.PowerShell") {
-                    $tenant = Get-PnPTenant -ErrorAction SilentlyContinue
-                    if ($tenant) {
-                        Write-Host "   SharePoint Tenant: $($tenant.Title)" -ForegroundColor Gray
-                    }
-                } else {
-                    $tenant = Get-SPOTenant -ErrorAction SilentlyContinue
-                    if ($tenant) {
-                        Write-Host "   SharePoint Root URL: $($tenant.SharePointUrl)" -ForegroundColor Gray
-                    }
+                # Importiere Modul explizit
+                Import-Module Microsoft.Online.SharePoint.PowerShell -DisableNameChecking -ErrorAction Stop
+                
+                # Verbinde zu SharePoint
+                Connect-SPOService -Url $services.SharePointUrl -ErrorAction Stop
+                
+                # Teste Verbindung
+                $tenant = Get-SPOTenant -ErrorAction Stop
+                
+                $textOutput.SelectionColor = [System.Drawing.Color]::Green
+                $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
+                if ($tenant.RootSiteUrl) {
+                    $textOutput.AppendText("   Root Site: $($tenant.RootSiteUrl)`r`n")
                 }
+                $textOutput.AppendText("`r`n")
+                $connections += "✓ SharePoint Online"
             } catch {
-                Write-Host "   Hinweis: SharePoint Tenant-Informationen nicht verfügbar" -ForegroundColor Yellow
+                $textOutput.SelectionColor = [System.Drawing.Color]::Red
+                $textOutput.AppendText("   ✗ Fehler: $($_.Exception.Message)`r`n")
+                $textOutput.AppendText("   Tipp: Prüfen Sie die URL und Ihre Berechtigungen`r`n`r`n")
             }
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    
+    # ========================================================================
+    # Zusammenfassung
+    # ========================================================================
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+    $textOutput.AppendText("`r`n" + "=" * 50 + "`r`n")
+    $textOutput.AppendText("Zusammenfassung`r`n")
+    $textOutput.AppendText("=" * 50 + "`r`n")
+    
+    if ($connections.Count -gt 0) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Green
+        $textOutput.AppendText("`r`nErfolgreich angemeldet bei:`r`n")
+        foreach ($conn in $connections) {
+            $textOutput.AppendText("  $conn`r`n")
         }
     } else {
-        Write-Host "   WARNUNG: Konnte Tenant-Domäne nicht ermitteln" -ForegroundColor Yellow
-        Write-Host "   Bitte melden Sie sich manuell an:" -ForegroundColor Yellow
-        Write-Host "     Connect-PnPOnline -Url https://YOURTENANT-admin.sharepoint.com -Interactive" -ForegroundColor Gray
-        Write-Host "   oder" -ForegroundColor Yellow
-        Write-Host "     Connect-SPOService -Url https://YOURTENANT-admin.sharepoint.com" -ForegroundColor Gray
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("`r`n⚠ Keine erfolgreichen Verbindungen!`r`n")
     }
-} else {
-    Write-Host "   WARNUNG: Azure AD Tenant-Details nicht verfügbar" -ForegroundColor Yellow
-    Write-Host "   SharePoint-Anmeldung übersprungen" -ForegroundColor Yellow
-}
-
-Write-Host ""
-Start-Sleep -Seconds 1
-
-# Intune Verbindung testen (mit Fallback-Mechanismen)
-Write-Host "6. Teste Intune-Verbindung..." -ForegroundColor Cyan
-$intuneWorking = $false
-$intuneMethod = ""
-
-try {
-    # Methode 1: Versuche Standard-Cmdlet
-    Write-Host "   Teste Standard-Cmdlets..." -ForegroundColor Gray
-    $intuneDevices = Get-MgDeviceManagementManagedDevice -Top 1 -ErrorAction Stop
-    $intuneWorking = $true
-    $intuneMethod = "Standard Cmdlets"
-    Write-Host "   Intune-Zugriff erfolgreich verifiziert (Standard-Cmdlets)!" -ForegroundColor Green
-} catch {
-    Write-Host "   Standard-Cmdlets nicht verfügbar, versuche Graph API direkt..." -ForegroundColor Yellow
     
-    # Methode 2: Fallback auf direkte Graph API Aufrufe
+    $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+    $textOutput.AppendText("`r`n✓ Anmeldung abgeschlossen!`r`n")
+    $textOutput.AppendText("Sie können nun Ihre Scripts ausführen.`r`n")
+    $textOutput.ScrollToCaret()
+    
+    $btnConnect.Enabled = $true
+})
+
+$btnConsolePS5.Add_Click({
+    $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+    $textOutput.AppendText("`r`n" + "=" * 50 + "`r`n")
+    $textOutput.AppendText("PowerShell 5.1 Konsole wird geöffnet...`r`n")
+    $textOutput.AppendText("=" * 50 + "`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Prüfe aktive Verbindungen
+    $activeConnections = @()
+    
+    # Azure
     try {
-        $graphUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$top=1"
-        $result = Invoke-MgGraphRequest -Uri $graphUri -Method GET -ErrorAction Stop
-        $intuneWorking = $true
-        $intuneMethod = "Graph API (Direct)"
-        Write-Host "   Intune-Zugriff erfolgreich verifiziert (Graph API)!" -ForegroundColor Green
+        $azContext = Get-AzContext -ErrorAction SilentlyContinue
+        if ($azContext) {
+            $activeConnections += "Azure (Subscription: $($azContext.Subscription.Name))"
+        }
+    } catch {}
+    
+    # Exchange Online
+    try {
+        $exoSession = Get-PSSession | Where-Object { $_.ConfigurationName -eq "Microsoft.Exchange" -and $_.State -eq "Opened" }
+        if ($exoSession) {
+            $activeConnections += "Exchange Online"
+        }
+    } catch {}
+    
+    # Microsoft Graph
+    try {
+        $mgContext = Get-MgContext -ErrorAction SilentlyContinue
+        if ($mgContext) {
+            $activeConnections += "Microsoft Graph (Tenant: $($mgContext.TenantId))"
+        }
+    } catch {}
+    
+    # Azure AD
+    try {
+        $aadContext = Get-AzureADCurrentSessionInfo -ErrorAction SilentlyContinue
+        if ($aadContext) {
+            $activeConnections += "Azure AD (Tenant: $($aadContext.TenantId))"
+        }
+    } catch {}
+    
+    # SharePoint Online
+    try {
+        $spoTenant = Get-SPOTenant -ErrorAction SilentlyContinue
+        if ($spoTenant) {
+            $activeConnections += "SharePoint Online"
+        }
     } catch {
-        Write-Host "   WARNUNG: Intune-Zugriff konnte nicht verifiziert werden: $_" -ForegroundColor Yellow
-        Write-Host "   Möglicherweise fehlen Intune-Lizenzen oder Berechtigungen" -ForegroundColor Yellow
+        try {
+            $pnpConnection = Get-PnPConnection -ErrorAction SilentlyContinue
+            if ($pnpConnection) {
+                $activeConnections += "SharePoint Online (PnP)"
+            }
+        } catch {}
+    }
+    
+    # Zeige aktive Verbindungen
+    if ($activeConnections.Count -gt 0) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Green
+        $textOutput.AppendText("`r`nAktive Verbindungen:`r`n")
+        foreach ($conn in $activeConnections) {
+            $textOutput.AppendText("  ✓ $conn`r`n")
+        }
+    } else {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+        $textOutput.AppendText("`r`n⚠ Keine aktiven Verbindungen gefunden`r`n")
+        $textOutput.AppendText("  Bitte melden Sie sich zuerst an!`r`n")
+    }
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+    $textOutput.AppendText("`r`nÖffne PowerShell 5.1 Konsole...`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Erstelle temporäres Profil-Script
+    $tempProfile = [System.IO.Path]::GetTempFileName() + ".ps1"
+    
+    $profileContent = @"
+# PowerShell 5.1 Konsole mit Azure & M365 Verbindungen
+`$Host.UI.RawUI.WindowTitle = "PowerShell 5.1 - Azure & M365"
+`$Host.UI.RawUI.BackgroundColor = "DarkBlue"
+`$Host.UI.RawUI.ForegroundColor = "White"
+Clear-Host
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  PowerShell 5.1 Konsole" -ForegroundColor Cyan
+Write-Host "  Aktive Verbindungen" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Version: `$(`$PSVersionTable.PSVersion)" -ForegroundColor Gray
+Write-Host "Edition: `$(`$PSVersionTable.PSEdition)" -ForegroundColor Gray
+Write-Host ""
+
+"@
+
+    # Füge Verbindungsinformationen hinzu
+    if ($activeConnections.Count -gt 0) {
+        $profileContent += "Write-Host 'Aktive Verbindungen:' -ForegroundColor Green`r`n"
+        foreach ($conn in $activeConnections) {
+            $profileContent += "Write-Host '  ✓ $conn' -ForegroundColor White`r`n"
+        }
+    } else {
+        $profileContent += "Write-Host '⚠ Keine aktiven Verbindungen' -ForegroundColor Yellow`r`n"
+        $profileContent += "Write-Host '  Bitte melden Sie sich zuerst in der GUI an!' -ForegroundColor Yellow`r`n"
+    }
+    
+    $profileContent += @"
+
+Write-Host ""
+Write-Host "Module werden geladen..." -ForegroundColor Yellow
+
+# Lade alle installierten Module
+`$modulesToLoad = @(
+    "Az.Accounts",
+    "Az.Resources",
+    "ExchangeOnlineManagement",
+    "Microsoft.Graph.Authentication",
+    "Microsoft.Graph.Users",
+    "Microsoft.Graph.Groups",
+    "Microsoft.Graph.DeviceManagement",
+    "AzureAD",
+    "Microsoft.Online.SharePoint.PowerShell"
+)
+
+foreach (`$module in `$modulesToLoad) {
+    if (Get-Module -ListAvailable -Name `$module -ErrorAction SilentlyContinue) {
+        try {
+            Import-Module `$module -DisableNameChecking -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            Write-Host "  ✓ `$module" -ForegroundColor Green
+        } catch {
+            Write-Host "  ⚠ `$module (Fehler beim Laden)" -ForegroundColor Yellow
+        }
     }
 }
 
-if ($intuneWorking) {
-    Write-Host "   Zugriffsmethode: $intuneMethod" -ForegroundColor Gray
-}
-
 Write-Host ""
-
-# Zusammenfassung
-Write-Host "=== Anmeldung abgeschlossen ===" -ForegroundColor Cyan
+Write-Host "Nützliche Befehle:" -ForegroundColor Yellow
+Write-Host "  Get-AzContext                  # Azure Kontext" -ForegroundColor Gray
+Write-Host "  Get-MgContext                  # Graph Kontext" -ForegroundColor Gray
+Write-Host "  Get-SPOTenant                  # SharePoint Tenant" -ForegroundColor Gray
+Write-Host "  Get-Mailbox -ResultSize 10     # Exchange Mailboxen" -ForegroundColor Gray
 Write-Host ""
+Write-Host "SharePoint Online Module (nur PS 5.1):" -ForegroundColor Cyan
+Write-Host "  Get-SPOTenant                  # ✓ Funktioniert" -ForegroundColor Green
+Write-Host "  Get-SPOSite                    # ✓ Funktioniert" -ForegroundColor Green
+Write-Host ""
+Write-Host "Hinweis: PowerShell 5.1 ist für SharePoint Online empfohlen!" -ForegroundColor Yellow
+Write-Host ""
+"@
 
-# Prüfe welche Verbindungen erfolgreich waren
-$connections = @()
-
-if (Get-AzContext -ErrorAction SilentlyContinue) {
-    $connections += "✓ Azure (Az)"
-}
-
-try {
-    $exoTest = Get-OrganizationConfig -ErrorAction SilentlyContinue
-    if ($exoTest) {
-        $connections += "✓ Exchange Online"
+    # Speichere Profil
+    $profileContent | Out-File -FilePath $tempProfile -Encoding UTF8
+    
+    # Starte PowerShell 5.1
+    try {
+        $ps5Path = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        
+        if (Test-Path $ps5Path) {
+            Start-Process $ps5Path -ArgumentList "-NoExit", "-NoLogo", "-File", $tempProfile
+            
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("`r`n✓ PowerShell 5.1 Konsole geöffnet!`r`n")
+            $textOutput.AppendText("`r`nVersion: Windows PowerShell 5.1`r`n")
+            $textOutput.AppendText("Alle Verbindungen verfügbar.`r`n")
+        } else {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("`r`n✗ PowerShell 5.1 nicht gefunden!`r`n")
+            $textOutput.AppendText("Pfad: $ps5Path`r`n")
+        }
+        
+        # Cleanup
+        Start-Job -ScriptBlock {
+            param($file)
+            Start-Sleep -Seconds 5
+            if (Test-Path $file) { Remove-Item $file -Force -ErrorAction SilentlyContinue }
+        } -ArgumentList $tempProfile | Out-Null
+        
+    } catch {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("`r`n✗ Fehler: $($_.Exception.Message)`r`n")
     }
-} catch {}
+    
+    $textOutput.ScrollToCaret()
+})
 
-if (Get-MgContext -ErrorAction SilentlyContinue) {
-    $connections += "✓ Microsoft Graph"
-}
-
-try {
-    $aadTest = Get-AzureADTenantDetail -ErrorAction SilentlyContinue
-    if ($aadTest) {
-        $connections += "✓ Azure AD"
+$btnConsolePS7.Add_Click({
+    $textOutput.SelectionColor = [System.Drawing.Color]::Magenta
+    $textOutput.AppendText("`r`n" + "=" * 50 + "`r`n")
+    $textOutput.AppendText("PowerShell 7 Konsole wird geöffnet...`r`n")
+    $textOutput.AppendText("=" * 50 + "`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Prüfe aktive Verbindungen
+    $activeConnections = @()
+    
+    # Azure
+    try {
+        $azContext = Get-AzContext -ErrorAction SilentlyContinue
+        if ($azContext) {
+            $activeConnections += "Azure (Subscription: $($azContext.Subscription.Name))"
+        }
+    } catch {}
+    
+    # Exchange Online
+    try {
+        $exoSession = Get-PSSession | Where-Object { $_.ConfigurationName -eq "Microsoft.Exchange" -and $_.State -eq "Opened" }
+        if ($exoSession) {
+            $activeConnections += "Exchange Online"
+        }
+    } catch {}
+    
+    # Microsoft Graph
+    try {
+        $mgContext = Get-MgContext -ErrorAction SilentlyContinue
+        if ($mgContext) {
+            $activeConnections += "Microsoft Graph (Tenant: $($mgContext.TenantId))"
+        }
+    } catch {}
+    
+    # Azure AD
+    try {
+        $aadContext = Get-AzureADCurrentSessionInfo -ErrorAction SilentlyContinue
+        if ($aadContext) {
+            $activeConnections += "Azure AD (Tenant: $($aadContext.TenantId))"
+        }
+    } catch {}
+    
+    # SharePoint Online
+    try {
+        $spoTenant = Get-SPOTenant -ErrorAction SilentlyContinue
+        if ($spoTenant) {
+            $activeConnections += "SharePoint Online"
+        }
+    } catch {
+        try {
+            $pnpConnection = Get-PnPConnection -ErrorAction SilentlyContinue
+            if ($pnpConnection) {
+                $activeConnections += "SharePoint Online (PnP)"
+            }
+        } catch {}
     }
-} catch {}
-
-if ($sharePointConnected) {
-    $connections += "✓ SharePoint Online (via $sharePointMethod)"
-}
-
-if ($intuneWorking) {
-    $connections += "✓ Intune (via $intuneMethod)"
-}
-
-if ($connections.Count -gt 0) {
-    Write-Host "Erfolgreich angemeldet bei:" -ForegroundColor Green
-    foreach ($conn in $connections) {
-        Write-Host "  $conn" -ForegroundColor White
+    
+    # Zeige aktive Verbindungen
+    if ($activeConnections.Count -gt 0) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Green
+        $textOutput.AppendText("`r`nAktive Verbindungen:`r`n")
+        foreach ($conn in $activeConnections) {
+            $textOutput.AppendText("  ✓ $conn`r`n")
+        }
+    } else {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+        $textOutput.AppendText("`r`n⚠ Keine aktiven Verbindungen gefunden`r`n")
+        $textOutput.AppendText("  Bitte melden Sie sich zuerst an!`r`n")
     }
-} else {
-    Write-Host "WARNUNG: Keine erfolgreichen Verbindungen hergestellt!" -ForegroundColor Red
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Magenta
+    $textOutput.AppendText("`r`nÖffne PowerShell 7 Konsole...`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Erstelle temporäres Profil-Script
+    $tempProfile = [System.IO.Path]::GetTempFileName() + ".ps1"
+    
+    $profileContent = @"
+# PowerShell 7 Konsole mit Azure & M365 Verbindungen
+`$Host.UI.RawUI.WindowTitle = "PowerShell 7 - Azure & M365"
+Clear-Host
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Magenta
+Write-Host "  PowerShell 7 Konsole" -ForegroundColor Magenta
+Write-Host "  Aktive Verbindungen" -ForegroundColor Magenta
+Write-Host "========================================" -ForegroundColor Magenta
+Write-Host ""
+Write-Host "Version: `$(`$PSVersionTable.PSVersion)" -ForegroundColor Gray
+Write-Host "Edition: `$(`$PSVersionTable.PSEdition)" -ForegroundColor Gray
+Write-Host ""
+
+"@
+
+    # Füge Verbindungsinformationen hinzu
+    if ($activeConnections.Count -gt 0) {
+        $profileContent += "Write-Host 'Aktive Verbindungen:' -ForegroundColor Green`r`n"
+        foreach ($conn in $activeConnections) {
+            $profileContent += "Write-Host '  ✓ $conn' -ForegroundColor White`r`n"
+        }
+    } else {
+        $profileContent += "Write-Host '⚠ Keine aktiven Verbindungen' -ForegroundColor Yellow`r`n"
+        $profileContent += "Write-Host '  Bitte melden Sie sich zuerst in der GUI an!' -ForegroundColor Yellow`r`n"
+    }
+    
+    $profileContent += @"
+
+Write-Host ""
+Write-Host "Module werden geladen..." -ForegroundColor Yellow
+
+# Lade alle installierten Module (außer SharePoint SPO - nicht kompatibel mit PS7)
+`$modulesToLoad = @(
+    "Az.Accounts",
+    "Az.Resources",
+    "ExchangeOnlineManagement",
+    "Microsoft.Graph.Authentication",
+    "Microsoft.Graph.Users",
+    "Microsoft.Graph.Groups",
+    "Microsoft.Graph.DeviceManagement",
+    "PnP.PowerShell"  # Verwende PnP statt SPO für PS7
+)
+
+foreach (`$module in `$modulesToLoad) {
+    if (Get-Module -ListAvailable -Name `$module -ErrorAction SilentlyContinue) {
+        try {
+            Import-Module `$module -DisableNameChecking -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            Write-Host "  ✓ `$module" -ForegroundColor Green
+        } catch {
+            Write-Host "  ⚠ `$module (Fehler beim Laden)" -ForegroundColor Yellow
+        }
+    }
 }
 
 Write-Host ""
-Write-Host "Sie können nun mit der Arbeit beginnen!" -ForegroundColor Cyan
+Write-Host "Nützliche Befehle:" -ForegroundColor Yellow
+Write-Host "  Get-AzContext                  # Azure Kontext" -ForegroundColor Gray
+Write-Host "  Get-MgContext                  # Graph Kontext" -ForegroundColor Gray
+Write-Host "  Get-Mailbox -ResultSize 10     # Exchange Mailboxen" -ForegroundColor Gray
+Write-Host ""
+Write-Host "SharePoint Online Kompatibilität:" -ForegroundColor Cyan
+Write-Host "  Get-SPOTenant                  # ⚠ Eingeschränkt in PS7" -ForegroundColor Yellow
+Write-Host "  PnP.PowerShell                 # ✓ Empfohlen für PS7" -ForegroundColor Green
+Write-Host ""
+Write-Host "Hinweis: Für SharePoint Online verwenden Sie PowerShell 5.1!" -ForegroundColor Yellow
+Write-Host "Moderne Module (Az, Graph) funktionieren perfekt in PS7." -ForegroundColor Green
+Write-Host ""
+"@
+
+    # Speichere Profil
+    $profileContent | Out-File -FilePath $tempProfile -Encoding UTF8
+    
+    # Starte PowerShell 7
+    try {
+        # Suche nach PowerShell 7 Installation
+        $ps7Paths = @(
+            "C:\Program Files\PowerShell\7\pwsh.exe",
+            "C:\Program Files\PowerShell\7-preview\pwsh.exe",
+            "$env:LOCALAPPDATA\Microsoft\PowerShell\7\pwsh.exe"
+        )
+        
+        $ps7Path = $null
+        foreach ($path in $ps7Paths) {
+            if (Test-Path $path) {
+                $ps7Path = $path
+                break
+            }
+        }
+        
+        # Alternativ: Suche in PATH
+        if (-not $ps7Path) {
+            $pwshCmd = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+            if ($pwshCmd) {
+                $ps7Path = $pwshCmd.Source
+            }
+        }
+        
+        if ($ps7Path) {
+            Start-Process $ps7Path -ArgumentList "-NoExit", "-NoLogo", "-File", $tempProfile
+            
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("`r`n✓ PowerShell 7 Konsole geöffnet!`r`n")
+            $textOutput.AppendText("`r`nVersion: PowerShell 7+`r`n")
+            $textOutput.AppendText("Pfad: $ps7Path`r`n")
+            $textOutput.AppendText("Alle Verbindungen verfügbar.`r`n")
+        } else {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("`r`n✗ PowerShell 7 nicht gefunden!`r`n")
+            $textOutput.AppendText("`r`nBitte installieren Sie PowerShell 7:`r`n")
+            $textOutput.AppendText("  winget install Microsoft.PowerShell`r`n")
+            $textOutput.AppendText("  oder herunterladen von: https://aka.ms/powershell`r`n")
+        }
+        
+        # Cleanup
+        Start-Job -ScriptBlock {
+            param($file)
+            Start-Sleep -Seconds 5
+            if (Test-Path $file) { Remove-Item $file -Force -ErrorAction SilentlyContinue }
+        } -ArgumentList $tempProfile | Out-Null
+        
+    } catch {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("`r`n✗ Fehler: $($_.Exception.Message)`r`n")
+    }
+    
+    $textOutput.ScrollToCaret()
+})
+
+$btnDisconnect.Add_Click({
+    $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+    $textOutput.AppendText("`r`n" + "=" * 50 + "`r`n")
+    $textOutput.AppendText("PowerShell Konsole wird geöffnet...`r`n")
+    $textOutput.AppendText("=" * 50 + "`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Prüfe aktive Verbindungen
+    $activeConnections = @()
+    
+    # Azure
+    try {
+        $azContext = Get-AzContext -ErrorAction SilentlyContinue
+        if ($azContext) {
+            $activeConnections += "Azure (Subscription: $($azContext.Subscription.Name))"
+        }
+    } catch {}
+    
+    # Exchange Online
+    try {
+        $exoSession = Get-PSSession | Where-Object { $_.ConfigurationName -eq "Microsoft.Exchange" -and $_.State -eq "Opened" }
+        if ($exoSession) {
+            $activeConnections += "Exchange Online"
+        }
+    } catch {}
+    
+    # Microsoft Graph
+    try {
+        $mgContext = Get-MgContext -ErrorAction SilentlyContinue
+        if ($mgContext) {
+            $activeConnections += "Microsoft Graph (Tenant: $($mgContext.TenantId))"
+        }
+    } catch {}
+    
+    # Azure AD
+    try {
+        $aadContext = Get-AzureADCurrentSessionInfo -ErrorAction SilentlyContinue
+        if ($aadContext) {
+            $activeConnections += "Azure AD (Tenant: $($aadContext.TenantId))"
+        }
+    } catch {}
+    
+    # SharePoint Online
+    try {
+        $spoTenant = Get-SPOTenant -ErrorAction SilentlyContinue
+        if ($spoTenant) {
+            $activeConnections += "SharePoint Online"
+        }
+    } catch {
+        try {
+            $pnpConnection = Get-PnPConnection -ErrorAction SilentlyContinue
+            if ($pnpConnection) {
+                $activeConnections += "SharePoint Online (PnP)"
+            }
+        } catch {}
+    }
+    
+    # Zeige aktive Verbindungen
+    if ($activeConnections.Count -gt 0) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Green
+        $textOutput.AppendText("`r`nAktive Verbindungen:`r`n")
+        foreach ($conn in $activeConnections) {
+            $textOutput.AppendText("  ✓ $conn`r`n")
+        }
+    } else {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+        $textOutput.AppendText("`r`n⚠ Keine aktiven Verbindungen gefunden`r`n")
+        $textOutput.AppendText("  Bitte melden Sie sich zuerst an!`r`n")
+    }
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+    $textOutput.AppendText("`r`nÖffne PowerShell Konsole mit aktuellem Kontext...`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Erstelle temporäres Profil-Script für die neue PowerShell-Sitzung
+    $tempProfile = [System.IO.Path]::GetTempFileName() + ".ps1"
+    
+    $profileContent = @"
+# Temporäres Profil für PowerShell-Konsole mit aktiven Verbindungen
+`$Host.UI.RawUI.WindowTitle = "PowerShell - Verbunden mit Azure & M365"
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  PowerShell Konsole" -ForegroundColor Cyan
+Write-Host "  Aktive Verbindungen" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Optionale Anzeige von Hilfe-Befehlen
-Write-Host "Nützliche Befehle zum Testen:" -ForegroundColor Yellow
+"@
+
+    # Füge Verbindungsinformationen hinzu
+    if ($activeConnections.Count -gt 0) {
+        $profileContent += "Write-Host 'Folgende Verbindungen sind aktiv:' -ForegroundColor Green`r`n"
+        foreach ($conn in $activeConnections) {
+            $profileContent += "Write-Host '  ✓ $conn' -ForegroundColor White`r`n"
+        }
+    } else {
+        $profileContent += "Write-Host '⚠ Keine aktiven Verbindungen' -ForegroundColor Yellow`r`n"
+        $profileContent += "Write-Host '  Bitte melden Sie sich zuerst in der GUI an!' -ForegroundColor Yellow`r`n"
+    }
+    
+    $profileContent += @"
+
 Write-Host ""
-Write-Host "  # Azure" -ForegroundColor Cyan
-Write-Host "  Get-AzSubscription                                      # Abonnements anzeigen" -ForegroundColor Gray
-Write-Host "  Get-AzResource | Select-Object -First 10                # Ressourcen anzeigen" -ForegroundColor Gray
+Write-Host "Nützliche Befehle:" -ForegroundColor Yellow
+Write-Host "  Get-AzContext                  # Azure Kontext anzeigen" -ForegroundColor Gray
+Write-Host "  Get-MgContext                  # Graph Kontext anzeigen" -ForegroundColor Gray
+Write-Host "  Get-AzureADCurrentSessionInfo  # Azure AD Session" -ForegroundColor Gray
+Write-Host "  Get-SPOTenant                  # SharePoint Tenant" -ForegroundColor Gray
+Write-Host "  Get-OrganizationConfig         # Exchange Org Config" -ForegroundColor Gray
 Write-Host ""
-Write-Host "  # Exchange Online" -ForegroundColor Cyan
-Write-Host "  Get-Mailbox -ResultSize 10                              # Postfächer anzeigen" -ForegroundColor Gray
-Write-Host "  Get-OrganizationConfig                                  # Org-Konfiguration" -ForegroundColor Gray
+Write-Host "Hinweis: Änderungen in dieser Konsole beeinflussen NICHT die GUI!" -ForegroundColor Yellow
+Write-Host "Die Verbindungen bleiben auch nach Schließen dieser Konsole aktiv." -ForegroundColor Yellow
 Write-Host ""
-Write-Host "  # Microsoft Graph" -ForegroundColor Cyan
-Write-Host "  Get-MgUser -Top 10                                      # Benutzer anzeigen" -ForegroundColor Gray
-Write-Host "  Get-MgGroup -Top 10                                     # Gruppen anzeigen" -ForegroundColor Gray
-Write-Host ""
-Write-Host "  # Azure AD" -ForegroundColor Cyan
-Write-Host "  Get-AzureADUser -Top 10                                 # Benutzer anzeigen" -ForegroundColor Gray
-Write-Host "  Get-AzureADTenantDetail                                 # Tenant-Details" -ForegroundColor Gray
-Write-Host ""
-Write-Host "  # SharePoint Online (PnP.PowerShell)" -ForegroundColor Cyan
-Write-Host "  Get-PnPTenant                                           # Tenant-Einstellungen" -ForegroundColor Gray
-Write-Host "  Get-PnPSite                                             # Sites anzeigen" -ForegroundColor Gray
-Write-Host ""
-Write-Host "  # SharePoint Online (Legacy)" -ForegroundColor Cyan
-Write-Host "  Get-SPOTenant                                           # Tenant-Einstellungen" -ForegroundColor Gray
-Write-Host "  Get-SPOSite                                             # Sites anzeigen" -ForegroundColor Gray
-Write-Host ""
-Write-Host "  # Intune (Microsoft Graph - Standard Cmdlets)" -ForegroundColor Cyan
-Write-Host "  Get-MgDeviceManagementManagedDevice -Top 10             # Verwaltete Geräte" -ForegroundColor Gray
-Write-Host "  Get-MgDeviceManagementDeviceConfiguration               # Gerätekonfigurationen" -ForegroundColor Gray
-Write-Host "  Get-MgDeviceManagementDeviceCompliancePolicy            # Compliance-Richtlinien" -ForegroundColor Gray
-Write-Host ""
+"@
+
+    # Speichere Profil
+    $profileContent | Out-File -FilePath $tempProfile -Encoding UTF8
+    
+    # Starte neue PowerShell-Konsole mit dem temporären Profil
+    try {
+        # Verwende Start-Process für neue Konsole im gleichen Kontext
+        Start-Process powershell.exe -ArgumentList "-NoExit", "-NoLogo", "-File", $tempProfile
+        
+        $textOutput.SelectionColor = [System.Drawing.Color]::Green
+        $textOutput.AppendText("`r`n✓ PowerShell Konsole geöffnet!`r`n")
+        $textOutput.AppendText("`r`nHinweis: Die Konsole verwendet die gleichen Verbindungen.`r`n")
+        $textOutput.AppendText("Alle Module und Verbindungen sind verfügbar.`r`n")
+        
+        # Cleanup nach kurzer Verzögerung
+        Start-Job -ScriptBlock {
+            param($file)
+            Start-Sleep -Seconds 5
+            if (Test-Path $file) {
+                Remove-Item $file -Force -ErrorAction SilentlyContinue
+            }
+        } -ArgumentList $tempProfile | Out-Null
+        
+    } catch {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("`r`n✗ Fehler beim Öffnen der Konsole: $($_.Exception.Message)`r`n")
+    }
+    
+    $textOutput.ScrollToCaret()
+})
+
+$btnDisconnect.Add_Click({
+    $btnDisconnect.Enabled = $false
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+    $textOutput.AppendText("`r`n" + "=" * 50 + "`r`n")
+    $textOutput.AppendText("Trenne alle Verbindungen...`r`n")
+    $textOutput.AppendText("=" * 50 + "`r`n`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    $disconnected = @()
+    $errors = @()
+    
+    # Azure trennen
+    try {
+        $azContext = Get-AzContext -ErrorAction SilentlyContinue
+        if ($azContext) {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+            $textOutput.AppendText("Azure...`r`n")
+            Disconnect-AzAccount -ErrorAction Stop | Out-Null
+            Clear-AzContext -Scope CurrentUser -Force -ErrorAction SilentlyContinue
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("  ✓ Azure Verbindung getrennt`r`n`r`n")
+            $disconnected += "Azure"
+        }
+    } catch {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("  ✗ Fehler beim Trennen: $($_.Exception.Message)`r`n`r`n")
+        $errors += "Azure"
+    }
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Exchange Online trennen
+    try {
+        $exoSession = Get-PSSession | Where-Object { $_.ConfigurationName -eq "Microsoft.Exchange" -and $_.State -eq "Opened" }
+        if ($exoSession) {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+            $textOutput.AppendText("Exchange Online...`r`n")
+            Disconnect-ExchangeOnline -Confirm:$false -ErrorAction Stop
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("  ✓ Exchange Online Verbindung getrennt`r`n`r`n")
+            $disconnected += "Exchange Online"
+        }
+    } catch {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("  ✗ Fehler beim Trennen: $($_.Exception.Message)`r`n`r`n")
+        $errors += "Exchange Online"
+    }
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Microsoft Graph trennen
+    try {
+        $mgContext = Get-MgContext -ErrorAction SilentlyContinue
+        if ($mgContext) {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+            $textOutput.AppendText("Microsoft Graph...`r`n")
+            Disconnect-MgGraph -ErrorAction Stop
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("  ✓ Microsoft Graph Verbindung getrennt`r`n`r`n")
+            $disconnected += "Microsoft Graph"
+        }
+    } catch {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("  ✗ Fehler beim Trennen: $($_.Exception.Message)`r`n`r`n")
+        $errors += "Microsoft Graph"
+    }
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Azure AD trennen
+    try {
+        $aadContext = Get-AzureADCurrentSessionInfo -ErrorAction SilentlyContinue
+        if ($aadContext) {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+            $textOutput.AppendText("Azure AD...`r`n")
+            Disconnect-AzureAD -ErrorAction Stop
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("  ✓ Azure AD Verbindung getrennt`r`n`r`n")
+            $disconnected += "Azure AD"
+        }
+    } catch {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("  ✗ Fehler beim Trennen: $($_.Exception.Message)`r`n`r`n")
+        $errors += "Azure AD"
+    }
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # SharePoint Online trennen
+    try {
+        # Versuche SPO Cmdlet
+        $spoConnected = $false
+        try {
+            $spoTenant = Get-SPOTenant -ErrorAction SilentlyContinue
+            if ($spoTenant) {
+                $spoConnected = $true
+            }
+        } catch {
+            $spoConnected = $false
+        }
+        
+        if ($spoConnected) {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+            $textOutput.AppendText("SharePoint Online...`r`n")
+            Disconnect-SPOService -ErrorAction Stop
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("  ✓ SharePoint Online Verbindung getrennt`r`n`r`n")
+            $disconnected += "SharePoint Online"
+        }
+    } catch {
+        # PnP Verbindung prüfen
+        try {
+            $pnpConnection = Get-PnPConnection -ErrorAction SilentlyContinue
+            if ($pnpConnection) {
+                $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+                $textOutput.AppendText("SharePoint Online (PnP)...`r`n")
+                Disconnect-PnPOnline -ErrorAction Stop
+                $textOutput.SelectionColor = [System.Drawing.Color]::Green
+                $textOutput.AppendText("  ✓ SharePoint Online Verbindung getrennt`r`n`r`n")
+                $disconnected += "SharePoint Online (PnP)"
+            }
+        } catch {
+            # Ignoriere wenn keine SharePoint-Verbindung besteht
+        }
+    }
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Zusammenfassung
+    $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+    $textOutput.AppendText("=" * 50 + "`r`n")
+    $textOutput.AppendText("Zusammenfassung`r`n")
+    $textOutput.AppendText("=" * 50 + "`r`n`r`n")
+    
+    if ($disconnected.Count -gt 0) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Green
+        $textOutput.AppendText("Getrennte Verbindungen:`r`n")
+        foreach ($conn in $disconnected) {
+            $textOutput.AppendText("  ✓ $conn`r`n")
+        }
+    } else {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Gray
+        $textOutput.AppendText("Keine aktiven Verbindungen gefunden`r`n")
+    }
+    
+    if ($errors.Count -gt 0) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("`r`nFehler beim Trennen:`r`n")
+        foreach ($err in $errors) {
+            $textOutput.AppendText("  ✗ $err`r`n")
+        }
+    }
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+    $textOutput.AppendText("`r`n✓ Trennvorgang abgeschlossen!`r`n")
+    $textOutput.ScrollToCaret()
+    
+    $btnDisconnect.Enabled = $true
+})
+
+$btnClear.Add_Click({
+    $textOutput.Clear()
+})
+
+$btnClose.Add_Click({
+    $form.Close()
+})
+
+# Form anzeigen
+[void]$form.ShowDialog()

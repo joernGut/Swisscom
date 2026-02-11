@@ -25,6 +25,10 @@
     Show only summary without detailed tables
 .PARAMETER GUI
     Launch graphical user interface
+.NOTES
+    Version: 2.1.0
+    Datum: 2025-02-11
+    Autor: BWS PowerShell Script
 .EXAMPLE
     .\BWS-Checking-Script.ps1 -BCID "1234" -CustomerName "Contoso AG"
 .EXAMPLE
@@ -66,6 +70,12 @@ param(
     [switch]$SkipSharePoint,
     
     [Parameter(Mandatory=$false)]
+    [string]$SharePointUrl,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$SkipTeams,
+    
+    [Parameter(Mandatory=$false)]
     [ValidateSet("HTML", "PDF", "Both")]
     [string]$ExportFormat = "HTML",
     
@@ -79,9 +89,73 @@ param(
     [switch]$GUI
 )
 
+# Script Version
+$script:Version = "2.1.0"
+
 #============================================================================
 # Global Variables and Configuration
 #============================================================================
+
+# PowerShell Version Check
+$psVersion = $PSVersionTable.PSVersion.Major
+$psEdition = $PSVersionTable.PSEdition
+
+if ($psVersion -ge 7 -or $psEdition -eq "Core") {
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Yellow
+    Write-Host "  BWS-Checking-Script v$script:Version" -ForegroundColor Cyan
+    Write-Host "  ⚠ WARNUNG: PowerShell Version Inkompatibilität" -ForegroundColor Yellow
+    Write-Host "======================================================" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Sie verwenden: PowerShell $($PSVersionTable.PSVersion) ($psEdition)" -ForegroundColor Yellow
+    Write-Host "Empfohlen:     PowerShell 5.1 (Desktop)" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "WICHTIG:" -ForegroundColor Red
+    Write-Host "  Der SharePoint-Check funktioniert NUR in PowerShell 5.1!" -ForegroundColor Red
+    Write-Host "  Das Modul 'Microsoft.Online.SharePoint.PowerShell'" -ForegroundColor Red
+    Write-Host "  wird in PowerShell 7/Core NICHT unterstützt." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "6 von 7 Checks funktionieren in PowerShell 7:" -ForegroundColor Yellow
+    Write-Host "  ✓ Azure Resources" -ForegroundColor Green
+    Write-Host "  ✓ Intune Policies" -ForegroundColor Green
+    Write-Host "  ✓ Entra ID Connect" -ForegroundColor Green
+    Write-Host "  ✓ Hybrid Azure AD Join" -ForegroundColor Green
+    Write-Host "  ✓ Defender for Endpoint" -ForegroundColor Green
+    Write-Host "  ✓ BWS Software Packages" -ForegroundColor Green
+    Write-Host "  ✗ SharePoint Configuration (FEHLT)" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Optionen:" -ForegroundColor Cyan
+    Write-Host "  1. Script in PowerShell 5.1 neu starten (EMPFOHLEN)" -ForegroundColor White
+    Write-Host "     → Schließen Sie diese Konsole" -ForegroundColor Gray
+    Write-Host "     → Öffnen Sie 'Windows PowerShell' (nicht PowerShell 7)" -ForegroundColor Gray
+    Write-Host "     → Führen Sie das Script erneut aus" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  2. SharePoint-Check überspringen" -ForegroundColor White
+    Write-Host "     → Fügen Sie -SkipSharePoint Parameter hinzu" -ForegroundColor Gray
+    Write-Host "     → Beispiel: .\BWS-Checking-Script.ps1 -BCID '1234' -SkipSharePoint" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  3. Mit Login-GUI arbeiten" -ForegroundColor White
+    Write-Host "     → Starten Sie: .\Azure-M365-Login-GUI.ps1" -ForegroundColor Gray
+    Write-Host "     → Klicken Sie auf 'PowerShell 5.1' Button (Blau)" -ForegroundColor Gray
+    Write-Host "     → Führen Sie das Script in der neuen Konsole aus" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Yellow
+    Write-Host ""
+    
+    # Frage ob fortfahren
+    if (-not $SkipSharePoint) {
+        $continue = Read-Host "Trotzdem fortfahren? SharePoint-Check wird fehlschlagen. (J/N)"
+        if ($continue -ne "J" -and $continue -ne "j" -and $continue -ne "Y" -and $continue -ne "y") {
+            Write-Host ""
+            Write-Host "Script abgebrochen. Bitte verwenden Sie PowerShell 5.1." -ForegroundColor Yellow
+            Write-Host ""
+            exit
+        }
+        Write-Host ""
+        Write-Host "Fahre fort ohne SharePoint-Check Unterstützung..." -ForegroundColor Yellow
+        Write-Host ""
+    }
+}
 
 # Intune Standard Policies Definition
 $script:intuneStandardPolicies = @(
@@ -1414,7 +1488,8 @@ function Test-BWSSoftwarePackages {
 
 function Test-SharePointConfiguration {
     param(
-        [bool]$CompactView = $false
+        [bool]$CompactView = $false,
+        [string]$SharePointUrl = ""
     )
     
     Write-Host ""
@@ -1425,150 +1500,252 @@ function Test-SharePointConfiguration {
     
     $spConfig = @{
         Settings = @{
-            ExternalSharing = $null
+            SharePointExternalSharing = $null
+            OneDriveExternalSharing = $null
             SiteCreation = $null
             LegacyAuthBlocked = $null
+            TenantUrl = $null
+            ConnectionMethod = $null
         }
         Compliant = $false
         Errors = @()
+        CheckPerformed = $false
     }
     
     try {
         Write-Host "Checking SharePoint configuration..." -ForegroundColor Yellow
         Write-Host ""
         
-        # Check if PnP PowerShell or SPO Management Shell is available
+        # Check if SPO Management Shell is available (preferred) or PnP PowerShell
         $spoModuleAvailable = $false
+        $moduleType = $null
         
-        if (Get-Module -ListAvailable -Name "PnP.PowerShell") {
-            $spoModuleAvailable = $true
-            $moduleType = "PnP.PowerShell"
-        } elseif (Get-Module -ListAvailable -Name "Microsoft.Online.SharePoint.PowerShell") {
+        if (Get-Module -ListAvailable -Name "Microsoft.Online.SharePoint.PowerShell") {
             $spoModuleAvailable = $true
             $moduleType = "SPO"
+        } elseif (Get-Module -ListAvailable -Name "PnP.PowerShell") {
+            $spoModuleAvailable = $true
+            $moduleType = "PnP.PowerShell"
         }
         
         if ($spoModuleAvailable) {
             Write-Host "  [SharePoint] Using $moduleType module" -ForegroundColor Gray
-            Write-Host ""
             
-            # Note: This requires prior connection to SharePoint Online
-            # Connect-PnPOnline or Connect-SPOService must be called before running this check
+            # Check if already connected or need to connect
+            $needsConnection = $false
+            $tenant = $null
             
             try {
-                # Check External Sharing Settings
-                Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
-                Write-Host "Checking External Sharing settings..." -NoNewline
-                
-                # Try to get tenant settings
-                if ($moduleType -eq "PnP.PowerShell") {
-                    $tenant = Get-PnPTenant -ErrorAction SilentlyContinue
+                if ($moduleType -eq "SPO") {
+                    $tenant = Get-SPOTenant -ErrorAction Stop
                 } else {
-                    $tenant = Get-SPOTenant -ErrorAction SilentlyContinue
+                    $tenant = Get-PnPTenant -ErrorAction Stop
                 }
-                
-                if ($tenant) {
-                    $sharingCapability = $tenant.SharingCapability
-                    
-                    # SharingCapability values:
-                    # 0 = Disabled (Only people in your organization)
-                    # 1 = ExternalUserSharingOnly (Existing guests)
-                    # 2 = ExternalUserAndGuestSharing (New and existing guests)
-                    # 3 = ExistingExternalUserSharingOnly (Anyone)
-                    
-                    if ($sharingCapability -eq 0 -or $sharingCapability -eq "Disabled") {
-                        Write-Host " ✓ COMPLIANT (Only people in organization)" -ForegroundColor Green
-                        $spConfig.Settings.ExternalSharing = "Disabled"
-                    } else {
-                        Write-Host " ⚠ NON-COMPLIANT (External sharing enabled)" -ForegroundColor Yellow
-                        $spConfig.Settings.ExternalSharing = $sharingCapability.ToString()
-                        $spConfig.Errors += "External sharing should be set to 'Only people in your organization'"
-                    }
-                } else {
-                    Write-Host " ⓘ UNABLE TO CHECK (Not connected)" -ForegroundColor Gray
-                    $spConfig.Errors += "Not connected to SharePoint Online tenant"
-                }
-                
             } catch {
-                Write-Host " ⚠ ERROR" -ForegroundColor Yellow
-                $spConfig.Errors += "Error checking external sharing: $($_.Exception.Message)"
+                $needsConnection = $true
             }
             
-            # Check Site Creation Settings
-            try {
-                Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
-                Write-Host "Checking Site Creation settings..." -NoNewline
+            # If not connected and URL provided, try to connect
+            if ($needsConnection -and $SharePointUrl) {
+                Write-Host "  [SharePoint] Not connected, attempting connection to: $SharePointUrl" -ForegroundColor Yellow
                 
-                if ($tenant) {
-                    # Check if users can create sites
-                    # Note: Different properties depending on module version
-                    $canCreateSites = $true
+                try {
+                    if ($moduleType -eq "SPO") {
+                        Import-Module Microsoft.Online.SharePoint.PowerShell -DisableNameChecking -ErrorAction Stop
+                        Connect-SPOService -Url $SharePointUrl -ErrorAction Stop
+                        Write-Host "  [SharePoint] Connected successfully" -ForegroundColor Green
+                        $tenant = Get-SPOTenant -ErrorAction Stop
+                    } else {
+                        Connect-PnPOnline -Url $SharePointUrl -Interactive -ErrorAction Stop
+                        Write-Host "  [SharePoint] Connected successfully (PnP)" -ForegroundColor Green
+                        $tenant = Get-PnPTenant -ErrorAction Stop
+                    }
+                    $needsConnection = $false
+                } catch {
+                    Write-Host "  [SharePoint] Connection failed: $($_.Exception.Message)" -ForegroundColor Red
+                    $spConfig.Errors += "Failed to connect to SharePoint: $($_.Exception.Message)"
+                }
+            }
+            
+            # ALL CHECKS MUST BE INSIDE THIS if ($tenant) BLOCK!
+            if ($tenant) {
+                $spConfig.CheckPerformed = $true
+                $spConfig.Settings.ConnectionMethod = $moduleType
+                
+                # Store Tenant URL
+                if ($tenant.RootSiteUrl) {
+                    $spConfig.Settings.TenantUrl = $tenant.RootSiteUrl
+                }
+                
+                Write-Host ""
+                
+                # ============================================================
+                # CHECK 1: External Sharing (SharePoint and OneDrive)
+                # ============================================================
+                try {
+                    Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
+                    Write-Host "Checking External Sharing settings..." -NoNewline
                     
-                    if ($tenant.PSObject.Properties.Name -contains "UsersCanCreateModernSitePages") {
-                        $canCreateSites = $tenant.UsersCanCreateModernSitePages
-                    } elseif ($tenant.PSObject.Properties.Name -contains "UserSelfServiceEnabled") {
-                        $canCreateSites = $tenant.UserSelfServiceEnabled
+                    # SharePoint External Sharing (SharingCapability)
+                    $spSharingCapability = $tenant.SharingCapability
+                    
+                    # OneDrive External Sharing (OneDriveSharingCapability)
+                    $odSharingCapability = $tenant.OneDriveSharingCapability
+                    
+                    # Check SharePoint - Should be "Anyone" (3)
+                    if ($spSharingCapability -eq 3 -or $spSharingCapability -eq "ExistingExternalUserSharingOnly") {
+                        Write-Host " ✓ SharePoint: Anyone" -ForegroundColor Green
+                        $spConfig.Settings.SharePointExternalSharing = "Anyone"
+                    } else {
+                        Write-Host " ⚠ SharePoint: $spSharingCapability" -ForegroundColor Yellow
+                        $spConfig.Settings.SharePointExternalSharing = $spSharingCapability.ToString()
+                        $spConfig.Errors += "SharePoint External Sharing should be 'Anyone'"
                     }
                     
-                    if ($canCreateSites) {
-                        Write-Host " ✓ ENABLED (Users can create sites)" -ForegroundColor Green
+                    # Check OneDrive - Should be "Only people in your organization" (0)
+                    Write-Host "  [OneDrive]    " -NoNewline -ForegroundColor Gray
+                    Write-Host "Checking OneDrive External Sharing..." -NoNewline
+                    
+                    if ($odSharingCapability -eq 0 -or $odSharingCapability -eq "Disabled") {
+                        Write-Host " ✓ Only Organization" -ForegroundColor Green
+                        $spConfig.Settings.OneDriveExternalSharing = "Disabled"
+                    } else {
+                        Write-Host " ⚠ $odSharingCapability" -ForegroundColor Yellow
+                        $spConfig.Settings.OneDriveExternalSharing = $odSharingCapability.ToString()
+                        $spConfig.Errors += "OneDrive External Sharing should be 'Disabled'"
+                    }
+                    
+                } catch {
+                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    $spConfig.Settings.SharePointExternalSharing = "Error"
+                    $spConfig.Settings.OneDriveExternalSharing = "Error"
+                    $spConfig.Errors += "Error checking external sharing: $($_.Exception.Message)"
+                }
+                
+                # ============================================================
+                # CHECK 2: Site Creation
+                # JGU - START - Bitte hier anpassen
+                # ============================================================
+                try {
+                    Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
+                    Write-Host "Checking Site Creation settings..." -NoNewline
+                    
+                    $restrictionEnabled = $null
+                    
+                    # Use Get-SPORestrictedSiteCreation cmdlet
+                    if ($moduleType -eq "SPO") {
+                        try {
+                            Write-Host "" # New line for debug
+                            Write-Host "  [DEBUG] Calling Get-SPORestrictedSiteCreation..." -ForegroundColor Cyan
+                            
+                            $restrictedInfo = Get-SPORestrictedSiteCreation -ErrorAction Stop
+                            
+                            Write-Host "  [DEBUG] Cmdlet executed successfully" -ForegroundColor Cyan
+                            Write-Host "  [DEBUG] Full object:" -ForegroundColor Cyan
+                            $restrictedInfo | Format-List | Out-String | ForEach-Object { Write-Host $_ -ForegroundColor Cyan }
+                            
+                            if ($restrictedInfo) {
+                                # Get the Enabled property
+                                $restrictionEnabled = $restrictedInfo.Enabled
+                                
+                                Write-Host "  [DEBUG] Enabled property value: $restrictionEnabled" -ForegroundColor Cyan
+                                Write-Host "  [DEBUG] Enabled property type: $($restrictionEnabled.GetType().Name)" -ForegroundColor Cyan
+                                
+                            } else {
+                                Write-Host "  [DEBUG] restrictedInfo is null!" -ForegroundColor Red
+                            }
+                        } catch {
+                            Write-Host "" # New line
+                            Write-Host "  [DEBUG] Exception caught: $($_.Exception.Message)" -ForegroundColor Red
+                            Write-Host "  [DEBUG] Exception type: $($_.Exception.GetType().Name)" -ForegroundColor Red
+                            $restrictionEnabled = $null
+                        }
+                    } else {
+                        Write-Host "" # New line
+                        Write-Host "  [DEBUG] Module type is not SPO: $moduleType" -ForegroundColor Yellow
+                    }
+                    
+                    Write-Host "  [SharePoint] Final evaluation: restrictionEnabled = $restrictionEnabled" -ForegroundColor Cyan
+                    
+                    # Evaluate the result
+                    if ($null -eq $restrictionEnabled) {
+                        # Could not determine
+                        Write-Host "  [SharePoint] Result: " -NoNewline -ForegroundColor Gray
+                        Write-Host "Could not verify (cmdlet unavailable)" -ForegroundColor Gray
+                        $spConfig.Settings.SiteCreation = "Unknown"
+                    } elseif ($restrictionEnabled -eq $false) {
+                        # Enabled = False → Users CAN create sites → BAD!
+                        Write-Host "  [SharePoint] Result: " -NoNewline -ForegroundColor Gray
+                        Write-Host "ENABLED (users can create sites - restriction not active)" -ForegroundColor Yellow
                         $spConfig.Settings.SiteCreation = "Enabled"
+                        $spConfig.Errors += "Site creation should be restricted - Get-SPORestrictedSiteCreation Enabled should be True"
                     } else {
-                        Write-Host " ⚠ DISABLED" -ForegroundColor Yellow
+                        # Enabled = True → Users CANNOT create sites → GOOD!
+                        Write-Host "  [SharePoint] Result: " -NoNewline -ForegroundColor Gray
+                        Write-Host "DISABLED (site creation is restricted)" -ForegroundColor Green
                         $spConfig.Settings.SiteCreation = "Disabled"
-                        $spConfig.Errors += "Site creation should be enabled for users"
                     }
-                } else {
-                    Write-Host " ⓘ UNABLE TO CHECK" -ForegroundColor Gray
+                    
+                } catch {
+                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    $spConfig.Settings.SiteCreation = "Error"
+                    $spConfig.Errors += "Error checking site creation: $($_.Exception.Message)"
                 }
+                # JGU - END - Site Creation Check
                 
-            } catch {
-                Write-Host " ⚠ ERROR" -ForegroundColor Yellow
-                $spConfig.Errors += "Error checking site creation: $($_.Exception.Message)"
-            }
-            
-            # Check Legacy Authentication / Apps that don't use modern auth
-            try {
-                Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
-                Write-Host "Checking Legacy Authentication blocking..." -NoNewline
-                
-                if ($tenant) {
-                    # Check if legacy auth is blocked
-                    $legacyAuthBlocked = $false
+                # ============================================================
+                # CHECK 3: Legacy Browser Auth
+                # ============================================================
+                try {
+                    Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
+                    Write-Host "Checking Legacy Browser Auth blocking..." -NoNewline
                     
-                    if ($tenant.PSObject.Properties.Name -contains "LegacyAuthProtocolsEnabled") {
+                    $legacyAuthBlocked = $null
+                    
+                    # Try LegacyBrowserAuthProtocolsEnabled property
+                    if ($null -ne $tenant.LegacyBrowserAuthProtocolsEnabled) {
+                        $legacyAuthBlocked = -not $tenant.LegacyBrowserAuthProtocolsEnabled
+                    } elseif ($null -ne $tenant.LegacyAuthProtocolsEnabled) {
                         $legacyAuthBlocked = -not $tenant.LegacyAuthProtocolsEnabled
-                    } elseif ($tenant.PSObject.Properties.Name -contains "BlockAccessFromUnmanagedDevices") {
-                        # Alternative check
-                        $legacyAuthBlocked = $tenant.BlockAccessFromUnmanagedDevices
                     }
                     
-                    if ($legacyAuthBlocked) {
-                        Write-Host " ✓ BLOCKED (Legacy auth disabled)" -ForegroundColor Green
+                    if ($null -eq $legacyAuthBlocked) {
+                        Write-Host " ⓘ Property not available" -ForegroundColor Gray
+                        $spConfig.Settings.LegacyAuthBlocked = "Unknown"
+                    } elseif ($legacyAuthBlocked) {
+                        Write-Host " ✓ BLOCKED" -ForegroundColor Green
                         $spConfig.Settings.LegacyAuthBlocked = $true
                     } else {
-                        Write-Host " ⚠ NOT BLOCKED" -ForegroundColor Yellow
+                        Write-Host " ⚠ ALLOWED" -ForegroundColor Yellow
                         $spConfig.Settings.LegacyAuthBlocked = $false
-                        $spConfig.Errors += "Apps that don't use modern authentication should be blocked"
+                        $spConfig.Errors += "Legacy browser auth should be blocked"
                     }
-                } else {
-                    Write-Host " ⓘ UNABLE TO CHECK" -ForegroundColor Gray
+                    
+                } catch {
+                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    $spConfig.Settings.LegacyAuthBlocked = "Error"
+                    $spConfig.Errors += "Error checking legacy auth: $($_.Exception.Message)"
                 }
                 
-            } catch {
-                Write-Host " ⚠ ERROR" -ForegroundColor Yellow
-                $spConfig.Errors += "Error checking legacy auth: $($_.Exception.Message)"
+            } else {
+                # Not connected
+                Write-Host "  ⚠ Not connected to SharePoint" -ForegroundColor Yellow
+                $spConfig.Errors += "Not connected to SharePoint Online"
+                $spConfig.Settings.SharePointExternalSharing = "Not Connected"
+                $spConfig.Settings.OneDriveExternalSharing = "Not Connected"
+                $spConfig.Settings.SiteCreation = "Not Connected"
+                $spConfig.Settings.LegacyAuthBlocked = "Not Connected"
             }
             
         } else {
             Write-Host "  ⚠ SharePoint PowerShell module not found" -ForegroundColor Yellow
-            Write-Host "  Install with: Install-Module -Name PnP.PowerShell" -ForegroundColor Gray
             $spConfig.Errors += "SharePoint PowerShell module not installed"
         }
         
         # Determine overall compliance
-        $spConfig.Compliant = ($spConfig.Settings.ExternalSharing -eq "Disabled") -and
-                              ($spConfig.Settings.SiteCreation -eq "Enabled") -and
+        $spConfig.Compliant = ($spConfig.Settings.SharePointExternalSharing -eq "Anyone") -and
+                              ($spConfig.Settings.OneDriveExternalSharing -eq "Disabled") -and
+                              ($spConfig.Settings.SiteCreation -eq "Disabled") -and
                               ($spConfig.Settings.LegacyAuthBlocked -eq $true) -and
                               ($spConfig.Errors.Count -eq 0)
         
@@ -1577,29 +1754,41 @@ function Test-SharePointConfiguration {
         $spConfig.Errors += "General error: $($_.Exception.Message)"
     }
     
+    # Summary output
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  SHAREPOINT CONFIGURATION SUMMARY" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
-    Write-Host "  External Sharing:    " -NoNewline -ForegroundColor White
-    if ($spConfig.Settings.ExternalSharing -eq "Disabled") {
+    Write-Host "  SharePoint Ext. Sharing: " -NoNewline -ForegroundColor White
+    if ($spConfig.Settings.SharePointExternalSharing -eq "Anyone") {
+        Write-Host "Anyone (✓)" -ForegroundColor Green
+    } elseif ($spConfig.Settings.SharePointExternalSharing) {
+        Write-Host "$($spConfig.Settings.SharePointExternalSharing) (✗)" -ForegroundColor Yellow
+    } else {
+        Write-Host "Not Checked" -ForegroundColor Gray
+    }
+    
+    Write-Host "  OneDrive Ext. Sharing:   " -NoNewline -ForegroundColor White
+    if ($spConfig.Settings.OneDriveExternalSharing -eq "Disabled") {
         Write-Host "Only Organization (✓)" -ForegroundColor Green
-    } elseif ($spConfig.Settings.ExternalSharing) {
-        Write-Host "$($spConfig.Settings.ExternalSharing) (✗)" -ForegroundColor Yellow
+    } elseif ($spConfig.Settings.OneDriveExternalSharing) {
+        Write-Host "$($spConfig.Settings.OneDriveExternalSharing) (✗)" -ForegroundColor Yellow
     } else {
         Write-Host "Not Checked" -ForegroundColor Gray
     }
     
-    Write-Host "  Site Creation:       " -NoNewline -ForegroundColor White
-    if ($spConfig.Settings.SiteCreation -eq "Enabled") {
-        Write-Host "Enabled (✓)" -ForegroundColor Green
+    Write-Host "  Site Creation:           " -NoNewline -ForegroundColor White
+    if ($spConfig.Settings.SiteCreation -eq "Disabled") {
+        Write-Host "Disabled (✓)" -ForegroundColor Green
+    } elseif ($spConfig.Settings.SiteCreation -eq "Enabled") {
+        Write-Host "Enabled (✗)" -ForegroundColor Yellow
     } elseif ($spConfig.Settings.SiteCreation) {
-        Write-Host "$($spConfig.Settings.SiteCreation) (✗)" -ForegroundColor Yellow
+        Write-Host "$($spConfig.Settings.SiteCreation) (?)" -ForegroundColor Gray
     } else {
         Write-Host "Not Checked" -ForegroundColor Gray
     }
     
-    Write-Host "  Legacy Auth Blocked: " -NoNewline -ForegroundColor White
+    Write-Host "  Legacy Auth Blocked:     " -NoNewline -ForegroundColor White
     if ($spConfig.Settings.LegacyAuthBlocked -eq $true) {
         Write-Host "Yes (✓)" -ForegroundColor Green
     } elseif ($spConfig.Settings.LegacyAuthBlocked -eq $false) {
@@ -1608,24 +1797,312 @@ function Test-SharePointConfiguration {
         Write-Host "Not Checked" -ForegroundColor Gray
     }
     
-    Write-Host "  Overall Compliance:  " -NoNewline -ForegroundColor White
-    Write-Host $(if ($spConfig.Compliant) { "✓ COMPLIANT" } else { "✗ NON-COMPLIANT" }) -ForegroundColor $(if ($spConfig.Compliant) { "Green" } else { "Yellow" })
-    Write-Host "  Errors/Warnings:     $($spConfig.Errors.Count)" -ForegroundColor $(if ($spConfig.Errors.Count -eq 0) { "Green" } else { "Yellow" })
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
     
-    if (-not $CompactView -and $spConfig.Errors.Count -gt 0) {
-        Write-Host "CONFIGURATION ISSUES:" -ForegroundColor Yellow
-        Write-Host ""
-        $spConfig.Errors | ForEach-Object {
-            Write-Host "  - $_" -ForegroundColor Yellow
-        }
-        Write-Host ""
-    }
-    
     return @{
         Status = $spConfig
-        CheckPerformed = $true
+        CheckPerformed = $spConfig.CheckPerformed
+    }
+}
+
+#============================================================================
+# TEAMS CONFIGURATION CHECK
+#============================================================================
+function Test-TeamsConfiguration {
+    param(
+        [bool]$CompactView = $false
+    )
+    
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  TEAMS CONFIGURATION CHECK" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $teamsConfig = @{
+        Settings = @{
+            ExternalAccessEnabled = $null
+            CloudStorageCitrix = $null
+            CloudStorageDropbox = $null
+            CloudStorageBox = $null
+            CloudStorageGoogleDrive = $null
+            CloudStorageEgnyte = $null
+            AnonymousUsersCanJoin = $null
+            AnonymousUsersCanStartMeeting = $null
+            DefaultPresenterRole = $null
+        }
+        Compliant = $false
+        Errors = @()
+        CheckPerformed = $false
+    }
+    
+    try {
+        Write-Host "Checking Teams configuration..." -ForegroundColor Yellow
+        Write-Host ""
+        
+        # Check if Teams PowerShell module is available
+        $teamsModuleAvailable = $false
+        
+        if (Get-Module -ListAvailable -Name "MicrosoftTeams") {
+            $teamsModuleAvailable = $true
+        }
+        
+        if ($teamsModuleAvailable) {
+            Write-Host "  [Teams] Using MicrosoftTeams module" -ForegroundColor Gray
+            
+            # Check if connected to Teams
+            $teamsConnected = $false
+            
+            try {
+                $csConfig = Get-CsTeamsClientConfiguration -ErrorAction Stop
+                $teamsConnected = $true
+            } catch {
+                Write-Host "  [Teams] Not connected to Microsoft Teams" -ForegroundColor Yellow
+                Write-Host "  [Teams] Please connect first: Connect-MicrosoftTeams" -ForegroundColor Gray
+            }
+            
+            if ($teamsConnected) {
+                $teamsConfig.CheckPerformed = $true
+                Write-Host ""
+                
+                # ============================================================
+                # CHECK 1: External Access (Unmanaged Teams)
+                # ============================================================
+                try {
+                    Write-Host "  [Teams] " -NoNewline -ForegroundColor Gray
+                    Write-Host "Checking External Access settings..." -NoNewline
+                    
+                    $federationConfig = Get-CsTenantFederationConfiguration -ErrorAction Stop
+                    $externalAccessEnabled = $federationConfig.AllowTeamsConsumer
+                    
+                    if ($externalAccessEnabled -eq $false) {
+                        Write-Host " ✓ DISABLED (unmanaged Teams blocked)" -ForegroundColor Green
+                        $teamsConfig.Settings.ExternalAccessEnabled = $false
+                    } else {
+                        Write-Host " ⚠ ENABLED (unmanaged Teams allowed)" -ForegroundColor Yellow
+                        $teamsConfig.Settings.ExternalAccessEnabled = $true
+                        $teamsConfig.Errors += "External access to unmanaged Teams should be disabled"
+                    }
+                    
+                } catch {
+                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    $teamsConfig.Settings.ExternalAccessEnabled = "Error"
+                    $teamsConfig.Errors += "Error checking external access: $($_.Exception.Message)"
+                }
+                
+                # ============================================================
+                # CHECK 2: Cloud Storage Providers
+                # ============================================================
+                try {
+                    Write-Host "  [Teams] " -NoNewline -ForegroundColor Gray
+                    Write-Host "Checking Cloud Storage settings..." -NoNewline
+                    
+                    $clientConfig = Get-CsTeamsClientConfiguration -ErrorAction Stop
+                    
+                    # Check each cloud storage provider
+                    $allDisabled = $true
+                    $enabledProviders = @()
+                    
+                    # Citrix Files
+                    if ($clientConfig.AllowCitrixContentSharing -eq $true) {
+                        $allDisabled = $false
+                        $enabledProviders += "Citrix"
+                    }
+                    $teamsConfig.Settings.CloudStorageCitrix = $clientConfig.AllowCitrixContentSharing
+                    
+                    # Dropbox
+                    if ($clientConfig.AllowDropBox -eq $true) {
+                        $allDisabled = $false
+                        $enabledProviders += "Dropbox"
+                    }
+                    $teamsConfig.Settings.CloudStorageDropbox = $clientConfig.AllowDropBox
+                    
+                    # Box
+                    if ($clientConfig.AllowBox -eq $true) {
+                        $allDisabled = $false
+                        $enabledProviders += "Box"
+                    }
+                    $teamsConfig.Settings.CloudStorageBox = $clientConfig.AllowBox
+                    
+                    # Google Drive
+                    if ($clientConfig.AllowGoogleDrive -eq $true) {
+                        $allDisabled = $false
+                        $enabledProviders += "Google Drive"
+                    }
+                    $teamsConfig.Settings.CloudStorageGoogleDrive = $clientConfig.AllowGoogleDrive
+                    
+                    # Egnyte
+                    if ($clientConfig.AllowEgnyte -eq $true) {
+                        $allDisabled = $false
+                        $enabledProviders += "Egnyte"
+                    }
+                    $teamsConfig.Settings.CloudStorageEgnyte = $clientConfig.AllowEgnyte
+                    
+                    if ($allDisabled) {
+                        Write-Host " ✓ ALL DISABLED" -ForegroundColor Green
+                    } else {
+                        Write-Host " ⚠ ENABLED: $($enabledProviders -join ', ')" -ForegroundColor Yellow
+                        $teamsConfig.Errors += "All cloud storage providers should be disabled: $($enabledProviders -join ', ')"
+                    }
+                    
+                } catch {
+                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    $teamsConfig.Errors += "Error checking cloud storage: $($_.Exception.Message)"
+                }
+                
+                # ============================================================
+                # CHECK 3: Meeting & Lobby Settings
+                # ============================================================
+                try {
+                    Write-Host "  [Teams] " -NoNewline -ForegroundColor Gray
+                    Write-Host "Checking Meeting & Lobby settings..." -NoNewline
+                    
+                    $meetingConfig = Get-CsTeamsMeetingConfiguration -ErrorAction Stop
+                    
+                    # Anonymous users can join
+                    $anonymousCanJoin = $meetingConfig.DisableAnonymousJoin -eq $false
+                    $teamsConfig.Settings.AnonymousUsersCanJoin = $anonymousCanJoin
+                    
+                    # Anonymous users can start meeting
+                    $anonymousCanStart = -not $meetingConfig.EnabledAnonymousUsersRequireLobby
+                    $teamsConfig.Settings.AnonymousUsersCanStartMeeting = $anonymousCanStart
+                    
+                    $meetingIssues = @()
+                    
+                    if ($anonymousCanJoin) {
+                        $meetingIssues += "Anonymous join enabled"
+                    }
+                    
+                    if ($anonymousCanStart) {
+                        $meetingIssues += "Anonymous can start meetings"
+                    }
+                    
+                    if ($meetingIssues.Count -eq 0) {
+                        Write-Host " ✓ COMPLIANT" -ForegroundColor Green
+                    } else {
+                        Write-Host " ⚠ ISSUES: $($meetingIssues -join ', ')" -ForegroundColor Yellow
+                        $teamsConfig.Errors += "Anonymous users should not be able to join or start meetings"
+                    }
+                    
+                } catch {
+                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    $teamsConfig.Errors += "Error checking meeting settings: $($_.Exception.Message)"
+                }
+                
+                # ============================================================
+                # CHECK 4: Content Sharing - Who can present
+                # ============================================================
+                try {
+                    Write-Host "  [Teams] " -NoNewline -ForegroundColor Gray
+                    Write-Host "Checking Content Sharing settings..." -NoNewline
+                    
+                    $meetingPolicy = Get-CsTeamsMeetingPolicy -Identity Global -ErrorAction Stop
+                    $presenterRole = $meetingPolicy.DesignatedPresenterRoleMode
+                    
+                    $teamsConfig.Settings.DefaultPresenterRole = $presenterRole
+                    
+                    # EveryoneUserOverride means "Everyone" can present
+                    if ($presenterRole -eq "EveryoneUserOverride") {
+                        Write-Host " ✓ EVERYONE (Compliant)" -ForegroundColor Green
+                    } else {
+                        Write-Host " ⚠ $presenterRole (Non-Compliant)" -ForegroundColor Yellow
+                        $teamsConfig.Errors += "Default presenter role should be 'Everyone' (EveryoneUserOverride)"
+                    }
+                    
+                } catch {
+                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    $teamsConfig.Settings.DefaultPresenterRole = "Error"
+                    $teamsConfig.Errors += "Error checking presenter settings: $($_.Exception.Message)"
+                }
+                
+            } else {
+                Write-Host "  ⚠ Not connected to Microsoft Teams" -ForegroundColor Yellow
+                $teamsConfig.Errors += "Not connected to Microsoft Teams"
+            }
+            
+        } else {
+            Write-Host "  ⚠ MicrosoftTeams PowerShell module not found" -ForegroundColor Yellow
+            Write-Host "  Install with: Install-Module -Name MicrosoftTeams" -ForegroundColor Gray
+            $teamsConfig.Errors += "MicrosoftTeams PowerShell module not installed"
+        }
+        
+        # Determine overall compliance
+        $teamsConfig.Compliant = ($teamsConfig.Settings.ExternalAccessEnabled -eq $false) -and
+                                  ($teamsConfig.Settings.CloudStorageCitrix -eq $false) -and
+                                  ($teamsConfig.Settings.CloudStorageDropbox -eq $false) -and
+                                  ($teamsConfig.Settings.CloudStorageBox -eq $false) -and
+                                  ($teamsConfig.Settings.CloudStorageGoogleDrive -eq $false) -and
+                                  ($teamsConfig.Settings.CloudStorageEgnyte -eq $false) -and
+                                  ($teamsConfig.Settings.AnonymousUsersCanJoin -eq $false) -and
+                                  ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq $false) -and
+                                  ($teamsConfig.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") -and
+                                  ($teamsConfig.Errors.Count -eq 0)
+        
+    } catch {
+        Write-Host "Error during Teams configuration check: $($_.Exception.Message)" -ForegroundColor Red
+        $teamsConfig.Errors += "General error: $($_.Exception.Message)"
+    }
+    
+    # Summary output
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  TEAMS CONFIGURATION SUMMARY" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  External Access:         " -NoNewline -ForegroundColor White
+    if ($teamsConfig.Settings.ExternalAccessEnabled -eq $false) {
+        Write-Host "Disabled (✓)" -ForegroundColor Green
+    } elseif ($teamsConfig.Settings.ExternalAccessEnabled -eq $true) {
+        Write-Host "Enabled (✗)" -ForegroundColor Yellow
+    } else {
+        Write-Host "Not Checked" -ForegroundColor Gray
+    }
+    
+    Write-Host "  Cloud Storage:           " -NoNewline -ForegroundColor White
+    $allStorageDisabled = ($teamsConfig.Settings.CloudStorageCitrix -eq $false) -and
+                          ($teamsConfig.Settings.CloudStorageDropbox -eq $false) -and
+                          ($teamsConfig.Settings.CloudStorageBox -eq $false) -and
+                          ($teamsConfig.Settings.CloudStorageGoogleDrive -eq $false) -and
+                          ($teamsConfig.Settings.CloudStorageEgnyte -eq $false)
+    if ($allStorageDisabled) {
+        Write-Host "All Disabled (✓)" -ForegroundColor Green
+    } else {
+        Write-Host "Some Enabled (✗)" -ForegroundColor Yellow
+    }
+    
+    Write-Host "  Anonymous Join:          " -NoNewline -ForegroundColor White
+    if ($teamsConfig.Settings.AnonymousUsersCanJoin -eq $false) {
+        Write-Host "Disabled (✓)" -ForegroundColor Green
+    } elseif ($teamsConfig.Settings.AnonymousUsersCanJoin -eq $true) {
+        Write-Host "Enabled (✗)" -ForegroundColor Yellow
+    } else {
+        Write-Host "Not Checked" -ForegroundColor Gray
+    }
+    
+    Write-Host "  Anonymous Can Start:     " -NoNewline -ForegroundColor White
+    if ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq $false) {
+        Write-Host "Disabled (✓)" -ForegroundColor Green
+    } elseif ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq $true) {
+        Write-Host "Enabled (✗)" -ForegroundColor Yellow
+    } else {
+        Write-Host "Not Checked" -ForegroundColor Gray
+    }
+    
+    Write-Host "  Who Can Present:         " -NoNewline -ForegroundColor White
+    if ($teamsConfig.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") {
+        Write-Host "Everyone (✓)" -ForegroundColor Green
+    } elseif ($teamsConfig.Settings.DefaultPresenterRole) {
+        Write-Host "$($teamsConfig.Settings.DefaultPresenterRole) (✗)" -ForegroundColor Yellow
+    } else {
+        Write-Host "Not Checked" -ForegroundColor Gray
+    }
+    
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    return @{
+        Status = $teamsConfig
+        CheckPerformed = $teamsConfig.CheckPerformed
     }
 }
 
@@ -1641,6 +2118,7 @@ function Export-HTMLReport {
         [object]$DefenderResults,
         [object]$SoftwareResults,
         [object]$SharePointResults,
+        [object]$TeamsResults,
         [bool]$OverallStatus
     )
     
@@ -2176,31 +2654,88 @@ function Export-HTMLReport {
         $html += @"
             <div class="section" id="sharepoint">
                 <h2><span class="section-icon">🌐</span>SharePoint Configuration</h2>
-                <ul class="info-list">
-                    <li><strong>External Sharing:</strong> $(if ($SharePointResults.Status.Settings.ExternalSharing -eq 'Disabled') { '<span class="status-found">✓ Only Organization</span>' } elseif ($SharePointResults.Status.Settings.ExternalSharing) { "<span class='status-error'>⚠ $($SharePointResults.Status.Settings.ExternalSharing)</span>" } else { '<span class="status-error">Not Checked</span>' })</li>
-                    <li><strong>Site Creation:</strong> $(if ($SharePointResults.Status.Settings.SiteCreation -eq 'Enabled') { '<span class="status-found">✓ Enabled</span>' } elseif ($SharePointResults.Status.Settings.SiteCreation) { "<span class='status-error'>✗ $($SharePointResults.Status.Settings.SiteCreation)</span>" } else { '<span class="status-error">Not Checked</span>' })</li>
-                    <li><strong>Legacy Auth Blocked:</strong> $(if ($SharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { '<span class="status-found">✓ Yes</span>' } elseif ($SharePointResults.Status.Settings.LegacyAuthBlocked -eq $false) { '<span class="status-error">✗ No</span>' } else { '<span class="status-error">Not Checked</span>' })</li>
-                    <li><strong>Overall Compliance:</strong> $(if ($SharePointResults.Status.Compliant) { '<span class="status-found">✓ Compliant</span>' } else { '<span class="status-error">⚠ Non-Compliant</span>' })</li>
 "@
         
-        if ($SharePointResults.Status.Errors.Count -gt 0) {
+        # Add Tenant URL if available
+        if ($SharePointResults.Status.Settings.TenantUrl) {
             $html += @"
-                    <li><strong>Issues Found:</strong> <span class="status-error">$($SharePointResults.Status.Errors.Count)</span></li>
-                </ul>
-                <h3>Configuration Issues:</h3>
                 <ul class="info-list">
+                    <li><strong>Tenant URL:</strong> $($SharePointResults.Status.Settings.TenantUrl)</li>
+                    <li><strong>Connection Method:</strong> $($SharePointResults.Status.Settings.ConnectionMethod)</li>
+                </ul>
+                <h3>Configuration Settings:</h3>
 "@
-            foreach ($error in $SharePointResults.Status.Errors) {
-                $html += @"
-                    <li><span class="status-error">⚠</span> $error</li>
-"@
-            }
-            $html += "</ul>"
-        } else {
-            $html += "</ul>"
         }
         
+        $html += @"
+                <ul class="info-list">
+                    <li><strong>SharePoint External Sharing:</strong> $(if ($SharePointResults.Status.Settings.SharePointExternalSharing -eq 'Anyone') { '<span class="status-found">✓ Anyone (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.SharePointExternalSharing -like '*Unknown*' -or $SharePointResults.Status.Settings.SharePointExternalSharing -like '*Not Connected*') { '<span class="status-error">⚠ Could not verify - Not connected</span>' } elseif ($SharePointResults.Status.Settings.SharePointExternalSharing) { "<span class='status-error'>⚠ $($SharePointResults.Status.Settings.SharePointExternalSharing) (Non-Compliant - should be 'Anyone')</span>" } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>OneDrive External Sharing:</strong> $(if ($SharePointResults.Status.Settings.OneDriveExternalSharing -eq 'Disabled') { '<span class="status-found">✓ Only people in your organization (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.OneDriveExternalSharing -like '*Unknown*' -or $SharePointResults.Status.Settings.OneDriveExternalSharing -like '*Not Connected*') { '<span class="status-error">⚠ Could not verify - Not connected</span>' } elseif ($SharePointResults.Status.Settings.OneDriveExternalSharing) { "<span class='status-error'>⚠ $($SharePointResults.Status.Settings.OneDriveExternalSharing) (Non-Compliant - should be 'Disabled')</span>" } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>Site Creation:</strong> $(if ($SharePointResults.Status.Settings.SiteCreation -eq 'Disabled') { '<span class="status-found">✓ Disabled - Users cannot create sites (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.SiteCreation -eq 'Enabled') { '<span class="status-error">✗ Enabled - Users can create sites (Non-Compliant)</span>' } elseif ($SharePointResults.Status.Settings.SiteCreation -like '*Unknown*') { '<span class="status-error">⚠ Could not verify</span>' } elseif ($SharePointResults.Status.Settings.SiteCreation) { "<span class='status-error'>⚠ $($SharePointResults.Status.Settings.SiteCreation)</span>" } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>Legacy Browser Auth Blocked:</strong> $(if ($SharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { '<span class="status-found">✓ Yes - Legacy browser auth protocols blocked (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.LegacyAuthBlocked -eq $false) { '<span class="status-error">✗ No - Legacy browser auth protocols allowed (Non-Compliant)</span>' } elseif ($SharePointResults.Status.Settings.LegacyAuthBlocked -like '*Property Not Available*') { '<span class="status-error">⚠ Property not available in tenant</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                </ul>
+"@
+        
         $html += "</div>"
+    } elseif ($SharePointResults) {
+        # SharePoint check was attempted but not performed (no connection)
+        $html += @"
+            <div class="section" id="sharepoint">
+                <h2><span class="section-icon">🌐</span>SharePoint Configuration</h2>
+                <ul class="info-list">
+                    <li><strong>Status:</strong> <span class="status-error">⚠ Check not performed</span></li>
+"@
+        if ($SharePointResults.Status.Errors.Count -gt 0) {
+            $html += "<li><strong>Reason:</strong></li></ul><ul class='info-list'>"
+            foreach ($error in $SharePointResults.Status.Errors) {
+                $html += "<li><span class='status-error'>⚠</span> $error</li>"
+            }
+        }
+        $html += @"
+                </ul>
+                <p style="color: #666; font-style: italic;">
+                    Tip: Use -SharePointUrl parameter to connect automatically:<br>
+                    <code>-SharePointUrl "https://TENANT-admin.sharepoint.com"</code>
+                </p>
+            </div>
+"@
+    }
+
+    # Teams Configuration Section
+    if ($TeamsResults -and $TeamsResults.CheckPerformed) {
+        $html += @"
+            <div class="section" id="teams">
+                <h2><span class="section-icon">💬</span>Teams Configuration</h2>
+                <h3>Configuration Settings:</h3>
+                <ul class="info-list">
+                    <li><strong>External Access (Unmanaged Teams):</strong> $(if ($TeamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.ExternalAccessEnabled -eq $true) { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>Cloud Storage Providers:</strong>
+                        <ul style="margin-top: 5px;">
+                            <li>Citrix Files: $(if ($TeamsResults.Status.Settings.CloudStorageCitrix -eq $false) { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
+                            <li>Dropbox: $(if ($TeamsResults.Status.Settings.CloudStorageDropbox -eq $false) { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
+                            <li>Box: $(if ($TeamsResults.Status.Settings.CloudStorageBox -eq $false) { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
+                            <li>Google Drive: $(if ($TeamsResults.Status.Settings.CloudStorageGoogleDrive -eq $false) { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
+                            <li>Egnyte: $(if ($TeamsResults.Status.Settings.CloudStorageEgnyte -eq $false) { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
+                        </ul>
+                    </li>
+                    <li><strong>Anonymous Users Can Join:</strong> $(if ($TeamsResults.Status.Settings.AnonymousUsersCanJoin -eq $false) { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.AnonymousUsersCanJoin -eq $true) { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>Anonymous Users Can Start Meeting:</strong> $(if ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq $false) { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq $true) { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>Who Can Present:</strong> $(if ($TeamsResults.Status.Settings.DefaultPresenterRole -eq 'EveryoneUserOverride') { '<span class="status-found">✓ Everyone (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.DefaultPresenterRole) { "<span class='status-error'>✗ $($TeamsResults.Status.Settings.DefaultPresenterRole) (Non-Compliant)</span>" } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                </ul>
+            </div>
+"@
+    } elseif ($TeamsResults) {
+        # Teams check was attempted but not performed
+        $html += @"
+            <div class="section" id="teams">
+                <h2><span class="section-icon">💬</span>Teams Configuration</h2>
+                <p class="status-error">⚠ Check not performed</p>
+                <p style="color: #666; font-style: italic;">
+                    Reason: Not connected to Microsoft Teams<br>
+                    Tip: Connect first with: <code>Connect-MicrosoftTeams</code>
+                </p>
+            </div>
+"@
     }
 
     # Entra ID Connect Section
@@ -2442,7 +2977,7 @@ if ($GUI) {
     Add-Type -AssemblyName System.Drawing
     
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "BWS Checking Tool - GUI"
+    $form.Text = "BWS Checking Tool v$script:Version - GUI"
     $form.Size = New-Object System.Drawing.Size(1000, 750)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
@@ -2487,10 +3022,24 @@ if ($GUI) {
     $textSubID.Text = $SubscriptionId
     $form.Controls.Add($textSubID)
     
+    # SharePoint URL Input
+    $labelSPUrl = New-Object System.Windows.Forms.Label
+    $labelSPUrl.Location = New-Object System.Drawing.Point(20, 78)
+    $labelSPUrl.Size = New-Object System.Drawing.Size(150, 20)
+    $labelSPUrl.Text = "SharePoint URL (optional):"
+    $form.Controls.Add($labelSPUrl)
+    
+    $textSPUrl = New-Object System.Windows.Forms.TextBox
+    $textSPUrl.Location = New-Object System.Drawing.Point(170, 76)
+    $textSPUrl.Size = New-Object System.Drawing.Size(540, 20)
+    $textSPUrl.Text = $SharePointUrl
+    $textSPUrl.PlaceholderText = "https://TENANT-admin.sharepoint.com"
+    $form.Controls.Add($textSPUrl)
+    
     # GroupBox for Check Selection
     $groupBoxChecks = New-Object System.Windows.Forms.GroupBox
-    $groupBoxChecks.Location = New-Object System.Drawing.Point(20, 85)
-    $groupBoxChecks.Size = New-Object System.Drawing.Size(300, 225)
+    $groupBoxChecks.Location = New-Object System.Drawing.Point(20, 110)
+    $groupBoxChecks.Size = New-Object System.Drawing.Size(300, 250)
     $groupBoxChecks.Text = "Select Checks to Run"
     $form.Controls.Add($groupBoxChecks)
     
@@ -2550,10 +3099,18 @@ if ($GUI) {
     $chkSharePoint.Checked = $true
     $groupBoxChecks.Controls.Add($chkSharePoint)
     
+    # Teams Configuration Check Checkbox
+    $chkTeams = New-Object System.Windows.Forms.CheckBox
+    $chkTeams.Location = New-Object System.Drawing.Point(15, 200)
+    $chkTeams.Size = New-Object System.Drawing.Size(280, 20)
+    $chkTeams.Text = "Teams Configuration Check"
+    $chkTeams.Checked = $true
+    $groupBoxChecks.Controls.Add($chkTeams)
+    
     # Options GroupBox
     $groupBoxOptions = New-Object System.Windows.Forms.GroupBox
-    $groupBoxOptions.Location = New-Object System.Drawing.Point(340, 85)
-    $groupBoxOptions.Size = New-Object System.Drawing.Size(300, 225)
+    $groupBoxOptions.Location = New-Object System.Drawing.Point(340, 110)
+    $groupBoxOptions.Size = New-Object System.Drawing.Size(300, 250)
     $groupBoxOptions.Text = "Options"
     $form.Controls.Add($groupBoxOptions)
     
@@ -2614,7 +3171,7 @@ if ($GUI) {
     
     # Run Button
     $btnRun = New-Object System.Windows.Forms.Button
-    $btnRun.Location = New-Object System.Drawing.Point(660, 85)
+    $btnRun.Location = New-Object System.Drawing.Point(660, 110)
     $btnRun.Size = New-Object System.Drawing.Size(150, 60)
     $btnRun.Text = "Run Check"
     $btnRun.BackColor = [System.Drawing.Color]::LightGreen
@@ -2623,14 +3180,14 @@ if ($GUI) {
     
     # Clear Button
     $btnClear = New-Object System.Windows.Forms.Button
-    $btnClear.Location = New-Object System.Drawing.Point(660, 205)
+    $btnClear.Location = New-Object System.Drawing.Point(660, 230)
     $btnClear.Size = New-Object System.Drawing.Size(150, 30)
     $btnClear.Text = "Clear Output"
     $form.Controls.Add($btnClear)
     
     # Status Label
     $labelStatus = New-Object System.Windows.Forms.Label
-    $labelStatus.Location = New-Object System.Drawing.Point(20, 320)
+    $labelStatus.Location = New-Object System.Drawing.Point(20, 345)
     $labelStatus.Size = New-Object System.Drawing.Size(800, 20)
     $labelStatus.Text = "Ready - Please select checks and click 'Run Check'"
     $labelStatus.ForeColor = [System.Drawing.Color]::Blue
@@ -2638,15 +3195,15 @@ if ($GUI) {
     
     # Progress Bar
     $progressBar = New-Object System.Windows.Forms.ProgressBar
-    $progressBar.Location = New-Object System.Drawing.Point(20, 345)
+    $progressBar.Location = New-Object System.Drawing.Point(20, 370)
     $progressBar.Size = New-Object System.Drawing.Size(950, 20)
     $progressBar.Style = "Continuous"
     $form.Controls.Add($progressBar)
     
     # Output TextBox
     $textOutput = New-Object System.Windows.Forms.TextBox
-    $textOutput.Location = New-Object System.Drawing.Point(20, 375)
-    $textOutput.Size = New-Object System.Drawing.Size(950, 315)
+    $textOutput.Location = New-Object System.Drawing.Point(20, 400)
+    $textOutput.Size = New-Object System.Drawing.Size(950, 290)
     $textOutput.Multiline = $true
     $textOutput.ScrollBars = "Both"
     $textOutput.Font = New-Object System.Drawing.Font("Consolas", 9)
@@ -2676,6 +3233,7 @@ if ($GUI) {
         $bcid = $textBCID.Text
         $customerName = $textCustomer.Text
         $subId = $textSubID.Text
+        $SharePointUrl = $textSPUrl.Text
         $runAzure = $chkAzure.Checked
         $runIntune = $chkIntune.Checked
         $runEntraID = $chkEntraID.Checked
@@ -2683,6 +3241,7 @@ if ($GUI) {
         $runDefender = $chkDefender.Checked
         $runSoftware = $chkSoftware.Checked
         $runSharePoint = $chkSharePoint.Checked
+        $runTeams = $chkTeams.Checked
         $compact = $chkCompact.Checked
         $showAll = $chkShowAll.Checked
         $export = $chkExport.Checked
@@ -2752,7 +3311,7 @@ if ($GUI) {
             $softwareResults = $null
             $sharePointResults = $null
             
-            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int]) + ($runSharePoint -as [int])
+            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int]) + ($runSharePoint -as [int]) + ($runTeams -as [int])
             $currentCheck = 0
             $progressIncrement = if ($totalChecks -gt 0) { 80 / $totalChecks } else { 0 }
             
@@ -2828,7 +3387,18 @@ if ($GUI) {
                 $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
                 $form.Refresh()
                 
-                $sharePointResults = Test-SharePointConfiguration -CompactView $compact
+                $sharePointResults = Test-SharePointConfiguration -CompactView $compact -SharePointUrl $SharePointUrl
+                $currentCheck++
+                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+            }
+            
+            # Run Teams Configuration Check
+            if ($runTeams) {
+                $labelStatus.Text = "Running Teams Configuration Check..."
+                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $form.Refresh()
+                
+                $teamsResults = Test-TeamsConfiguration -CompactView $compact
                 $currentCheck++
                 $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
             }
@@ -2893,14 +3463,31 @@ if ($GUI) {
             if ($runSharePoint -and $sharePointResults -and $sharePointResults.CheckPerformed) {
                 Write-Host ""
                 Write-Host "  SharePoint Configuration:" -ForegroundColor White
-                Write-Host "    External Sharing:  " -NoNewline -ForegroundColor White
-                Write-Host $(if ($sharePointResults.Status.Settings.ExternalSharing -eq "Disabled") { "Only Organization (✓)" } else { "$($sharePointResults.Status.Settings.ExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.ExternalSharing -eq "Disabled") { "Green" } else { "Yellow" })
+                Write-Host "    SP Ext. Sharing:   " -NoNewline -ForegroundColor White
+                Write-Host $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Anyone (✓)" } else { "$($sharePointResults.Status.Settings.SharePointExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Green" } else { "Yellow" })
+                Write-Host "    OD Ext. Sharing:   " -NoNewline -ForegroundColor White
+                Write-Host $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Only Organization (✓)" } else { "$($sharePointResults.Status.Settings.OneDriveExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Green" } else { "Yellow" })
                 Write-Host "    Site Creation:     " -NoNewline -ForegroundColor White  
-                Write-Host $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Enabled") { "Enabled (✓)" } else { "Disabled (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Enabled") { "Green" } else { "Yellow" })
+                Write-Host $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Disabled (✓)" } else { "$($sharePointResults.Status.Settings.SiteCreation) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Green" } else { "Yellow" })
                 Write-Host "    Legacy Auth Block: " -NoNewline -ForegroundColor White
                 Write-Host $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { "Yes (✓)" } else { "No (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked) { "Green" } else { "Yellow" })
-                Write-Host "    Compliance:        " -NoNewline -ForegroundColor White
-                Write-Host $(if ($sharePointResults.Status.Compliant) { "✓ Compliant" } else { "✗ Issues Found" }) -ForegroundColor $(if ($sharePointResults.Status.Compliant) { "Green" } else { "Yellow" })
+            }
+            
+            if ($runTeams -and $teamsResults -and $teamsResults.CheckPerformed) {
+                Write-Host ""
+                Write-Host "  Teams Configuration:" -ForegroundColor White
+                Write-Host "    External Access:   " -NoNewline -ForegroundColor White
+                Write-Host $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Green" } else { "Yellow" })
+                
+                $allStorageDisabled = ($teamsResults.Status.Settings.CloudStorageCitrix -eq $false) -and ($teamsResults.Status.Settings.CloudStorageDropbox -eq $false) -and ($teamsResults.Status.Settings.CloudStorageBox -eq $false) -and ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq $false) -and ($teamsResults.Status.Settings.CloudStorageEgnyte -eq $false)
+                Write-Host "    Cloud Storage:     " -NoNewline -ForegroundColor White
+                Write-Host $(if ($allStorageDisabled) { "All Disabled (✓)" } else { "Some Enabled (✗)" }) -ForegroundColor $(if ($allStorageDisabled) { "Green" } else { "Yellow" })
+                
+                Write-Host "    Anonymous Join:    " -NoNewline -ForegroundColor White
+                Write-Host $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq $false) { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq $false) { "Green" } else { "Yellow" })
+                
+                Write-Host "    Who Can Present:   " -NoNewline -ForegroundColor White
+                Write-Host $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Everyone (✓)" } else { "$($teamsResults.Status.Settings.DefaultPresenterRole) (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Green" } else { "Yellow" })
             }
             
             Write-Host "======================================================" -ForegroundColor Cyan
@@ -2932,7 +3519,7 @@ if ($GUI) {
                         -AzureResults $azureResults -IntuneResults $intuneResults `
                         -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
                         -DefenderResults $defenderResults -SoftwareResults $softwareResults `
-                        -SharePointResults $sharePointResults -OverallStatus $overallStatus
+                        -SharePointResults $sharePointResults -TeamsResults $teamsResults -OverallStatus $overallStatus
                     
                     Write-Host "HTML Report exported to: $htmlPath" -ForegroundColor Green
                 }
@@ -2945,7 +3532,7 @@ if ($GUI) {
                             -AzureResults $azureResults -IntuneResults $intuneResults `
                             -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
                             -DefenderResults $defenderResults -SoftwareResults $softwareResults `
-                            -SharePointResults $sharePointResults -OverallStatus $overallStatus
+                            -SharePointResults $sharePointResults -TeamsResults $teamsResults -OverallStatus $overallStatus
                     }
                     
                     $pdfPath = Export-PDFReport -HTMLPath $htmlPath
@@ -2984,6 +3571,13 @@ if ($GUI) {
 #============================================================================
 # Command Line Mode
 #============================================================================
+
+Write-Host ""
+Write-Host "======================================================" -ForegroundColor Cyan
+Write-Host "  BWS-Checking-Script v$script:Version" -ForegroundColor Cyan
+Write-Host "  Command Line Mode" -ForegroundColor Cyan
+Write-Host "======================================================" -ForegroundColor Cyan
+Write-Host ""
 
 # Set CompactView as default if not explicitly overridden
 if (-not $PSBoundParameters.ContainsKey('CompactView')) {
@@ -3046,7 +3640,13 @@ if (-not $SkipSoftware) {
 # Run SharePoint Configuration Check
 $sharePointResults = $null
 if (-not $SkipSharePoint) {
-    $sharePointResults = Test-SharePointConfiguration -CompactView $CompactView
+    $sharePointResults = Test-SharePointConfiguration -CompactView $CompactView -SharePointUrl $SharePointUrl
+}
+
+# Run Teams Configuration Check
+$teamsResults = $null
+if (-not $SkipTeams) {
+    $teamsResults = Test-TeamsConfiguration -CompactView $CompactView
 }
 
 # Overall Summary
@@ -3108,14 +3708,31 @@ if ($softwareResults -and $softwareResults.CheckPerformed) {
 if ($sharePointResults -and $sharePointResults.CheckPerformed) {
     Write-Host ""
     Write-Host "  SharePoint Configuration:" -ForegroundColor White
-    Write-Host "    External Sharing:  " -NoNewline -ForegroundColor White
-    Write-Host $(if ($sharePointResults.Status.Settings.ExternalSharing -eq "Disabled") { "Only Organization (✓)" } else { "$($sharePointResults.Status.Settings.ExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.ExternalSharing -eq "Disabled") { "Green" } else { "Yellow" })
+    Write-Host "    SP Ext. Sharing:   " -NoNewline -ForegroundColor White
+    Write-Host $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Anyone (✓)" } else { "$($sharePointResults.Status.Settings.SharePointExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Green" } else { "Yellow" })
+    Write-Host "    OD Ext. Sharing:   " -NoNewline -ForegroundColor White
+    Write-Host $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Only Organization (✓)" } else { "$($sharePointResults.Status.Settings.OneDriveExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Green" } else { "Yellow" })
     Write-Host "    Site Creation:     " -NoNewline -ForegroundColor White  
-    Write-Host $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Enabled") { "Enabled (✓)" } else { "Disabled (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Enabled") { "Green" } else { "Yellow" })
+    Write-Host $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Disabled (✓)" } else { "$($sharePointResults.Status.Settings.SiteCreation) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Green" } else { "Yellow" })
     Write-Host "    Legacy Auth Block: " -NoNewline -ForegroundColor White
     Write-Host $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { "Yes (✓)" } else { "No (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked) { "Green" } else { "Yellow" })
-    Write-Host "    Compliance:        " -NoNewline -ForegroundColor White
-    Write-Host $(if ($sharePointResults.Status.Compliant) { "✓ Compliant" } else { "✗ Issues Found" }) -ForegroundColor $(if ($sharePointResults.Status.Compliant) { "Green" } else { "Yellow" })
+}
+
+if ($teamsResults -and $teamsResults.CheckPerformed) {
+    Write-Host ""
+    Write-Host "  Teams Configuration:" -ForegroundColor White
+    Write-Host "    External Access:   " -NoNewline -ForegroundColor White
+    Write-Host $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Green" } else { "Yellow" })
+    
+    $allStorageDisabled = ($teamsResults.Status.Settings.CloudStorageCitrix -eq $false) -and ($teamsResults.Status.Settings.CloudStorageDropbox -eq $false) -and ($teamsResults.Status.Settings.CloudStorageBox -eq $false) -and ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq $false) -and ($teamsResults.Status.Settings.CloudStorageEgnyte -eq $false)
+    Write-Host "    Cloud Storage:     " -NoNewline -ForegroundColor White
+    Write-Host $(if ($allStorageDisabled) { "All Disabled (✓)" } else { "Some Enabled (✗)" }) -ForegroundColor $(if ($allStorageDisabled) { "Green" } else { "Yellow" })
+    
+    Write-Host "    Anonymous Join:    " -NoNewline -ForegroundColor White
+    Write-Host $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq $false) { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq $false) { "Green" } else { "Yellow" })
+    
+    Write-Host "    Who Can Present:   " -NoNewline -ForegroundColor White
+    Write-Host $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Everyone (✓)" } else { "$($teamsResults.Status.Settings.DefaultPresenterRole) (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Green" } else { "Yellow" })
 }
 
 Write-Host ""
@@ -3153,7 +3770,7 @@ if ($ExportReport) {
             -AzureResults $azureResults -IntuneResults $intuneResults `
             -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
             -DefenderResults $defenderResults -SoftwareResults $softwareResults `
-            -SharePointResults $sharePointResults -OverallStatus $overallStatus
+            -SharePointResults $sharePointResults -TeamsResults $teamsResults -OverallStatus $overallStatus
         
         Write-Host "HTML Report exported to: $htmlPath" -ForegroundColor Green
     }
@@ -3166,7 +3783,7 @@ if ($ExportReport) {
                 -AzureResults $azureResults -IntuneResults $intuneResults `
                 -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
                 -DefenderResults $defenderResults -SoftwareResults $softwareResults `
-                -SharePointResults $sharePointResults -OverallStatus $overallStatus
+                -SharePointResults $sharePointResults -TeamsResults $teamsResults -OverallStatus $overallStatus
         }
         
         $pdfPath = Export-PDFReport -HTMLPath $htmlPath
