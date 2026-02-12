@@ -76,6 +76,9 @@ param(
     [switch]$SkipTeams,
     
     [Parameter(Mandatory=$false)]
+    [switch]$SkipUserLicenseCheck,
+    
+    [Parameter(Mandatory=$false)]
     [ValidateSet("HTML", "PDF", "Both")]
     [string]$ExportFormat = "HTML",
     
@@ -763,7 +766,7 @@ function Test-EntraIDConnect {
                         Write-Host "Checking Device Hybrid Sync..." -NoNewline
                         
                         # Method 1: Check for hybrid joined devices (trustType = ServerAd)
-                        $devicesUri = "https://graph.microsoft.com/v1.0/devices?\$top=999&\$filter=trustType eq 'ServerAd'"
+                        $devicesUri = "https://graph.microsoft.com/v1.0/devices?`$top=999&`$filter=trustType eq 'ServerAd'"
                         $hybridDevices = Invoke-MgGraphRequest -Uri $devicesUri -Method GET -ErrorAction Stop
                         
                         $hybridDeviceCount = 0
@@ -772,7 +775,7 @@ function Test-EntraIDConnect {
                         }
                         
                         # Method 2: Also check for devices with onPremisesSyncEnabled
-                        $syncedDevicesUri = "https://graph.microsoft.com/v1.0/devices?\$top=10&\$select=id,displayName,onPremisesSyncEnabled,trustType"
+                        $syncedDevicesUri = "https://graph.microsoft.com/v1.0/devices?`$top=10&`$select=id,displayName,onPremisesSyncEnabled,trustType"
                         $syncedDevices = Invoke-MgGraphRequest -Uri $syncedDevicesUri -Method GET -ErrorAction SilentlyContinue
                         
                         $syncedDeviceCount = 0
@@ -2410,6 +2413,446 @@ function Test-TeamsConfiguration {
     }
 }
 
+function Test-UsersAndLicenses {
+    param(
+        [bool]$CompactView = $false
+    )
+    
+    # License SKU to Friendly Name Mapping
+    # This maps Microsoft's SKU PartNumbers to readable license names
+    $licenseFriendlyNames = @{
+        # Microsoft 365 Business
+        'O365_BUSINESS_ESSENTIALS' = 'Microsoft 365 Business Basic'
+        'O365_BUSINESS_PREMIUM' = 'Microsoft 365 Business Standard'
+        'SPB' = 'Microsoft 365 Business Premium'
+        'SMB_BUSINESS' = 'Microsoft 365 Apps for business'
+        'SPE_E3' = 'Microsoft 365 E3'
+        'SPE_E5' = 'Microsoft 365 E5'
+        'INFORMATION_PROTECTION_COMPLIANCE' = 'Microsoft 365 E5 Compliance'
+        'IDENTITY_THREAT_PROTECTION' = 'Microsoft 365 E5 Security'
+        
+        # Office 365 Enterprise
+        'ENTERPRISEPACK' = 'Office 365 E3'
+        'ENTERPRISEPREMIUM' = 'Office 365 E5'
+        'ENTERPRISEPACK_USGOV_DOD' = 'Office 365 E3 (US Government DOD)'
+        'ENTERPRISEPACK_USGOV_GCCHIGH' = 'Office 365 E3 (US Government GCC High)'
+        'STANDARDPACK' = 'Office 365 E1'
+        'STANDARDWOFFPACK' = 'Office 365 E2'
+        'DESKLESSPACK' = 'Office 365 F3'
+        
+        # EMS + Security
+        'EMS' = 'Enterprise Mobility + Security E3'
+        'EMSPREMIUM' = 'Enterprise Mobility + Security E5'
+        'AAD_PREMIUM' = 'Azure Active Directory Premium P1'
+        'AAD_PREMIUM_P2' = 'Azure Active Directory Premium P2'
+        'ADALLOM_STANDALONE' = 'Microsoft Defender for Cloud Apps'
+        'ATA' = 'Microsoft Defender for Identity'
+        
+        # Windows
+        'WIN10_PRO_ENT_SUB' = 'Windows 10/11 Enterprise E3'
+        'WIN10_VDA_E5' = 'Windows 10/11 Enterprise E5'
+        
+        # Exchange
+        'EXCHANGESTANDARD' = 'Exchange Online (Plan 1)'
+        'EXCHANGEENTERPRISE' = 'Exchange Online (Plan 2)'
+        'EXCHANGEARCHIVE_ADDON' = 'Exchange Online Archiving'
+        'EXCHANGEDESKLESS' = 'Exchange Online Kiosk'
+        
+        # SharePoint
+        'SHAREPOINTSTANDARD' = 'SharePoint Online (Plan 1)'
+        'SHAREPOINTENTERPRISE' = 'SharePoint Online (Plan 2)'
+        
+        # Project & Visio
+        'PROJECTPREMIUM' = 'Project Plan 5'
+        'PROJECTPROFESSIONAL' = 'Project Plan 3'
+        'PROJECTESSENTIALS' = 'Project Plan 1'
+        'VISIOCLIENT' = 'Visio Plan 2'
+        'VISIOONLINE_PLAN1' = 'Visio Plan 1'
+        
+        # Power Platform
+        'POWER_BI_PRO' = 'Power BI Pro'
+        'POWER_BI_STANDARD' = 'Power BI (free)'
+        'POWERAPPS_PER_USER' = 'Power Apps per user'
+        'FLOW_FREE' = 'Power Automate Free'
+        'FLOW_P2' = 'Power Automate per user'
+        
+        # Dynamics
+        'DYN365_ENTERPRISE_SALES' = 'Dynamics 365 Sales'
+        'DYN365_ENTERPRISE_CUSTOMER_SERVICE' = 'Dynamics 365 Customer Service'
+        
+        # Teams
+        'TEAMS_EXPLORATORY' = 'Microsoft Teams Exploratory'
+        'TEAMS1' = 'Microsoft Teams'
+        'MCOMEETADV' = 'Microsoft 365 Audio Conferencing'
+        'MCOEV' = 'Microsoft 365 Phone System'
+        
+        # Defender
+        'WINDEFATP' = 'Microsoft Defender for Endpoint'
+        'MDATP_XPLAT' = 'Microsoft Defender for Endpoint'
+        
+        # Other
+        'STREAM' = 'Microsoft Stream'
+        'INTUNE_A' = 'Microsoft Intune'
+        'RIGHTSMANAGEMENT' = 'Azure Information Protection Premium P1'
+        'ATP_ENTERPRISE' = 'Microsoft Defender for Office 365 (Plan 1)'
+        'THREAT_INTELLIGENCE' = 'Microsoft Defender for Office 365 (Plan 2)'
+        'FORMS_PLAN_E5' = 'Microsoft Forms (Plan E5)'
+        'MYANALYTICS_P2' = 'Microsoft Viva Insights'
+    }
+    
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  USERS, LICENSES & PRIVILEGED ROLES CHECK" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $userLicenseStatus = @{
+        TotalUsers = 0
+        LicensedUsers = 0
+        UnlicensedUsers = 0
+        PrivilegedUsers = @()
+        InvalidPrivilegedUsers = @()  # Users with privileged roles but no ADM in DisplayName
+        UserDetails = @()
+        Errors = @()
+    }
+    
+    try {
+        Write-Host "Checking users, licenses and privileged roles..." -ForegroundColor Yellow
+        Write-Host ""
+        
+        # Check if Microsoft Graph is connected
+        $graphContext = Get-MgContext -ErrorAction SilentlyContinue
+        
+        if (-not $graphContext) {
+            Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
+            try {
+                Connect-MgGraph -Scopes "User.Read.All", "Directory.Read.All", "RoleManagement.Read.Directory" -ErrorAction Stop
+                Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
+            } catch {
+                Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
+                $userLicenseStatus.Errors += "Graph connection failed"
+                return @{
+                    Status = $userLicenseStatus
+                    CheckPerformed = $false
+                }
+            }
+        }
+        
+        Write-Host ""
+        
+        # ============================================================
+        # Get all users with license information
+        # ============================================================
+        try {
+            Write-Host "  [Users] " -NoNewline -ForegroundColor Gray
+            Write-Host "Fetching all users and licenses..." -NoNewline
+            
+            # Get users with licenses - use proper Graph API syntax
+            $usersUri = "https://graph.microsoft.com/v1.0/users?`$select=id,displayName,userPrincipalName,assignedLicenses,accountEnabled&`$top=999"
+            $usersResponse = Invoke-MgGraphRequest -Uri $usersUri -Method GET -ErrorAction Stop
+            
+            $allUsers = @()
+            $allUsers += $usersResponse.value
+            
+            # Handle pagination
+            while ($usersResponse.'@odata.nextLink') {
+                $usersResponse = Invoke-MgGraphRequest -Uri $usersResponse.'@odata.nextLink' -Method GET -ErrorAction Stop
+                $allUsers += $usersResponse.value
+            }
+            
+            $userLicenseStatus.TotalUsers = $allUsers.Count
+            Write-Host " ✓ $($allUsers.Count) users found" -ForegroundColor Green
+            
+        } catch {
+            Write-Host " ✗ ERROR: $($_.Exception.Message)" -ForegroundColor Red
+            $userLicenseStatus.Errors += "Error fetching users: $($_.Exception.Message)"
+            return @{
+                Status = $userLicenseStatus
+                CheckPerformed = $false
+            }
+        }
+        
+        # ============================================================
+        # Get all directory roles (privileged roles)
+        # ============================================================
+        try {
+            Write-Host "  [Roles] " -NoNewline -ForegroundColor Gray
+            Write-Host "Fetching privileged role assignments..." -NoNewline
+            
+            # Get all directory roles
+            $rolesUri = "https://graph.microsoft.com/v1.0/directoryRoles"
+            $roles = Invoke-MgGraphRequest -Uri $rolesUri -Method GET -ErrorAction Stop
+            
+            $privilegedRoleMembers = @{}
+            
+            foreach ($role in $roles.value) {
+                # Get members of this role
+                $membersUri = "https://graph.microsoft.com/v1.0/directoryRoles/$($role.id)/members"
+                $members = Invoke-MgGraphRequest -Uri $membersUri -Method GET -ErrorAction SilentlyContinue
+                
+                if ($members.value) {
+                    foreach ($member in $members.value) {
+                        if ($member.'@odata.type' -eq '#microsoft.graph.user') {
+                            if (-not $privilegedRoleMembers.ContainsKey($member.id)) {
+                                $privilegedRoleMembers[$member.id] = @()
+                            }
+                            $privilegedRoleMembers[$member.id] += $role.displayName
+                        }
+                    }
+                }
+            }
+            
+            Write-Host " ✓ $($privilegedRoleMembers.Count) users with privileged roles" -ForegroundColor Green
+            
+        } catch {
+            Write-Host " ⚠ WARNING: $($_.Exception.Message)" -ForegroundColor Yellow
+            $userLicenseStatus.Errors += "Error fetching roles: $($_.Exception.Message)"
+        }
+        
+        # ============================================================
+        # Get SKU details for license names
+        # ============================================================
+        $licenseSkus = @{}
+        try {
+            $skusUri = "https://graph.microsoft.com/v1.0/subscribedSkus"
+            $skus = Invoke-MgGraphRequest -Uri $skusUri -Method GET -ErrorAction SilentlyContinue
+            
+            foreach ($sku in $skus.value) {
+                $licenseSkus[$sku.skuId] = $sku.skuPartNumber
+            }
+        } catch {
+            # If we can't get SKUs, we'll just show SKU IDs
+        }
+        
+        # ============================================================
+        # Process each user
+        # ============================================================
+        Write-Host "  [Users] " -NoNewline -ForegroundColor Gray
+        Write-Host "Processing user details..." -NoNewline
+        
+        foreach ($user in $allUsers) {
+            $userDetail = @{
+                DisplayName = $user.displayName
+                UserPrincipalName = $user.userPrincipalName
+                AccountEnabled = $user.accountEnabled
+                Licenses = @()
+                PrivilegedRoles = @()
+                HasPrivilegedRole = $false
+                IsADMAccount = $false
+                IsInvalid = $false
+            }
+            
+            # Check if user has licenses
+            if ($user.assignedLicenses -and $user.assignedLicenses.Count -gt 0) {
+                $userLicenseStatus.LicensedUsers++
+                foreach ($license in $user.assignedLicenses) {
+                    # Get SKU name from API
+                    $skuPartNumber = if ($licenseSkus.ContainsKey($license.skuId)) {
+                        $licenseSkus[$license.skuId]
+                    } else {
+                        $license.skuId
+                    }
+                    
+                    # Map to friendly name
+                    $licenseName = if ($licenseFriendlyNames.ContainsKey($skuPartNumber)) {
+                        $licenseFriendlyNames[$skuPartNumber]
+                    } else {
+                        # If no mapping exists, use SKU name but make it more readable
+                        $skuPartNumber -replace '_', ' '
+                    }
+                    
+                    $userDetail.Licenses += $licenseName
+                }
+            } else {
+                $userLicenseStatus.UnlicensedUsers++
+            }
+            
+            # Check if user has privileged roles
+            if ($privilegedRoleMembers.ContainsKey($user.id)) {
+                $userDetail.HasPrivilegedRole = $true
+                $userDetail.PrivilegedRoles = $privilegedRoleMembers[$user.id]
+                
+                # Check if DisplayName contains "ADM"
+                if ($user.displayName -match "ADM") {
+                    $userDetail.IsADMAccount = $true
+                    $userLicenseStatus.PrivilegedUsers += $userDetail
+                } else {
+                    # This is a violation: privileged role without ADM in name
+                    $userDetail.IsInvalid = $true
+                    $userDetail.IsADMAccount = $false
+                    $userLicenseStatus.InvalidPrivilegedUsers += $userDetail
+                    $userLicenseStatus.Errors += "User '$($user.displayName)' has privileged role(s) but no 'ADM' in DisplayName: $($userDetail.PrivilegedRoles -join ', ')"
+                }
+            }
+            
+            $userLicenseStatus.UserDetails += $userDetail
+        }
+        
+        Write-Host " ✓ DONE" -ForegroundColor Green
+        
+    } catch {
+        Write-Host "Error during user/license check: $($_.Exception.Message)" -ForegroundColor Red
+        $userLicenseStatus.Errors += "General error: $($_.Exception.Message)"
+    }
+    
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  USERS & LICENSES SUMMARY" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  Total Users:              $($userLicenseStatus.TotalUsers)" -ForegroundColor White
+    Write-Host "  Licensed Users:           $($userLicenseStatus.LicensedUsers)" -ForegroundColor $(if ($userLicenseStatus.LicensedUsers -gt 0) { "Green" } else { "Gray" })
+    Write-Host "  Unlicensed Users:         $($userLicenseStatus.UnlicensedUsers)" -ForegroundColor $(if ($userLicenseStatus.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "  Users with Priv. Roles:   $($userLicenseStatus.PrivilegedUsers.Count + $userLicenseStatus.InvalidPrivilegedUsers.Count)" -ForegroundColor White
+    Write-Host "  Valid ADM Accounts:       $($userLicenseStatus.PrivilegedUsers.Count)" -ForegroundColor Green
+    Write-Host "  INVALID Privileged Users: $($userLicenseStatus.InvalidPrivilegedUsers.Count)" -ForegroundColor $(if ($userLicenseStatus.InvalidPrivilegedUsers.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    if (-not $CompactView -and $userLicenseStatus.InvalidPrivilegedUsers.Count -gt 0) {
+        Write-Host "⚠ COMPLIANCE VIOLATION - Users with privileged roles:" -ForegroundColor Red
+        Write-Host ""
+        foreach ($user in $userLicenseStatus.InvalidPrivilegedUsers) {
+            Write-Host "  ✗ $($user.DisplayName) ($($user.UserPrincipalName))" -ForegroundColor Red
+            Write-Host "    Roles:    $($user.PrivilegedRoles -join ', ')" -ForegroundColor Yellow
+            if ($user.Licenses.Count -gt 0) {
+                Write-Host "    Licenses: $($user.Licenses -join ', ')" -ForegroundColor Gray
+            } else {
+                Write-Host "    Licenses: No licenses assigned" -ForegroundColor DarkGray
+            }
+        }
+        Write-Host ""
+    }
+    
+    if (-not $CompactView -and $userLicenseStatus.PrivilegedUsers.Count -gt 0) {
+        Write-Host "✓ Valid ADM Accounts with Privileged Roles:" -ForegroundColor Green
+        Write-Host ""
+        foreach ($user in $userLicenseStatus.PrivilegedUsers) {
+            Write-Host "  ✓ $($user.DisplayName) ($($user.UserPrincipalName))" -ForegroundColor Green
+            Write-Host "    Roles:    $($user.PrivilegedRoles -join ', ')" -ForegroundColor Gray
+            if ($user.Licenses.Count -gt 0) {
+                Write-Host "    Licenses: $($user.Licenses -join ', ')" -ForegroundColor Gray
+            } else {
+                Write-Host "    Licenses: No licenses assigned" -ForegroundColor DarkGray
+            }
+        }
+        Write-Host ""
+    }
+    
+    # Show top 10 users with most licenses (optional detailed view)
+    if (-not $CompactView -and $userLicenseStatus.UserDetails.Count -gt 0) {
+        Write-Host "📊 License Distribution Summary:" -ForegroundColor Cyan
+        Write-Host ""
+        
+        # Count licenses
+        $licenseCount = @{}
+        foreach ($user in $userLicenseStatus.UserDetails) {
+            foreach ($license in $user.Licenses) {
+                if (-not $licenseCount.ContainsKey($license)) {
+                    $licenseCount[$license] = 0
+                }
+                $licenseCount[$license]++
+            }
+        }
+        
+        # Display license counts
+        $licenseCount.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object {
+            Write-Host "  $($_.Key): " -NoNewline -ForegroundColor White
+            Write-Host "$($_.Value) users" -ForegroundColor Green
+        }
+        Write-Host ""
+    }
+    
+    # Output all users with licenses (for parsing by other programs)
+    if (-not $CompactView -and $userLicenseStatus.UserDetails.Count -gt 0) {
+        Write-Host "======================================================" -ForegroundColor Cyan
+        Write-Host "  ALL USERS & LICENSES" -ForegroundColor Cyan
+        Write-Host "======================================================" -ForegroundColor Cyan
+        Write-Host ""
+        
+        # Table header
+        $displayNameWidth = 30
+        $upnWidth = 40
+        $licensesWidth = 60
+        $statusWidth = 10
+        
+        Write-Host $("{0,-$statusWidth} {1,-$displayNameWidth} {2,-$upnWidth} {3,-$licensesWidth}" -f "Status", "Display Name", "User Principal Name", "Licenses") -ForegroundColor White
+        Write-Host ("-" * ($statusWidth + $displayNameWidth + $upnWidth + $licensesWidth + 3)) -ForegroundColor Gray
+        
+        foreach ($user in $userLicenseStatus.UserDetails | Sort-Object DisplayName) {
+            # Determine status
+            $status = if ($user.Licenses.Count -gt 0) { "Licensed" } else { "No License" }
+            $statusColor = if ($user.Licenses.Count -gt 0) { "Green" } else { "Yellow" }
+            
+            # Format licenses (join with semicolon for easier parsing)
+            $licensesText = if ($user.Licenses.Count -gt 0) {
+                $user.Licenses -join "; "
+            } else {
+                "No licenses assigned"
+            }
+            
+            # Truncate long text to fit
+            $displayName = if ($user.DisplayName.Length -gt $displayNameWidth) {
+                $user.DisplayName.Substring(0, $displayNameWidth - 3) + "..."
+            } else {
+                $user.DisplayName
+            }
+            
+            $upn = if ($user.UserPrincipalName.Length -gt $upnWidth) {
+                $user.UserPrincipalName.Substring(0, $upnWidth - 3) + "..."
+            } else {
+                $user.UserPrincipalName
+            }
+            
+            # If licenses are too long, wrap to next line
+            if ($licensesText.Length -le $licensesWidth) {
+                Write-Host $("{0,-$statusWidth} {1,-$displayNameWidth} {2,-$upnWidth} {3}" -f $status, $displayName, $upn, $licensesText) -ForegroundColor $statusColor
+            } else {
+                # Print first line
+                Write-Host $("{0,-$statusWidth} {1,-$displayNameWidth} {2,-$upnWidth} {3}" -f $status, $displayName, $upn, $licensesText.Substring(0, $licensesWidth)) -ForegroundColor $statusColor
+                
+                # Print continuation lines
+                $remainingText = $licensesText.Substring($licensesWidth)
+                while ($remainingText.Length -gt 0) {
+                    $chunk = if ($remainingText.Length -le $licensesWidth) {
+                        $remainingText
+                    } else {
+                        $remainingText.Substring(0, $licensesWidth)
+                    }
+                    Write-Host $("{0,-$statusWidth} {1,-$displayNameWidth} {2,-$upnWidth} {3}" -f "", "", "", $chunk) -ForegroundColor Gray
+                    $remainingText = if ($remainingText.Length -le $licensesWidth) { "" } else { $remainingText.Substring($licensesWidth) }
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "Total users displayed: $($userLicenseStatus.UserDetails.Count)" -ForegroundColor Cyan
+        Write-Host ""
+        
+        # Export to CSV format for easy parsing (optional - written to console)
+        Write-Host "======================================================" -ForegroundColor Cyan
+        Write-Host "  CSV FORMAT (for parsing)" -ForegroundColor Cyan
+        Write-Host "======================================================" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "DisplayName;UserPrincipalName;AccountEnabled;Licenses;HasPrivilegedRole;PrivilegedRoles" -ForegroundColor White
+        
+        foreach ($user in $userLicenseStatus.UserDetails | Sort-Object DisplayName) {
+            $licensesCSV = $user.Licenses -join "|"
+            $rolesCSV = $user.PrivilegedRoles -join "|"
+            $enabledCSV = if ($user.AccountEnabled) { "TRUE" } else { "FALSE" }
+            $hasRoleCSV = if ($user.HasPrivilegedRole) { "TRUE" } else { "FALSE" }
+            
+            Write-Host "$($user.DisplayName);$($user.UserPrincipalName);$enabledCSV;$licensesCSV;$hasRoleCSV;$rolesCSV"
+        }
+        
+        Write-Host ""
+    }
+    
+    return @{
+        Status = $userLicenseStatus
+        CheckPerformed = $true
+    }
+}
+
 function Export-HTMLReport {
     param(
         [string]$BCID,
@@ -2423,6 +2866,7 @@ function Export-HTMLReport {
         [object]$SoftwareResults,
         [object]$SharePointResults,
         [object]$TeamsResults,
+        [object]$UserLicenseResults,
         [bool]$OverallStatus
     )
     
@@ -2737,6 +3181,7 @@ function Export-HTMLReport {
                 <li><a href="#software">→ BWS Software Packages</a></li>
                 <li><a href="#sharepoint">→ SharePoint Configuration</a></li>
                 <li><a href="#teams">→ Teams Configuration</a></li>
+                <li><a href="#users">→ Users, Licenses & Privileged Roles</a></li>
             </ul>
         </div>
         
@@ -2886,6 +3331,27 @@ function Export-HTMLReport {
                         <h3>Teams Config</h3>
                         <div class="value">$(if ($TeamsResults.Status.Compliant) { '✓' } else { '⚠' })</div>
                         <p>$teamsDetails</p>
+                    </div>
+"@
+    }
+
+    # 9. User & License Status
+    if ($UserLicenseResults -and $UserLicenseResults.CheckPerformed) {
+        $userClass = if ($UserLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0) { "success" } else { "error" }
+        $userDetails = ""
+        if ($UserLicenseResults.Status.InvalidPrivilegedUsers.Count -gt 0) {
+            $userDetails = "$($UserLicenseResults.Status.InvalidPrivilegedUsers.Count) Violations"
+        } elseif ($UserLicenseResults.Status.UnlicensedUsers -gt 0) {
+            $userDetails = "$($UserLicenseResults.Status.UnlicensedUsers) Unlicensed"
+        } else {
+            $userDetails = "Compliant"
+        }
+        
+        $html += @"
+                    <div class="summary-card $userClass">
+                        <h3>User & Licenses</h3>
+                        <div class="value">$(if ($UserLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0) { '✓' } else { '✗' })</div>
+                        <p>$userDetails</p>
                     </div>
 "@
     }
@@ -3316,6 +3782,182 @@ function Export-HTMLReport {
         $html += "</div>"
     }
 
+    # Users, Licenses & Privileged Roles Section
+    if ($UserLicenseResults -and $UserLicenseResults.CheckPerformed) {
+        $html += @"
+            <div class="section" id="users">
+                <h2><span class="section-icon">👥</span>Users, Licenses & Privileged Roles</h2>
+                <ul class="info-list">
+                    <li><strong>Total Users:</strong> $($UserLicenseResults.Status.TotalUsers)</li>
+                    <li><strong>Licensed Users:</strong> <span class="status-found">$($UserLicenseResults.Status.LicensedUsers)</span></li>
+                    <li><strong>Unlicensed Users:</strong> $(if ($UserLicenseResults.Status.UnlicensedUsers -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($UserLicenseResults.Status.UnlicensedUsers)</span>" })</li>
+                    <li><strong>Users with Privileged Roles:</strong> $($UserLicenseResults.Status.PrivilegedUsers.Count + $UserLicenseResults.Status.InvalidPrivilegedUsers.Count)</li>
+                    <li><strong>Valid ADM Accounts:</strong> <span class="status-found">$($UserLicenseResults.Status.PrivilegedUsers.Count)</span></li>
+                    <li><strong>INVALID Privileged Users:</strong> $(if ($UserLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($UserLicenseResults.Status.InvalidPrivilegedUsers.Count)</span>" })</li>
+                </ul>
+"@
+        
+        # Add License Distribution Summary
+        $licenseCount = @{}
+        foreach ($user in $UserLicenseResults.Status.UserDetails) {
+            foreach ($license in $user.Licenses) {
+                if (-not $licenseCount.ContainsKey($license)) {
+                    $licenseCount[$license] = 0
+                }
+                $licenseCount[$license]++
+            }
+        }
+        
+        if ($licenseCount.Count -gt 0) {
+            $html += @"
+                <h3 style="margin-top: 20px;">📊 License Distribution:</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>License Type</th>
+                            <th>Number of Users</th>
+                            <th>Percentage</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"@
+            $sortedLicenses = $licenseCount.GetEnumerator() | Sort-Object Value -Descending
+            foreach ($lic in $sortedLicenses) {
+                $percentage = [math]::Round(($lic.Value / $UserLicenseResults.Status.TotalUsers) * 100, 1)
+                $html += @"
+                        <tr>
+                            <td><strong>$($lic.Key)</strong></td>
+                            <td>$($lic.Value)</td>
+                            <td>$percentage%</td>
+                        </tr>
+"@
+            }
+            $html += @"
+                    </tbody>
+                </table>
+"@
+        }
+        
+        # Show INVALID privileged users (COMPLIANCE VIOLATION)
+        if ($UserLicenseResults.Status.InvalidPrivilegedUsers.Count -gt 0) {
+            $html += @"
+                <h3 style="color: #dc2626; margin-top: 20px;">⚠ COMPLIANCE VIOLATION - Privileged Roles:</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Display Name</th>
+                            <th>User Principal Name</th>
+                            <th>Privileged Roles</th>
+                            <th>Assigned Licenses</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"@
+            foreach ($user in $UserLicenseResults.Status.InvalidPrivilegedUsers) {
+                $rolesHtml = ($user.PrivilegedRoles | ForEach-Object { "<span style='display:block; padding:2px 0;'>• $_</span>" }) -join ''
+                $licensesHtml = if ($user.Licenses.Count -gt 0) { 
+                    ($user.Licenses | ForEach-Object { "<span style='display:block; padding:2px 0; background:#f0f9ff; margin:1px 0; padding-left:5px; border-left:2px solid #0ea5e9;'>$_</span>" }) -join ''
+                } else { 
+                    '<em style="color:#999;">No licenses</em>' 
+                }
+                $html += @"
+                        <tr>
+                            <td><span class="status-missing">✗ INVALID</span></td>
+                            <td><strong>$($user.DisplayName)</strong></td>
+                            <td>$($user.UserPrincipalName)</td>
+                            <td style="color: #dc2626;">$rolesHtml</td>
+                            <td style="font-size:0.9em;">$licensesHtml</td>
+                        </tr>
+"@
+            }
+            $html += @"
+                    </tbody>
+                </table>
+"@
+        }
+        
+        # Show valid ADM accounts
+        if ($UserLicenseResults.Status.PrivilegedUsers.Count -gt 0) {
+            $html += @"
+                <h3 style="margin-top: 20px;">✓ Valid ADM Accounts with Privileged Roles:</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Display Name</th>
+                            <th>User Principal Name</th>
+                            <th>Privileged Roles</th>
+                            <th>Assigned Licenses</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"@
+            foreach ($user in $UserLicenseResults.Status.PrivilegedUsers) {
+                $rolesHtml = ($user.PrivilegedRoles | ForEach-Object { "<span style='display:block; padding:2px 0;'>• $_</span>" }) -join ''
+                $licensesHtml = if ($user.Licenses.Count -gt 0) { 
+                    ($user.Licenses | ForEach-Object { "<span style='display:block; padding:2px 0; background:#f0fdf4; margin:1px 0; padding-left:5px; border-left:2px solid #22c55e;'>$_</span>" }) -join ''
+                } else { 
+                    '<em style="color:#999;">No licenses</em>' 
+                }
+                $html += @"
+                        <tr>
+                            <td><span class="status-found">✓ VALID</span></td>
+                            <td><strong>$($user.DisplayName)</strong></td>
+                            <td>$($user.UserPrincipalName)</td>
+                            <td>$rolesHtml</td>
+                            <td style="font-size:0.9em;">$licensesHtml</td>
+                        </tr>
+"@
+            }
+            $html += @"
+                    </tbody>
+                </table>
+"@
+        }
+        
+        # Show all users with their licenses (expandable)
+        $html += @"
+                <h3 style="margin-top: 20px;">📋 All Users & Licenses:</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Display Name</th>
+                            <th>User Principal Name</th>
+                            <th>Assigned Licenses</th>
+                            <th>Account Enabled</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"@
+        foreach ($user in $UserLicenseResults.Status.UserDetails | Sort-Object DisplayName) {
+            $statusIcon = if ($user.Licenses.Count -gt 0) { '<span class="status-found">✓</span>' } else { '<span class="status-error">⚠</span>' }
+            $statusText = if ($user.Licenses.Count -gt 0) { 'Licensed' } else { 'Unlicensed' }
+            $licensesHtml = if ($user.Licenses.Count -gt 0) { 
+                ($user.Licenses | ForEach-Object { "<span style='display:block; padding:2px 0; background:#fef3c7; margin:1px 0; padding-left:5px; border-left:2px solid #f59e0b;'>$_</span>" }) -join ''
+            } else { 
+                '<em style="color:#999;">No licenses</em>' 
+            }
+            $enabledIcon = if ($user.AccountEnabled) { '✓' } else { '✗' }
+            
+            $html += @"
+                        <tr>
+                            <td>$statusIcon $statusText</td>
+                            <td>$($user.DisplayName)</td>
+                            <td>$($user.UserPrincipalName)</td>
+                            <td style="font-size:0.9em;">$licensesHtml</td>
+                            <td>$enabledIcon</td>
+                        </tr>
+"@
+        }
+        $html += @"
+                    </tbody>
+                </table>
+            </div>
+"@
+    }
+
     $html += @"
         </div>
         
@@ -3605,6 +4247,14 @@ if ($GUI) {
     $chkTeams.Checked = $true
     $groupBoxChecks.Controls.Add($chkTeams)
     
+    # User & License Check
+    $chkUserLicense = New-Object System.Windows.Forms.CheckBox
+    $chkUserLicense.Location = New-Object System.Drawing.Point(15, 225)
+    $chkUserLicense.Size = New-Object System.Drawing.Size(280, 20)
+    $chkUserLicense.Text = "User & License Check"
+    $chkUserLicense.Checked = $true
+    $groupBoxChecks.Controls.Add($chkUserLicense)
+    
     # Options GroupBox
     $groupBoxOptions = New-Object System.Windows.Forms.GroupBox
     $groupBoxOptions.Location = New-Object System.Drawing.Point(340, 110)
@@ -3740,6 +4390,7 @@ if ($GUI) {
         $runSoftware = $chkSoftware.Checked
         $runSharePoint = $chkSharePoint.Checked
         $runTeams = $chkTeams.Checked
+        $runUserLicense = $chkUserLicense.Checked
         $compact = $chkCompact.Checked
         $showAll = $chkShowAll.Checked
         $export = $chkExport.Checked
@@ -3809,7 +4460,7 @@ if ($GUI) {
             $softwareResults = $null
             $sharePointResults = $null
             
-            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int]) + ($runSharePoint -as [int]) + ($runTeams -as [int])
+            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int]) + ($runSharePoint -as [int]) + ($runTeams -as [int]) + ($runUserLicense -as [int])
             $currentCheck = 0
             $progressIncrement = if ($totalChecks -gt 0) { 80 / $totalChecks } else { 0 }
             
@@ -3897,6 +4548,17 @@ if ($GUI) {
                 $form.Refresh()
                 
                 $teamsResults = Test-TeamsConfiguration -CompactView $compact
+                $currentCheck++
+                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+            }
+            
+            # Run User and License Check
+            if ($runUserLicense) {
+                $labelStatus.Text = "Running User & License Check..."
+                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $form.Refresh()
+                
+                $userLicenseResults = Test-UsersAndLicenses -CompactView $compact
                 $currentCheck++
                 $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
             }
@@ -4014,6 +4676,16 @@ if ($GUI) {
                 Write-Host $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Everyone (✓)" } else { "$($teamsResults.Status.Settings.DefaultPresenterRole) (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Green" } else { "Yellow" })
             }
             
+            if ($runUserLicense -and $userLicenseResults -and $userLicenseResults.CheckPerformed) {
+                Write-Host ""
+                Write-Host "  Users & Licenses:" -ForegroundColor White
+                Write-Host "    Total Users:        $($userLicenseResults.Status.TotalUsers)" -ForegroundColor White
+                Write-Host "    Licensed:           $($userLicenseResults.Status.LicensedUsers)" -ForegroundColor $(if ($userLicenseResults.Status.LicensedUsers -gt 0) { "Green" } else { "Gray" })
+                Write-Host "    Unlicensed:         $($userLicenseResults.Status.UnlicensedUsers)" -ForegroundColor $(if ($userLicenseResults.Status.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
+                Write-Host "    Valid ADM Accounts: $($userLicenseResults.Status.PrivilegedUsers.Count)" -ForegroundColor Green
+                Write-Host "    INVALID Priv Users: $($userLicenseResults.Status.InvalidPrivilegedUsers.Count)" -ForegroundColor $(if ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0) { "Green" } else { "Red" })
+            }
+            
             Write-Host "======================================================" -ForegroundColor Cyan
             
             if ($compact) {
@@ -4035,7 +4707,8 @@ if ($GUI) {
                                  (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0)) -and
                                  (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0)) -and
                                  (-not $sharePointResults -or ($sharePointResults.Status.Compliant)) -and
-                                 (-not $teamsResults -or ($teamsResults.Status.Compliant))
+                                 (-not $teamsResults -or ($teamsResults.Status.Compliant)) -and
+                                 (-not $userLicenseResults -or ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0))
                 
                 # Generate HTML report
                 if ($exportFormat -eq "HTML" -or $exportFormat -eq "Both") {
@@ -4044,7 +4717,8 @@ if ($GUI) {
                         -AzureResults $azureResults -IntuneResults $intuneResults `
                         -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
                         -DefenderResults $defenderResults -SoftwareResults $softwareResults `
-                        -SharePointResults $sharePointResults -TeamsResults $teamsResults -OverallStatus $overallStatus
+                        -SharePointResults $sharePointResults -TeamsResults $teamsResults `
+                        -UserLicenseResults $userLicenseResults -OverallStatus $overallStatus
                     
                     Write-Host "HTML Report exported to: $htmlPath" -ForegroundColor Green
                 }
@@ -4174,6 +4848,11 @@ if (-not $SkipTeams) {
     $teamsResults = Test-TeamsConfiguration -CompactView $CompactView
 }
 
+# User and License Check
+if (-not $SkipUserLicenseCheck) {
+    $userLicenseResults = Test-UsersAndLicenses -CompactView $CompactView
+}
+
 # Overall Summary
 $currentContext = Get-AzContext
 Write-Host ""
@@ -4293,6 +4972,17 @@ if ($teamsResults -and $teamsResults.CheckPerformed) {
     Write-Host $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Everyone (✓)" } else { "$($teamsResults.Status.Settings.DefaultPresenterRole) (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Green" } else { "Yellow" })
 }
 
+if ($userLicenseResults -and $userLicenseResults.CheckPerformed) {
+    Write-Host ""
+    Write-Host "  Users & Licenses:" -ForegroundColor White
+    Write-Host "    Total Users:        $($userLicenseResults.Status.TotalUsers)" -ForegroundColor White
+    Write-Host "    Licensed Users:     $($userLicenseResults.Status.LicensedUsers)" -ForegroundColor $(if ($userLicenseResults.Status.LicensedUsers -gt 0) { "Green" } else { "Gray" })
+    Write-Host "    Unlicensed Users:   $($userLicenseResults.Status.UnlicensedUsers)" -ForegroundColor $(if ($userLicenseResults.Status.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "    Privileged Users:   $($userLicenseResults.Status.PrivilegedUsers.Count + $userLicenseResults.Status.InvalidPrivilegedUsers.Count)" -ForegroundColor White
+    Write-Host "    Valid ADM Accounts: $($userLicenseResults.Status.PrivilegedUsers.Count) (✓)" -ForegroundColor Green
+    Write-Host "    INVALID Priv Users: $($userLicenseResults.Status.InvalidPrivilegedUsers.Count)" -ForegroundColor $(if ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0) { "Green" } else { "Red" })
+}
+
 Write-Host ""
 $overallStatus = ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Count -eq 0) -and 
                  (-not $intuneResults -or ($intuneResults.Missing.Count -eq 0 -and $intuneResults.Errors.Count -eq 0)) -and
@@ -4301,7 +4991,8 @@ $overallStatus = ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Co
                  (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0)) -and
                  (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0)) -and
                  (-not $sharePointResults -or ($sharePointResults.Status.Compliant)) -and
-                 (-not $teamsResults -or ($teamsResults.Status.Compliant))
+                 (-not $teamsResults -or ($teamsResults.Status.Compliant)) -and
+                 (-not $userLicenseResults -or ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0))
 
 Write-Host "  Overall Status: " -NoNewline -ForegroundColor White
 if ($overallStatus) {
@@ -4329,7 +5020,8 @@ if ($ExportReport) {
             -AzureResults $azureResults -IntuneResults $intuneResults `
             -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
             -DefenderResults $defenderResults -SoftwareResults $softwareResults `
-            -SharePointResults $sharePointResults -TeamsResults $teamsResults -OverallStatus $overallStatus
+            -SharePointResults $sharePointResults -TeamsResults $teamsResults `
+            -UserLicenseResults $userLicenseResults -OverallStatus $overallStatus
         
         Write-Host "HTML Report exported to: $htmlPath" -ForegroundColor Green
     }
@@ -4342,7 +5034,8 @@ if ($ExportReport) {
                 -AzureResults $azureResults -IntuneResults $intuneResults `
                 -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
                 -DefenderResults $defenderResults -SoftwareResults $softwareResults `
-                -SharePointResults $sharePointResults -TeamsResults $teamsResults -OverallStatus $overallStatus
+                -SharePointResults $sharePointResults -TeamsResults $teamsResults `
+                -UserLicenseResults $userLicenseResults -OverallStatus $overallStatus
         }
         
         $pdfPath = Export-PDFReport -HTMLPath $htmlPath
