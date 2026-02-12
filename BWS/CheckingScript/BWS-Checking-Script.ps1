@@ -2743,7 +2743,6 @@ function Test-UsersAndLicenses {
     Write-Host ""
     Write-Host "  Entra ID P2 Licensed:     $($userLicenseStatus.EntraIDP2Users.Count + $userLicenseStatus.InvalidEntraIDP2Users.Count)" -ForegroundColor White
     Write-Host "  Valid Entra ID P2 (ADM):  $($userLicenseStatus.EntraIDP2Users.Count)" -ForegroundColor Green
-    Write-Host "  INVALID Entra ID P2:      $($userLicenseStatus.InvalidEntraIDP2Users.Count)" -ForegroundColor $(if ($userLicenseStatus.InvalidEntraIDP2Users.Count -eq 0) { "Green" } else { "Red" })
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
     
@@ -2842,23 +2841,28 @@ function Test-UsersAndLicenses {
         Write-Host ""
     }
     
-    # Output all users with licenses (for parsing by other programs)
+    # Output all corporate users with licenses (for parsing by other programs)
+    # Excludes guest accounts (they are listed separately)
     if (-not $CompactView -and $userLicenseStatus.UserDetails.Count -gt 0) {
-        Write-Host "======================================================" -ForegroundColor Cyan
-        Write-Host "  ALL USERS & LICENSES" -ForegroundColor Cyan
-        Write-Host "======================================================" -ForegroundColor Cyan
-        Write-Host ""
+        # Filter out guest accounts
+        $corpUsers = $userLicenseStatus.UserDetails | Where-Object { -not $_.IsGuest }
         
-        # Table header
-        $displayNameWidth = 30
-        $upnWidth = 40
-        $licensesWidth = 60
-        $statusWidth = 10
-        
-        Write-Host $("{0,-$statusWidth} {1,-$displayNameWidth} {2,-$upnWidth} {3,-$licensesWidth}" -f "Status", "Display Name", "User Principal Name", "Licenses") -ForegroundColor White
-        Write-Host ("-" * ($statusWidth + $displayNameWidth + $upnWidth + $licensesWidth + 3)) -ForegroundColor Gray
-        
-        foreach ($user in $userLicenseStatus.UserDetails | Sort-Object DisplayName) {
+        if ($corpUsers.Count -gt 0) {
+            Write-Host "======================================================" -ForegroundColor Cyan
+            Write-Host "  CORP USERS & LICENSES" -ForegroundColor Cyan
+            Write-Host "======================================================" -ForegroundColor Cyan
+            Write-Host ""
+            
+            # Table header
+            $displayNameWidth = 30
+            $upnWidth = 40
+            $licensesWidth = 60
+            $statusWidth = 10
+            
+            Write-Host $("{0,-$statusWidth} {1,-$displayNameWidth} {2,-$upnWidth} {3,-$licensesWidth}" -f "Status", "Display Name", "User Principal Name", "Licenses") -ForegroundColor White
+            Write-Host ("-" * ($statusWidth + $displayNameWidth + $upnWidth + $licensesWidth + 3)) -ForegroundColor Gray
+            
+            foreach ($user in $corpUsers | Sort-Object DisplayName) {
             # Determine status
             $status = if ($user.Licenses.Count -gt 0) { "Licensed" } else { "No License" }
             $statusColor = if ($user.Licenses.Count -gt 0) { "Green" } else { "Yellow" }
@@ -2905,8 +2909,9 @@ function Test-UsersAndLicenses {
         }
         
         Write-Host ""
-        Write-Host "Total users displayed: $($userLicenseStatus.UserDetails.Count)" -ForegroundColor Cyan
+        Write-Host "Total corporate users displayed: $($corpUsers.Count)" -ForegroundColor Cyan
         Write-Host ""
+        }
         
         # Export to CSV format for easy parsing (optional - written to console)
         Write-Host "======================================================" -ForegroundColor Cyan
@@ -3880,7 +3885,6 @@ function Export-HTMLReport {
                 <ul class="info-list" style="margin-top: 10px; border-top: 1px solid #e5e7eb; padding-top: 10px;">
                     <li><strong>Entra ID P2 Licensed Users:</strong> $($UserLicenseResults.Status.EntraIDP2Users.Count + $UserLicenseResults.Status.InvalidEntraIDP2Users.Count)</li>
                     <li><strong>Valid Entra ID P2 (ADM):</strong> <span class="status-found">$($UserLicenseResults.Status.EntraIDP2Users.Count)</span></li>
-                    <li><strong>INVALID Entra ID P2:</strong> $(if ($UserLicenseResults.Status.InvalidEntraIDP2Users.Count -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($UserLicenseResults.Status.InvalidEntraIDP2Users.Count)</span>" })</li>
                 </ul>
 "@
         
@@ -4104,9 +4108,10 @@ function Export-HTMLReport {
 "@
         }
         
-        # Show all users with their licenses (expandable)
+        # Show all corporate users with their licenses (excludes guests)
         $html += @"
-                <h3 style="margin-top: 20px;">📋 All Users & Licenses:</h3>
+                <h3 style="margin-top: 20px;">📋 Corp Users & Licenses:</h3>
+                <p style="margin-bottom: 10px; color:#666;">Corporate users only (guest accounts are listed separately above):</p>
                 <table>
                     <thead>
                         <tr>
@@ -4119,7 +4124,10 @@ function Export-HTMLReport {
                     </thead>
                     <tbody>
 "@
-        foreach ($user in $UserLicenseResults.Status.UserDetails | Sort-Object DisplayName) {
+        # Filter out guest accounts
+        $corpUsers = $UserLicenseResults.Status.UserDetails | Where-Object { -not $_.IsGuest }
+        
+        foreach ($user in $corpUsers | Sort-Object DisplayName) {
             $statusIcon = if ($user.Licenses.Count -gt 0) { '<span class="status-found">✓</span>' } else { '<span class="status-error">⚠</span>' }
             $statusText = if ($user.Licenses.Count -gt 0) { 'Licensed' } else { 'Unlicensed' }
             $licensesHtml = if ($user.Licenses.Count -gt 0) { 
