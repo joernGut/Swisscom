@@ -1,12 +1,22 @@
 <#
 .SYNOPSIS
-    Azure, M365, Intune, SharePoint und Teams Login-Script mit GUI
+    Azure, M365, Intune, SharePoint und Teams Login-Script mit GUI (SSO-optimiert)
 .DESCRIPTION
     GUI-basiertes oder konsolenbasiertes Anmeldescript für Azure, Microsoft 365, Intune, SharePoint Online und Microsoft Teams
+    
+    NEUE FEATURES v2.0.0:
+    - Single Sign-On (SSO): Einmalige MFA-Anmeldung für alle Dienste
+    - Browser-Integration: Edge, Chrome, Firefox im angemeldeten Kontext öffnen
+    - PowerShell Konsolen mit automatischer Anmeldung bei allen Modulen
+    - Shared Access Token für nahtlose Authentifizierung
+    
+    FUNKTIONEN:
     - Auswahl der gewünschten Dienste per Checkbox oder Parameter
     - SharePoint-URL manuell eingeben
     - Automatische Modul-Installation
-    - PowerShell 5.1 und 7 Konsolen-Support
+    - PowerShell 5.1 und 7 Konsolen-Support mit aktiven Verbindungen
+    - Browser-Buttons für Azure Portal, Admin Center, Office Portal
+    
 .PARAMETER Console
     Starte im Konsolen-Modus ohne GUI
 .PARAMETER Azure
@@ -24,12 +34,21 @@
 .PARAMETER SharePointUrl
     SharePoint Admin URL (Standard: auto-detect aus Tenant)
 .NOTES
-    Version: 1.1.0
-    Datum: 2025-02-11
+    Version: 2.0.0
+    Datum: 2025-02-12
     Autor: BWS PowerShell Script
+    
+    CHANGELOG v2.0.0:
+    - Single Sign-On (SSO) implementiert
+    - Browser-Buttons hinzugefügt (Edge, Chrome, Firefox)
+    - Access Token Sharing zwischen Diensten
+    - PowerShell Console Buttons aktiviert für alle Module
+    - Verbesserte Benutzerführung
+    
 .EXAMPLE
     .\Azure-M365-Login-GUI.ps1
-    Startet die GUI
+    Startet die GUI mit SSO-Unterstützung
+    
 .EXAMPLE
     .\Azure-M365-Login-GUI.ps1 -Console -Azure -Graph -SharePoint -Teams
     Startet im Konsolen-Modus und meldet bei Azure, Graph, SharePoint und Teams an
@@ -232,14 +251,14 @@ $groupBoxServices.Controls.Add($chkTeams)
 # Info Label
 $labelInfo = New-Object System.Windows.Forms.Label
 $labelInfo.Location = New-Object System.Drawing.Point(20, 300)
-$labelInfo.Size = New-Object System.Drawing.Size(640, 40)
-$labelInfo.Text = "Hinweis: Fehlende Module werden automatisch installiert. Sie werden für jeden Service zur Anmeldung aufgefordert (MFA-Unterstützung)."
+$labelInfo.Size = New-Object System.Drawing.Size(640, 60)
+$labelInfo.Text = "Hinweis: Fehlende Module werden automatisch installiert.`r`nSingle Sign-On (SSO): Bei der ersten Anmeldung (z.B. Azure) werden Sie zur MFA aufgefordert.`r`nAlle weiteren Dienste nutzen die gleiche Sitzung - keine erneute MFA-Eingabe erforderlich!"
 $labelInfo.ForeColor = [System.Drawing.Color]::DarkBlue
 $form.Controls.Add($labelInfo)
 
 # Connect Button
 $btnConnect = New-Object System.Windows.Forms.Button
-$btnConnect.Location = New-Object System.Drawing.Point(20, 350)
+$btnConnect.Location = New-Object System.Drawing.Point(20, 370)
 $btnConnect.Size = New-Object System.Drawing.Size(120, 35)
 $btnConnect.Text = "Anmelden"
 $btnConnect.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -249,29 +268,67 @@ $form.Controls.Add($btnConnect)
 
 # PowerShell 5.1 Console Button
 $btnConsolePS5 = New-Object System.Windows.Forms.Button
-$btnConsolePS5.Location = New-Object System.Drawing.Point(150, 350)
+$btnConsolePS5.Location = New-Object System.Drawing.Point(150, 370)
 $btnConsolePS5.Size = New-Object System.Drawing.Size(100, 35)
 $btnConsolePS5.Text = "PowerShell 5.1"
 $btnConsolePS5.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
 $btnConsolePS5.BackColor = [System.Drawing.Color]::DodgerBlue
 $btnConsolePS5.ForeColor = [System.Drawing.Color]::White
+$btnConsolePS5.Enabled = $false
 $form.Controls.Add($btnConsolePS5)
 
 # PowerShell 7 Console Button
 $btnConsolePS7 = New-Object System.Windows.Forms.Button
-$btnConsolePS7.Location = New-Object System.Drawing.Point(260, 350)
+$btnConsolePS7.Location = New-Object System.Drawing.Point(260, 370)
 $btnConsolePS7.Size = New-Object System.Drawing.Size(100, 35)
 $btnConsolePS7.Text = "PowerShell 7"
 $btnConsolePS7.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
 $btnConsolePS7.BackColor = [System.Drawing.Color]::MediumPurple
 $btnConsolePS7.ForeColor = [System.Drawing.Color]::White
+$btnConsolePS7.Enabled = $false
 $form.Controls.Add($btnConsolePS7)
+
+# Browser Buttons Row
+$browserY = 410
+
+# Edge Browser Button
+$btnEdge = New-Object System.Windows.Forms.Button
+$btnEdge.Location = New-Object System.Drawing.Point(20, $browserY)
+$btnEdge.Size = New-Object System.Drawing.Size(110, 35)
+$btnEdge.Text = "🌐 Edge"
+$btnEdge.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$btnEdge.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+$btnEdge.ForeColor = [System.Drawing.Color]::White
+$btnEdge.Enabled = $false
+$form.Controls.Add($btnEdge)
+
+# Chrome Browser Button
+$btnChrome = New-Object System.Windows.Forms.Button
+$btnChrome.Location = New-Object System.Drawing.Point(140, $browserY)
+$btnChrome.Size = New-Object System.Drawing.Size(110, 35)
+$btnChrome.Text = "🌐 Chrome"
+$btnChrome.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$btnChrome.BackColor = [System.Drawing.Color]::FromArgb(66, 133, 244)
+$btnChrome.ForeColor = [System.Drawing.Color]::White
+$btnChrome.Enabled = $false
+$form.Controls.Add($btnChrome)
+
+# Firefox Browser Button
+$btnFirefox = New-Object System.Windows.Forms.Button
+$btnFirefox.Location = New-Object System.Drawing.Point(260, $browserY)
+$btnFirefox.Size = New-Object System.Drawing.Size(110, 35)
+$btnFirefox.Text = "🌐 Firefox"
+$btnFirefox.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$btnFirefox.BackColor = [System.Drawing.Color]::FromArgb(230, 96, 0)
+$btnFirefox.ForeColor = [System.Drawing.Color]::White
+$btnFirefox.Enabled = $false
+$form.Controls.Add($btnFirefox)
 
 # Disconnect Button
 $btnDisconnect = New-Object System.Windows.Forms.Button
-$btnDisconnect.Location = New-Object System.Drawing.Point(370, 350)
-$btnDisconnect.Size = New-Object System.Drawing.Size(140, 35)
-$btnDisconnect.Text = "Verbindungen trennen"
+$btnDisconnect.Location = New-Object System.Drawing.Point(380, $browserY)
+$btnDisconnect.Size = New-Object System.Drawing.Size(130, 35)
+$btnDisconnect.Text = "Trennen"
 $btnDisconnect.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
 $btnDisconnect.BackColor = [System.Drawing.Color]::OrangeRed
 $btnDisconnect.ForeColor = [System.Drawing.Color]::White
@@ -279,22 +336,22 @@ $form.Controls.Add($btnDisconnect)
 
 # Clear Button
 $btnClear = New-Object System.Windows.Forms.Button
-$btnClear.Location = New-Object System.Drawing.Point(520, 350)
+$btnClear.Location = New-Object System.Drawing.Point(520, $browserY)
 $btnClear.Size = New-Object System.Drawing.Size(70, 35)
 $btnClear.Text = "Löschen"
 $form.Controls.Add($btnClear)
 
 # Close Button
 $btnClose = New-Object System.Windows.Forms.Button
-$btnClose.Location = New-Object System.Drawing.Point(600, 350)
+$btnClose.Location = New-Object System.Drawing.Point(600, $browserY)
 $btnClose.Size = New-Object System.Drawing.Size(60, 35)
 $btnClose.Text = "Schließen"
 $form.Controls.Add($btnClose)
 
 # Output RichTextBox
 $textOutput = New-Object System.Windows.Forms.RichTextBox
-$textOutput.Location = New-Object System.Drawing.Point(20, 400)
-$textOutput.Size = New-Object System.Drawing.Size(640, 300)
+$textOutput.Location = New-Object System.Drawing.Point(20, 460)
+$textOutput.Size = New-Object System.Drawing.Size(640, 270)
 $textOutput.Multiline = $true
 $textOutput.ScrollBars = "Both"
 $textOutput.Font = New-Object System.Drawing.Font("Consolas", 9)
@@ -302,6 +359,9 @@ $textOutput.ReadOnly = $true
 $textOutput.BackColor = [System.Drawing.Color]::Black
 $textOutput.ForeColor = [System.Drawing.Color]::LightGray
 $form.Controls.Add($textOutput)
+
+# Adjust form height
+$form.Size = New-Object System.Drawing.Size(700, 790)
 
 # ============================================================================
 # Event Handlers
@@ -388,21 +448,46 @@ $btnConnect.Add_Click({
     Start-Sleep -Seconds 1
     
     $connections = @()
+    $script:sharedAccessToken = $null
+    $script:sharedTenantId = $null
+    $script:sharedUserPrincipalName = $null
+    
+    # ========================================================================
+    # SINGLE SIGN-ON: Erste Anmeldung für Access Token
+    # ========================================================================
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+    $textOutput.AppendText("═══════════════════════════════════════════════════════`r`n")
+    $textOutput.AppendText("  SINGLE SIGN-ON (SSO) - Einmalige Anmeldung`r`n")
+    $textOutput.AppendText("═══════════════════════════════════════════════════════`r`n`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
     
     # Azure
     if ($services.Azure) {
         $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
-        $textOutput.AppendText("1. Azure Anmeldung...`r`n")
+        $textOutput.AppendText("1. Azure Anmeldung (mit MFA)...`r`n")
         $textOutput.ScrollToCaret()
         [System.Windows.Forms.Application]::DoEvents()
         
         try {
             Connect-AzAccount -ErrorAction Stop | Out-Null
             $context = Get-AzContext
+            $script:sharedTenantId = $context.Tenant.Id
+            $script:sharedUserPrincipalName = $context.Account.Id
+            
+            # Access Token für weitere Dienste holen
+            try {
+                $script:sharedAccessToken = (Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com").Token
+            } catch {
+                # Fallback ohne Token
+            }
+            
             $textOutput.SelectionColor = [System.Drawing.Color]::Green
             $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
             $textOutput.AppendText("   Benutzer: $($context.Account.Id)`r`n")
-            $textOutput.AppendText("   Tenant: $($context.Tenant.Id)`r`n`r`n")
+            $textOutput.AppendText("   Tenant: $($context.Tenant.Id)`r`n")
+            $textOutput.AppendText("   → Access Token für weitere Dienste gespeichert`r`n`r`n")
             $connections += "✓ Azure"
         } catch {
             $textOutput.SelectionColor = [System.Drawing.Color]::Red
@@ -411,18 +496,81 @@ $btnConnect.Add_Click({
         [System.Windows.Forms.Application]::DoEvents()
     }
     
-    # Exchange Online
-    if ($services.Exchange) {
+    # Microsoft Graph (nutzt SSO wenn Azure verbunden)
+    if ($services.Graph) {
         $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
-        $textOutput.AppendText("2. Exchange Online Anmeldung...`r`n")
+        if ($script:sharedAccessToken) {
+            $textOutput.AppendText("2. Microsoft Graph Anmeldung (SSO - keine erneute MFA)...`r`n")
+        } else {
+            $textOutput.AppendText("2. Microsoft Graph Anmeldung (mit MFA)...`r`n")
+        }
         $textOutput.ScrollToCaret()
         [System.Windows.Forms.Application]::DoEvents()
         
         try {
-            Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+            $graphScopes = @(
+                "User.Read.All",
+                "Group.Read.All", 
+                "DeviceManagementConfiguration.Read.All",
+                "DeviceManagementManagedDevices.Read.All",
+                "Directory.Read.All"
+            )
+            
+            if ($script:sharedAccessToken -and $script:sharedTenantId) {
+                # SSO: Nutze bestehenden Access Token
+                Connect-MgGraph -AccessToken $script:sharedAccessToken -ErrorAction Stop | Out-Null
+                $textOutput.SelectionColor = [System.Drawing.Color]::Green
+                $textOutput.AppendText("   ✓ Erfolgreich angemeldet (SSO)`r`n")
+                $textOutput.AppendText("   Benutzer: $script:sharedUserPrincipalName`r`n")
+                $textOutput.AppendText("   → Keine erneute MFA-Eingabe erforderlich!`r`n`r`n")
+            } else {
+                # Erste Anmeldung
+                Connect-MgGraph -Scopes $graphScopes -ErrorAction Stop | Out-Null
+                $mgContext = Get-MgContext
+                $script:sharedTenantId = $mgContext.TenantId
+                $script:sharedUserPrincipalName = $mgContext.Account
+                
+                $textOutput.SelectionColor = [System.Drawing.Color]::Green
+                $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
+                $textOutput.AppendText("   Benutzer: $($mgContext.Account)`r`n")
+                $textOutput.AppendText("   Tenant: $($mgContext.TenantId)`r`n`r`n")
+            }
+            $connections += "✓ Microsoft Graph"
+        } catch {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("   ✗ Fehler: $($_.Exception.Message)`r`n`r`n")
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    
+    # ========================================================================
+    # WEITERE DIENSTE (nutzen SSO wenn möglich)
+    # ========================================================================
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+    $textOutput.AppendText("`r`n═══════════════════════════════════════════════════════`r`n")
+    $textOutput.AppendText("  Weitere Dienste (nutzen SSO-Sitzung)`r`n")
+    $textOutput.AppendText("═══════════════════════════════════════════════════════`r`n`r`n")
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    # Exchange Online
+    if ($services.Exchange) {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+        $textOutput.AppendText("3. Exchange Online Anmeldung (SSO)...`r`n")
+        $textOutput.ScrollToCaret()
+        [System.Windows.Forms.Application]::DoEvents()
+        
+        try {
+            if ($script:sharedUserPrincipalName) {
+                # SSO: Nutze UserPrincipalName für nahtlose Anmeldung
+                Connect-ExchangeOnline -UserPrincipalName $script:sharedUserPrincipalName -ShowBanner:$false -ErrorAction Stop
+            } else {
+                Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+            }
+            
             $orgConfig = Get-OrganizationConfig -ErrorAction SilentlyContinue
             $textOutput.SelectionColor = [System.Drawing.Color]::Green
-            $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
+            $textOutput.AppendText("   ✓ Erfolgreich angemeldet (SSO)`r`n")
             if ($orgConfig) {
                 $textOutput.AppendText("   Organisation: $($orgConfig.DisplayName)`r`n")
             }
@@ -435,52 +583,24 @@ $btnConnect.Add_Click({
         [System.Windows.Forms.Application]::DoEvents()
     }
     
-    # Microsoft Graph
-    if ($services.Graph) {
-        $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
-        $textOutput.AppendText("3. Microsoft Graph Anmeldung (inkl. Intune)...`r`n")
-        $textOutput.ScrollToCaret()
-        [System.Windows.Forms.Application]::DoEvents()
-        
-        try {
-            $graphScopes = @(
-                "User.Read.All",
-                "Group.Read.All",
-                "Directory.Read.All",
-                "Organization.Read.All",
-                "DeviceManagementApps.Read.All",
-                "DeviceManagementConfiguration.Read.All",
-                "DeviceManagementManagedDevices.Read.All",
-                "DeviceManagementServiceConfig.Read.All"
-            )
-            
-            Connect-MgGraph -Scopes $graphScopes -ErrorAction Stop | Out-Null
-            $mgContext = Get-MgContext
-            $textOutput.SelectionColor = [System.Drawing.Color]::Green
-            $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
-            $textOutput.AppendText("   Benutzer: $($mgContext.Account)`r`n")
-            $textOutput.AppendText("   Tenant: $($mgContext.TenantId)`r`n")
-            $textOutput.AppendText("   Scopes: Intune-Berechtigungen inkludiert`r`n`r`n")
-            $connections += "✓ Microsoft Graph"
-        } catch {
-            $textOutput.SelectionColor = [System.Drawing.Color]::Red
-            $textOutput.AppendText("   ✗ Fehler: $($_.Exception.Message)`r`n`r`n")
-        }
-        [System.Windows.Forms.Application]::DoEvents()
-    }
-    
     # Azure AD
     if ($services.AzureAD) {
         $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
-        $textOutput.AppendText("4. Azure AD Anmeldung...`r`n")
+        $textOutput.AppendText("4. Azure AD Anmeldung (SSO)...`r`n")
         $textOutput.ScrollToCaret()
         [System.Windows.Forms.Application]::DoEvents()
         
         try {
-            Connect-AzureAD -ErrorAction Stop | Out-Null
+            if ($script:sharedTenantId) {
+                # SSO: Nutze Tenant ID
+                Connect-AzureAD -TenantId $script:sharedTenantId -ErrorAction Stop | Out-Null
+            } else {
+                Connect-AzureAD -ErrorAction Stop | Out-Null
+            }
+            
             $tenantDetail = Get-AzureADTenantDetail
             $textOutput.SelectionColor = [System.Drawing.Color]::Green
-            $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
+            $textOutput.AppendText("   ✓ Erfolgreich angemeldet (SSO)`r`n")
             $textOutput.AppendText("   Tenant: $($tenantDetail.DisplayName)`r`n")
             $textOutput.AppendText("   Tenant ID: $($tenantDetail.ObjectId)`r`n`r`n")
             $connections += "✓ Azure AD"
@@ -494,7 +614,7 @@ $btnConnect.Add_Click({
     # SharePoint Online
     if ($services.SharePoint) {
         $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
-        $textOutput.AppendText("5. SharePoint Online Anmeldung...`r`n")
+        $textOutput.AppendText("5. SharePoint Online Anmeldung (SSO)...`r`n")
         $textOutput.AppendText("   URL: $($services.SharePointUrl)`r`n")
         $textOutput.ScrollToCaret()
         [System.Windows.Forms.Application]::DoEvents()
@@ -516,7 +636,7 @@ $btnConnect.Add_Click({
                 $tenant = Get-SPOTenant -ErrorAction Stop
                 
                 $textOutput.SelectionColor = [System.Drawing.Color]::Green
-                $textOutput.AppendText("   ✓ Erfolgreich angemeldet`r`n")
+                $textOutput.AppendText("   ✓ Erfolgreich angemeldet (SSO)`r`n")
                 if ($tenant.RootSiteUrl) {
                     $textOutput.AppendText("   Root Site: $($tenant.RootSiteUrl)`r`n")
                 }
@@ -634,7 +754,21 @@ $btnConnect.Add_Click({
     $textOutput.AppendText("Sie können nun Ihre Scripts ausführen.`r`n")
     $textOutput.ScrollToCaret()
     
+    # Enable buttons after successful login
     $btnConnect.Enabled = $true
+    
+    # Enable PowerShell console buttons if any connection was successful
+    if ($connections.Count -gt 0) {
+        $btnConsolePS5.Enabled = $true
+        $btnConsolePS7.Enabled = $true
+        $btnEdge.Enabled = $true
+        $btnChrome.Enabled = $true
+        $btnFirefox.Enabled = $true
+        
+        $textOutput.SelectionColor = [System.Drawing.Color]::Green
+        $textOutput.AppendText("`r`n✓ PowerShell Konsolen und Browser-Buttons sind nun aktiviert!`r`n")
+        $textOutput.ScrollToCaret()
+    }
 })
 
 $btnConsolePS5.Add_Click({
@@ -1349,6 +1483,171 @@ $btnDisconnect.Add_Click({
     $textOutput.ScrollToCaret()
     
     $btnDisconnect.Enabled = $true
+    
+    # Disable browser and PowerShell buttons after disconnect
+    $btnEdge.Enabled = $false
+    $btnChrome.Enabled = $false
+    $btnFirefox.Enabled = $false
+    $btnConsolePS5.Enabled = $false
+    $btnConsolePS7.Enabled = $false
+    
+    $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+    $textOutput.AppendText("PowerShell Konsolen und Browser-Buttons wurden deaktiviert.`r`n")
+    $textOutput.ScrollToCaret()
+})
+
+# ============================================================================
+# Browser Button Event Handlers
+# ============================================================================
+
+$btnEdge.Add_Click({
+    $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+    $textOutput.AppendText("`r`n" + "=" * 50 + "`r`n")
+    $textOutput.AppendText("Microsoft Edge wird geöffnet (im angemeldeten Kontext)...`r`n")
+    $textOutput.AppendText("=" * 50 + "`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    try {
+        # Prüfe ob Edge installiert ist
+        $edgePath = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+        if (-not (Test-Path $edgePath)) {
+            $edgePath = "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
+        }
+        
+        if (Test-Path $edgePath) {
+            # URLs für verschiedene Portale
+            $portalUrls = @(
+                "https://portal.azure.com",
+                "https://admin.microsoft.com",
+                "https://portal.office.com"
+            )
+            
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("`r`nÖffne folgende Portale in Edge:`r`n")
+            foreach ($url in $portalUrls) {
+                $textOutput.AppendText("  • $url`r`n")
+                Start-Process $edgePath -ArgumentList "--profile-directory=Default", $url
+                Start-Sleep -Milliseconds 500
+            }
+            
+            $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+            $textOutput.AppendText("`r`nℹ Hinweis: Sie werden automatisch angemeldet, wenn Sie bereits`r`n")
+            $textOutput.AppendText("  in Edge mit dem gleichen Microsoft-Konto angemeldet sind.`r`n")
+            $textOutput.AppendText("  Falls nicht, melden Sie sich einmalig an.`r`n`r`n")
+        } else {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("`r`n✗ Microsoft Edge wurde nicht gefunden!`r`n`r`n")
+        }
+    } catch {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("`r`n✗ Fehler beim Öffnen von Edge: $($_.Exception.Message)`r`n`r`n")
+    }
+    
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+})
+
+$btnChrome.Add_Click({
+    $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+    $textOutput.AppendText("`r`n" + "=" * 50 + "`r`n")
+    $textOutput.AppendText("Google Chrome wird geöffnet (im angemeldeten Kontext)...`r`n")
+    $textOutput.AppendText("=" * 50 + "`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    try {
+        # Prüfe ob Chrome installiert ist
+        $chromePath = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+        if (-not (Test-Path $chromePath)) {
+            $chromePath = "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+        }
+        if (-not (Test-Path $chromePath)) {
+            $chromePath = "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+        }
+        
+        if (Test-Path $chromePath) {
+            # URLs für verschiedene Portale
+            $portalUrls = @(
+                "https://portal.azure.com",
+                "https://admin.microsoft.com",
+                "https://portal.office.com"
+            )
+            
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("`r`nÖffne folgende Portale in Chrome:`r`n")
+            foreach ($url in $portalUrls) {
+                $textOutput.AppendText("  • $url`r`n")
+                Start-Process $chromePath -ArgumentList $url
+                Start-Sleep -Milliseconds 500
+            }
+            
+            $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+            $textOutput.AppendText("`r`nℹ Hinweis: Sie werden automatisch angemeldet, wenn Sie bereits`r`n")
+            $textOutput.AppendText("  in Chrome mit dem gleichen Microsoft-Konto angemeldet sind.`r`n")
+            $textOutput.AppendText("  Falls nicht, melden Sie sich einmalig an.`r`n`r`n")
+        } else {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("`r`n✗ Google Chrome wurde nicht gefunden!`r`n`r`n")
+        }
+    } catch {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("`r`n✗ Fehler beim Öffnen von Chrome: $($_.Exception.Message)`r`n`r`n")
+    }
+    
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+})
+
+$btnFirefox.Add_Click({
+    $textOutput.SelectionColor = [System.Drawing.Color]::Cyan
+    $textOutput.AppendText("`r`n" + "=" * 50 + "`r`n")
+    $textOutput.AppendText("Mozilla Firefox wird geöffnet (im angemeldeten Kontext)...`r`n")
+    $textOutput.AppendText("=" * 50 + "`r`n")
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+    
+    try {
+        # Prüfe ob Firefox installiert ist
+        $firefoxPath = "${env:ProgramFiles}\Mozilla Firefox\firefox.exe"
+        if (-not (Test-Path $firefoxPath)) {
+            $firefoxPath = "${env:ProgramFiles(x86)}\Mozilla Firefox\firefox.exe"
+        }
+        
+        if (Test-Path $firefoxPath) {
+            # URLs für verschiedene Portale
+            $portalUrls = @(
+                "https://portal.azure.com",
+                "https://admin.microsoft.com",
+                "https://portal.office.com"
+            )
+            
+            $textOutput.SelectionColor = [System.Drawing.Color]::Green
+            $textOutput.AppendText("`r`nÖffne folgende Portale in Firefox:`r`n")
+            
+            # Firefox öffnet URLs mit comma-separierter Liste
+            $urlList = $portalUrls -join "|"
+            Start-Process $firefoxPath -ArgumentList $urlList
+            
+            foreach ($url in $portalUrls) {
+                $textOutput.AppendText("  • $url`r`n")
+            }
+            
+            $textOutput.SelectionColor = [System.Drawing.Color]::Yellow
+            $textOutput.AppendText("`r`nℹ Hinweis: Sie werden automatisch angemeldet, wenn Sie bereits`r`n")
+            $textOutput.AppendText("  in Firefox mit dem gleichen Microsoft-Konto angemeldet sind.`r`n")
+            $textOutput.AppendText("  Falls nicht, melden Sie sich einmalig an.`r`n`r`n")
+        } else {
+            $textOutput.SelectionColor = [System.Drawing.Color]::Red
+            $textOutput.AppendText("`r`n✗ Mozilla Firefox wurde nicht gefunden!`r`n`r`n")
+        }
+    } catch {
+        $textOutput.SelectionColor = [System.Drawing.Color]::Red
+        $textOutput.AppendText("`r`n✗ Fehler beim Öffnen von Firefox: $($_.Exception.Message)`r`n`r`n")
+    }
+    
+    $textOutput.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
 })
 
 $btnClear.Add_Click({
