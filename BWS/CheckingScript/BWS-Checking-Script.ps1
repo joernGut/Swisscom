@@ -2512,6 +2512,9 @@ function Test-UsersAndLicenses {
         UnlicensedUsers = 0
         PrivilegedUsers = @()
         InvalidPrivilegedUsers = @()  # Users with privileged roles but no ADM in DisplayName
+        EntraIDP2Users = @()  # Users with Entra ID P2 license
+        InvalidEntraIDP2Users = @()  # Users with Entra ID P2 but no ADM in DisplayName
+        GuestAccounts = @()  # Guest accounts (with #EXT# in UPN)
         UserDetails = @()
         Errors = @()
     }
@@ -2640,6 +2643,14 @@ function Test-UsersAndLicenses {
                 HasPrivilegedRole = $false
                 IsADMAccount = $false
                 IsInvalid = $false
+                HasEntraIDP2 = $false
+                EntraIDP2Violation = $false
+                IsGuest = $false
+            }
+            
+            # Check if user is a guest account (has #EXT# in UPN)
+            if ($user.userPrincipalName -match "#EXT#") {
+                $userDetail.IsGuest = $true
             }
             
             # Check if user has licenses
@@ -2662,9 +2673,27 @@ function Test-UsersAndLicenses {
                     }
                     
                     $userDetail.Licenses += $licenseName
+                    
+                    # Check for Entra ID P2 license (AAD_PREMIUM_P2)
+                    if ($skuPartNumber -eq 'AAD_PREMIUM_P2') {
+                        $userDetail.HasEntraIDP2 = $true
+                    }
                 }
             } else {
                 $userLicenseStatus.UnlicensedUsers++
+            }
+            
+            # Check if user with Entra ID P2 has ADM in DisplayName
+            if ($userDetail.HasEntraIDP2) {
+                if ($user.displayName -match "ADM") {
+                    # Valid: Entra ID P2 user has ADM in name
+                    $userLicenseStatus.EntraIDP2Users += $userDetail
+                } else {
+                    # VIOLATION: Entra ID P2 without ADM in name
+                    $userDetail.EntraIDP2Violation = $true
+                    $userLicenseStatus.InvalidEntraIDP2Users += $userDetail
+                    $userLicenseStatus.Errors += "User '$($user.displayName)' has Entra ID P2 license but no 'ADM' in DisplayName"
+                }
             }
             
             # Check if user has privileged roles
@@ -2685,6 +2714,11 @@ function Test-UsersAndLicenses {
                 }
             }
             
+            # Add guest accounts to separate list
+            if ($userDetail.IsGuest) {
+                $userLicenseStatus.GuestAccounts += $userDetail
+            }
+            
             $userLicenseStatus.UserDetails += $userDetail
         }
         
@@ -2702,9 +2736,14 @@ function Test-UsersAndLicenses {
     Write-Host "  Total Users:              $($userLicenseStatus.TotalUsers)" -ForegroundColor White
     Write-Host "  Licensed Users:           $($userLicenseStatus.LicensedUsers)" -ForegroundColor $(if ($userLicenseStatus.LicensedUsers -gt 0) { "Green" } else { "Gray" })
     Write-Host "  Unlicensed Users:         $($userLicenseStatus.UnlicensedUsers)" -ForegroundColor $(if ($userLicenseStatus.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "  Guest Accounts:           $($userLicenseStatus.GuestAccounts.Count)" -ForegroundColor Cyan
     Write-Host "  Users with Priv. Roles:   $($userLicenseStatus.PrivilegedUsers.Count + $userLicenseStatus.InvalidPrivilegedUsers.Count)" -ForegroundColor White
     Write-Host "  Valid ADM Accounts:       $($userLicenseStatus.PrivilegedUsers.Count)" -ForegroundColor Green
     Write-Host "  INVALID Privileged Users: $($userLicenseStatus.InvalidPrivilegedUsers.Count)" -ForegroundColor $(if ($userLicenseStatus.InvalidPrivilegedUsers.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host ""
+    Write-Host "  Entra ID P2 Licensed:     $($userLicenseStatus.EntraIDP2Users.Count + $userLicenseStatus.InvalidEntraIDP2Users.Count)" -ForegroundColor White
+    Write-Host "  Valid Entra ID P2 (ADM):  $($userLicenseStatus.EntraIDP2Users.Count)" -ForegroundColor Green
+    Write-Host "  INVALID Entra ID P2:      $($userLicenseStatus.InvalidEntraIDP2Users.Count)" -ForegroundColor $(if ($userLicenseStatus.InvalidEntraIDP2Users.Count -eq 0) { "Green" } else { "Red" })
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
     
@@ -2723,6 +2762,19 @@ function Test-UsersAndLicenses {
         Write-Host ""
     }
     
+    if (-not $CompactView -and $userLicenseStatus.InvalidEntraIDP2Users.Count -gt 0) {
+        Write-Host "⚠ COMPLIANCE VIOLATION - Users with Entra ID P2 license:" -ForegroundColor Red
+        Write-Host ""
+        foreach ($user in $userLicenseStatus.InvalidEntraIDP2Users) {
+            Write-Host "  ✗ $($user.DisplayName) ($($user.UserPrincipalName))" -ForegroundColor Red
+            Write-Host "    License:  Azure Active Directory Premium P2" -ForegroundColor Yellow
+            if ($user.Licenses.Count -gt 0) {
+                Write-Host "    All Licenses: $($user.Licenses -join ', ')" -ForegroundColor Gray
+            }
+        }
+        Write-Host ""
+    }
+    
     if (-not $CompactView -and $userLicenseStatus.PrivilegedUsers.Count -gt 0) {
         Write-Host "✓ Valid ADM Accounts with Privileged Roles:" -ForegroundColor Green
         Write-Host ""
@@ -2735,6 +2787,34 @@ function Test-UsersAndLicenses {
                 Write-Host "    Licenses: No licenses assigned" -ForegroundColor DarkGray
             }
         }
+        Write-Host ""
+    }
+    
+    # Show guest accounts
+    if (-not $CompactView -and $userLicenseStatus.GuestAccounts.Count -gt 0) {
+        Write-Host "👥 Guest Accounts (External Users):" -ForegroundColor Cyan
+        Write-Host ""
+        foreach ($guest in $userLicenseStatus.GuestAccounts | Sort-Object DisplayName) {
+            $guestColor = if ($guest.AccountEnabled) { "White" } else { "Gray" }
+            Write-Host "  • $($guest.DisplayName) ($($guest.UserPrincipalName))" -ForegroundColor $guestColor
+            
+            if ($guest.Licenses.Count -gt 0) {
+                Write-Host "    Licenses: $($guest.Licenses -join ', ')" -ForegroundColor Gray
+            } else {
+                Write-Host "    Licenses: No licenses assigned" -ForegroundColor DarkGray
+            }
+            
+            if (-not $guest.AccountEnabled) {
+                Write-Host "    Status:   Account disabled" -ForegroundColor Red
+            }
+            
+            # Show if guest has privileged roles (unusual!)
+            if ($guest.HasPrivilegedRole) {
+                Write-Host "    ⚠ WARNING: Guest has privileged roles: $($guest.PrivilegedRoles -join ', ')" -ForegroundColor Yellow
+            }
+        }
+        Write-Host ""
+        Write-Host "Total guest accounts: $($userLicenseStatus.GuestAccounts.Count)" -ForegroundColor Cyan
         Write-Host ""
     }
     
@@ -2833,15 +2913,16 @@ function Test-UsersAndLicenses {
         Write-Host "  CSV FORMAT (for parsing)" -ForegroundColor Cyan
         Write-Host "======================================================" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host "DisplayName;UserPrincipalName;AccountEnabled;Licenses;HasPrivilegedRole;PrivilegedRoles" -ForegroundColor White
+        Write-Host "DisplayName;UserPrincipalName;AccountEnabled;Licenses;HasPrivilegedRole;PrivilegedRoles;IsGuest" -ForegroundColor White
         
         foreach ($user in $userLicenseStatus.UserDetails | Sort-Object DisplayName) {
             $licensesCSV = $user.Licenses -join "|"
             $rolesCSV = $user.PrivilegedRoles -join "|"
             $enabledCSV = if ($user.AccountEnabled) { "TRUE" } else { "FALSE" }
             $hasRoleCSV = if ($user.HasPrivilegedRole) { "TRUE" } else { "FALSE" }
+            $isGuestCSV = if ($user.IsGuest) { "TRUE" } else { "FALSE" }
             
-            Write-Host "$($user.DisplayName);$($user.UserPrincipalName);$enabledCSV;$licensesCSV;$hasRoleCSV;$rolesCSV"
+            Write-Host "$($user.DisplayName);$($user.UserPrincipalName);$enabledCSV;$licensesCSV;$hasRoleCSV;$rolesCSV;$isGuestCSV"
         }
         
         Write-Host ""
@@ -3791,9 +3872,15 @@ function Export-HTMLReport {
                     <li><strong>Total Users:</strong> $($UserLicenseResults.Status.TotalUsers)</li>
                     <li><strong>Licensed Users:</strong> <span class="status-found">$($UserLicenseResults.Status.LicensedUsers)</span></li>
                     <li><strong>Unlicensed Users:</strong> $(if ($UserLicenseResults.Status.UnlicensedUsers -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($UserLicenseResults.Status.UnlicensedUsers)</span>" })</li>
+                    <li><strong>Guest Accounts:</strong> <span style="color:#06b6d4;">$($UserLicenseResults.Status.GuestAccounts.Count)</span></li>
                     <li><strong>Users with Privileged Roles:</strong> $($UserLicenseResults.Status.PrivilegedUsers.Count + $UserLicenseResults.Status.InvalidPrivilegedUsers.Count)</li>
                     <li><strong>Valid ADM Accounts:</strong> <span class="status-found">$($UserLicenseResults.Status.PrivilegedUsers.Count)</span></li>
                     <li><strong>INVALID Privileged Users:</strong> $(if ($UserLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($UserLicenseResults.Status.InvalidPrivilegedUsers.Count)</span>" })</li>
+                </ul>
+                <ul class="info-list" style="margin-top: 10px; border-top: 1px solid #e5e7eb; padding-top: 10px;">
+                    <li><strong>Entra ID P2 Licensed Users:</strong> $($UserLicenseResults.Status.EntraIDP2Users.Count + $UserLicenseResults.Status.InvalidEntraIDP2Users.Count)</li>
+                    <li><strong>Valid Entra ID P2 (ADM):</strong> <span class="status-found">$($UserLicenseResults.Status.EntraIDP2Users.Count)</span></li>
+                    <li><strong>INVALID Entra ID P2:</strong> $(if ($UserLicenseResults.Status.InvalidEntraIDP2Users.Count -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($UserLicenseResults.Status.InvalidEntraIDP2Users.Count)</span>" })</li>
                 </ul>
 "@
         
@@ -3913,6 +4000,107 @@ function Export-HTMLReport {
             $html += @"
                     </tbody>
                 </table>
+"@
+        }
+        
+        # Show Entra ID P2 violations
+        if ($UserLicenseResults.Status.InvalidEntraIDP2Users.Count -gt 0) {
+            $html += @"
+                <h3 style="color: #dc2626; margin-top: 20px;">⚠ COMPLIANCE VIOLATION - Entra ID P2 License without ADM:</h3>
+                <p style="color: #dc2626; margin-bottom: 10px;">Users with Azure Active Directory Premium P2 license should have 'ADM' in their DisplayName:</p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Display Name</th>
+                            <th>User Principal Name</th>
+                            <th>Entra ID P2</th>
+                            <th>All Assigned Licenses</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"@
+            foreach ($user in $UserLicenseResults.Status.InvalidEntraIDP2Users) {
+                $licensesHtml = if ($user.Licenses.Count -gt 0) { 
+                    ($user.Licenses | ForEach-Object { 
+                        $licenseStyle = if ($_ -match "Premium P2") {
+                            "display:block; padding:2px 0; background:#fee2e2; margin:1px 0; padding-left:5px; border-left:2px solid #dc2626; font-weight:bold;"
+                        } else {
+                            "display:block; padding:2px 0; background:#f0f9ff; margin:1px 0; padding-left:5px; border-left:2px solid #0ea5e9;"
+                        }
+                        "<span style='$licenseStyle'>$_</span>"
+                    }) -join ''
+                } else { 
+                    '<em style="color:#999;">No licenses</em>' 
+                }
+                $html += @"
+                        <tr>
+                            <td><span class="status-missing">✗ INVALID</span></td>
+                            <td><strong>$($user.DisplayName)</strong></td>
+                            <td>$($user.UserPrincipalName)</td>
+                            <td style="color: #dc2626; font-weight: bold;">⚠ Has Entra ID P2</td>
+                            <td style="font-size:0.9em;">$licensesHtml</td>
+                        </tr>
+"@
+            }
+            $html += @"
+                    </tbody>
+                </table>
+"@
+        }
+        
+        # Show guest accounts (external users)
+        if ($UserLicenseResults.Status.GuestAccounts.Count -gt 0) {
+            $html += @"
+                <h3 style="margin-top: 20px; color: #06b6d4;">👥 Guest Accounts (External Users):</h3>
+                <p style="margin-bottom: 10px;">Users with #EXT# in their User Principal Name are external guest accounts:</p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Display Name</th>
+                            <th>User Principal Name</th>
+                            <th>Account Status</th>
+                            <th>Assigned Licenses</th>
+                            <th>Privileged Roles</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"@
+            foreach ($guest in $UserLicenseResults.Status.GuestAccounts | Sort-Object DisplayName) {
+                $accountStatus = if ($guest.AccountEnabled) { 
+                    '<span class="status-found">✓ Enabled</span>' 
+                } else { 
+                    '<span class="status-error">✗ Disabled</span>' 
+                }
+                
+                $licensesHtml = if ($guest.Licenses.Count -gt 0) { 
+                    ($guest.Licenses | ForEach-Object { 
+                        "<span style='display:block; padding:2px 0; background:#ecfeff; margin:1px 0; padding-left:5px; border-left:2px solid #06b6d4;'>$_</span>"
+                    }) -join ''
+                } else { 
+                    '<em style="color:#999;">No licenses</em>' 
+                }
+                
+                $rolesHtml = if ($guest.HasPrivilegedRole) {
+                    '<span style="color:#dc2626; font-weight:bold;">⚠ ' + ($guest.PrivilegedRoles -join ', ') + '</span>'
+                } else {
+                    '<em style="color:#999;">None</em>'
+                }
+                
+                $html += @"
+                        <tr>
+                            <td><strong>$($guest.DisplayName)</strong></td>
+                            <td style="font-size:0.9em; color:#666;">$($guest.UserPrincipalName)</td>
+                            <td>$accountStatus</td>
+                            <td style="font-size:0.9em;">$licensesHtml</td>
+                            <td>$rolesHtml</td>
+                        </tr>
+"@
+            }
+            $html += @"
+                    </tbody>
+                </table>
+                <p style="margin-top: 10px; color:#06b6d4; font-weight:bold;">Total guest accounts: $($UserLicenseResults.Status.GuestAccounts.Count)</p>
 "@
         }
         
@@ -4708,7 +4896,7 @@ if ($GUI) {
                                  (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0)) -and
                                  (-not $sharePointResults -or ($sharePointResults.Status.Compliant)) -and
                                  (-not $teamsResults -or ($teamsResults.Status.Compliant)) -and
-                                 (-not $userLicenseResults -or ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0))
+                                 (-not $userLicenseResults -or ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0 -and $userLicenseResults.Status.InvalidEntraIDP2Users.Count -eq 0))
                 
                 # Generate HTML report
                 if ($exportFormat -eq "HTML" -or $exportFormat -eq "Both") {
@@ -4992,7 +5180,7 @@ $overallStatus = ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Co
                  (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0)) -and
                  (-not $sharePointResults -or ($sharePointResults.Status.Compliant)) -and
                  (-not $teamsResults -or ($teamsResults.Status.Compliant)) -and
-                 (-not $userLicenseResults -or ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0))
+                 (-not $userLicenseResults -or ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0 -and $userLicenseResults.Status.InvalidEntraIDP2Users.Count -eq 0))
 
 Write-Host "  Overall Status: " -NoNewline -ForegroundColor White
 if ($overallStatus) {
