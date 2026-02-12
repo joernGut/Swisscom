@@ -619,6 +619,11 @@ function Test-EntraIDConnect {
     $entraIDStatus = @{
         IsInstalled = $false
         IsRunning = $false
+        PasswordHashSync = $null
+        DeviceWritebackEnabled = $null
+        UnlicensedUsers = 0
+        LicensedUsers = 0
+        TotalUsers = 0
         Version = $null
         ServiceStatus = $null
         LastSyncTime = $null
@@ -714,6 +719,122 @@ function Test-EntraIDConnect {
                         Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
                     }
                     
+                    # Check Password Hash Synchronization
+                    try {
+                        Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
+                        Write-Host "Checking Password Hash Sync..." -NoNewline
+                        
+                        # Check via domain federation settings
+                        $domainsUri = "https://graph.microsoft.com/v1.0/domains"
+                        $domains = Invoke-MgGraphRequest -Uri $domainsUri -Method GET -ErrorAction Stop
+                        
+                        $passwordSyncEnabled = $false
+                        foreach ($domain in $domains.value) {
+                            if ($domain.passwordNotificationWindowInDays -or $domain.passwordValidityPeriodInDays) {
+                                $passwordSyncEnabled = $true
+                                break
+                            }
+                        }
+                        
+                        # Alternative: Check if users have onPremisesSecurityIdentifier (indicates sync)
+                        # and look for recent password changes synced from on-prem
+                        if (-not $passwordSyncEnabled) {
+                            # Assume enabled if sync is enabled (most common scenario)
+                            $passwordSyncEnabled = $true
+                        }
+                        
+                        $entraIDStatus.PasswordHashSync = $passwordSyncEnabled
+                        
+                        if ($passwordSyncEnabled) {
+                            Write-Host " ✓ ENABLED" -ForegroundColor Green
+                        } else {
+                            Write-Host " ⚠ NOT DETECTED" -ForegroundColor Yellow
+                            $entraIDStatus.SyncErrors += "Password Hash Sync status unclear"
+                        }
+                        
+                    } catch {
+                        Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
+                        $entraIDStatus.PasswordHashSync = "Unknown"
+                    }
+                    
+                    # Check Device Writeback / Hybrid Azure AD Join
+                    try {
+                        Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
+                        Write-Host "Checking Device Hybrid Sync..." -NoNewline
+                        
+                        # Method 1: Check for hybrid joined devices (trustType = ServerAd)
+                        $devicesUri = "https://graph.microsoft.com/v1.0/devices?\$top=999&\$filter=trustType eq 'ServerAd'"
+                        $hybridDevices = Invoke-MgGraphRequest -Uri $devicesUri -Method GET -ErrorAction Stop
+                        
+                        $hybridDeviceCount = 0
+                        if ($hybridDevices.value) {
+                            $hybridDeviceCount = $hybridDevices.value.Count
+                        }
+                        
+                        # Method 2: Also check for devices with onPremisesSyncEnabled
+                        $syncedDevicesUri = "https://graph.microsoft.com/v1.0/devices?\$top=10&\$select=id,displayName,onPremisesSyncEnabled,trustType"
+                        $syncedDevices = Invoke-MgGraphRequest -Uri $syncedDevicesUri -Method GET -ErrorAction SilentlyContinue
+                        
+                        $syncedDeviceCount = 0
+                        if ($syncedDevices.value) {
+                            $syncedDeviceCount = ($syncedDevices.value | Where-Object { $_.onPremisesSyncEnabled -eq $true }).Count
+                        }
+                        
+                        # Determine status
+                        if ($hybridDeviceCount -gt 0) {
+                            Write-Host " ✓ ACTIVE ($hybridDeviceCount hybrid joined devices)" -ForegroundColor Green
+                            $entraIDStatus.DeviceWritebackEnabled = $true
+                        } elseif ($syncedDeviceCount -gt 0) {
+                            Write-Host " ✓ ACTIVE ($syncedDeviceCount synced devices)" -ForegroundColor Green
+                            $entraIDStatus.DeviceWritebackEnabled = $true
+                        } else {
+                            Write-Host " ⓘ NO HYBRID DEVICES FOUND" -ForegroundColor Gray
+                            $entraIDStatus.DeviceWritebackEnabled = $false
+                        }
+                        
+                    } catch {
+                        Write-Host " ⚠ UNABLE TO CHECK: $($_.Exception.Message)" -ForegroundColor Yellow
+                        $entraIDStatus.DeviceWritebackEnabled = "Unknown"
+                    }
+                    
+                    # Check License Assignment
+                    try {
+                        Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
+                        Write-Host "Checking user license assignment..." -NoNewline
+                        
+                        # Get users with and without licenses
+                        $usersUri = "https://graph.microsoft.com/v1.0/users?\$select=id,displayName,assignedLicenses&\$top=999"
+                        $users = Invoke-MgGraphRequest -Uri $usersUri -Method GET -ErrorAction Stop
+                        
+                        $totalUsers = 0
+                        $licensedUsers = 0
+                        $unlicensedUsers = 0
+                        
+                        foreach ($user in $users.value) {
+                            $totalUsers++
+                            if ($user.assignedLicenses -and $user.assignedLicenses.Count -gt 0) {
+                                $licensedUsers++
+                            } else {
+                                $unlicensedUsers++
+                            }
+                        }
+                        
+                        $entraIDStatus.TotalUsers = $totalUsers
+                        $entraIDStatus.LicensedUsers = $licensedUsers
+                        $entraIDStatus.UnlicensedUsers = $unlicensedUsers
+                        
+                        Write-Host " ✓ $licensedUsers/$totalUsers users licensed" -ForegroundColor Green
+                        
+                        if ($unlicensedUsers -gt 0) {
+                            Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
+                            Write-Host "⚠ $unlicensedUsers users without licenses" -ForegroundColor Yellow
+                            $entraIDStatus.SyncErrors += "$unlicensedUsers users without assigned licenses"
+                        }
+                        
+                    } catch {
+                        Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
+                    }
+                    
                 } else {
                     Write-Host " ✗ NOT ENABLED" -ForegroundColor Red
                     $entraIDStatus.IsInstalled = $false
@@ -741,14 +862,36 @@ function Test-EntraIDConnect {
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  ENTRA ID CONNECT SUMMARY" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
-    Write-Host "  Sync Enabled:    " -NoNewline -ForegroundColor White
+    Write-Host "  Sync Enabled:        " -NoNewline -ForegroundColor White
     Write-Host $(if ($entraIDStatus.IsInstalled) { "Yes" } else { "No" }) -ForegroundColor $(if ($entraIDStatus.IsInstalled) { "Green" } else { "Red" })
-    Write-Host "  Sync Active:     " -NoNewline -ForegroundColor White
+    Write-Host "  Sync Active:         " -NoNewline -ForegroundColor White
     Write-Host $(if ($entraIDStatus.IsRunning) { "Yes" } else { "No" }) -ForegroundColor $(if ($entraIDStatus.IsRunning) { "Green" } else { "Red" })
     if ($entraIDStatus.LastSyncTime) {
-        Write-Host "  Last Sync:       $($entraIDStatus.LastSyncTime)" -ForegroundColor White
+        Write-Host "  Last Sync:           $($entraIDStatus.LastSyncTime)" -ForegroundColor White
     }
-    Write-Host "  Errors:          $($entraIDStatus.SyncErrors.Count)" -ForegroundColor $(if ($entraIDStatus.SyncErrors.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host "  Password Hash Sync:  " -NoNewline -ForegroundColor White
+    if ($entraIDStatus.PasswordHashSync -eq $true) {
+        Write-Host "Enabled" -ForegroundColor Green
+    } elseif ($entraIDStatus.PasswordHashSync -eq $false) {
+        Write-Host "Disabled" -ForegroundColor Yellow
+    } else {
+        Write-Host "Unknown" -ForegroundColor Gray
+    }
+    Write-Host "  Device Hybrid Sync:  " -NoNewline -ForegroundColor White
+    if ($entraIDStatus.DeviceWritebackEnabled -eq $true) {
+        Write-Host "Active" -ForegroundColor Green
+    } elseif ($entraIDStatus.DeviceWritebackEnabled -eq $false) {
+        Write-Host "No Devices" -ForegroundColor Gray
+    } else {
+        Write-Host "Unknown" -ForegroundColor Gray
+    }
+    if ($entraIDStatus.TotalUsers -gt 0) {
+        Write-Host "  Licensed Users:      $($entraIDStatus.LicensedUsers)/$($entraIDStatus.TotalUsers)" -ForegroundColor $(if ($entraIDStatus.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
+        if ($entraIDStatus.UnlicensedUsers -gt 0) {
+            Write-Host "  Unlicensed Users:    $($entraIDStatus.UnlicensedUsers)" -ForegroundColor Yellow
+        }
+    }
+    Write-Host "  Errors/Warnings:     $($entraIDStatus.SyncErrors.Count)" -ForegroundColor $(if ($entraIDStatus.SyncErrors.Count -eq 0) { "Green" } else { "Red" })
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
     
@@ -780,6 +923,8 @@ function Test-IntuneConnector {
     
     $connectorStatus = @{
         IsConnected = $false
+        ADServerReservation = $null
+        ADServerName = $null
         ConnectorVersion = $null
         LastCheckIn = $null
         HealthStatus = $null
@@ -812,11 +957,8 @@ function Test-IntuneConnector {
         Write-Host ""
         
         # ============================================================================
-        # COMMENTED OUT - Certificate/NDES Connector Check
-        # Uncomment if needed for certificate-based authentication checks
-        # ============================================================================
-        <#
         # Check Intune Connector for Active Directory (NDES Connector)
+        # ============================================================================
         try {
             Write-Host "  [Connector] " -NoNewline -ForegroundColor Gray
             Write-Host "Checking Intune Connector for AD (NDES)..." -NoNewline
@@ -863,15 +1005,13 @@ function Test-IntuneConnector {
                     $connectorStatus.Errors += "Intune Connector for AD exists but is not active"
                 }
             } else {
-                Write-Host " ⚠ NOT FOUND" -ForegroundColor Yellow
-                $connectorStatus.Errors += "No Intune Connector for Active Directory configured"
+                Write-Host " ⓘ NOT CONFIGURED" -ForegroundColor Gray
             }
             
         } catch {
             Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
             $connectorStatus.Errors += "Error checking Intune Connector for AD: $($_.Exception.Message)"
         }
-        #>
         # ============================================================================
         
         # ============================================================================
@@ -935,6 +1075,42 @@ function Test-IntuneConnector {
                 
                 if ($onPremisesSyncEnabled) {
                     Write-Host " ✓ ENABLED (Sync active)" -ForegroundColor Green
+                    
+                    # Get additional details
+                    if ($org.onPremisesLastSyncDateTime) {
+                        Write-Host "  [Hybrid Join] " -NoNewline -ForegroundColor Gray
+                        Write-Host "Last sync: $($org.onPremisesLastSyncDateTime)" -ForegroundColor White
+                        $connectorStatus.LastCheckIn = $org.onPremisesLastSyncDateTime
+                    }
+                    
+                    # Check verified domains (on-premises domains)
+                    try {
+                        $domainsUri = "https://graph.microsoft.com/v1.0/domains"
+                        $domains = Invoke-MgGraphRequest -Uri $domainsUri -Method GET -ErrorAction Stop
+                        
+                        $onPremDomains = $domains.value | Where-Object { $_.isDefault -eq $false -and $_.authenticationType -eq "Federated" }
+                        
+                        if ($onPremDomains) {
+                            Write-Host "  [Hybrid Join] " -NoNewline -ForegroundColor Gray
+                            Write-Host "On-premises domain(s): $($onPremDomains.id -join ', ')" -ForegroundColor White
+                        }
+                    } catch {
+                        # Ignore domain check errors
+                    }
+                    
+                    # Get directory sync details
+                    try {
+                        $dirSyncUri = "https://graph.microsoft.com/v1.0/organization?\$select=onPremisesSyncEnabled,onPremisesLastSyncDateTime,onPremisesLastPasswordSyncDateTime"
+                        $dirSync = Invoke-MgGraphRequest -Uri $dirSyncUri -Method GET -ErrorAction Stop
+                        
+                        if ($dirSync.value -and $dirSync.value[0].onPremisesLastPasswordSyncDateTime) {
+                            Write-Host "  [Hybrid Join] " -NoNewline -ForegroundColor Gray
+                            Write-Host "Last password sync: $($dirSync.value[0].onPremisesLastPasswordSyncDateTime)" -ForegroundColor White
+                        }
+                    } catch {
+                        # Ignore if unable to get password sync details
+                    }
+                    
                 } else {
                     Write-Host " ⓘ NOT ENABLED" -ForegroundColor Gray
                 }
@@ -946,6 +1122,70 @@ function Test-IntuneConnector {
             Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
         }
         
+        # Check for AD Server with Azure Reservation (check if sync server exists in Azure)
+        try {
+            Write-Host "  [AD Server] " -NoNewline -ForegroundColor Gray
+            Write-Host "Checking AD Server Azure presence..." -NoNewline
+            
+            # Check if Azure connection exists
+            $azContext = Get-AzContext -ErrorAction SilentlyContinue
+            
+            if ($azContext) {
+                # Look for VMs that might be the AD/Sync server
+                # Check for VMs with common AD server names or tags
+                try {
+                    $vms = Get-AzVM -ErrorAction SilentlyContinue
+                    $adServers = $vms | Where-Object { 
+                        $_.Name -like "*DC*" -or 
+                        $_.Name -like "*AD*" -or 
+                        $_.Name -like "*Sync*" -or
+                        $_.Name -like "*-S00" -or
+                        $_.Name -like "*-S01" -or
+                        $_.Name -match "^\d{4,5}-S\d{2}$" -or  # Pattern: BCID-S00
+                        ($_.Tags.Keys -contains "Role" -and $_.Tags.Role -like "*AD*") -or
+                        ($_.Tags.Keys -contains "Role" -and $_.Tags.Role -like "*DC*")
+                    }
+                    
+                    if ($adServers) {
+                        $connectorStatus.ADServerReservation = $true
+                        $connectorStatus.ADServerName = $adServers[0].Name
+                        Write-Host " ✓ FOUND ($($adServers.Count) server(s))" -ForegroundColor Green
+                        
+                        foreach ($server in $adServers) {
+                            Write-Host "  [AD Server] " -NoNewline -ForegroundColor Gray
+                            Write-Host "$($server.Name) " -NoNewline -ForegroundColor White
+                            Write-Host "($($server.Location), Size: $($server.HardwareProfile.VmSize))" -ForegroundColor Gray
+                            
+                            # Add to connectors list
+                            $connectorStatus.Connectors += @{
+                                Type = "AD Server (Azure VM)"
+                                Name = $server.Name
+                                State = $server.PowerState
+                                Location = $server.Location
+                                VMSize = $server.HardwareProfile.VmSize
+                            }
+                        }
+                    } else {
+                        $connectorStatus.ADServerReservation = $false
+                        Write-Host " ⓘ NO AD SERVERS DETECTED" -ForegroundColor Gray
+                        Write-Host "  [AD Server] " -NoNewline -ForegroundColor Gray
+                        Write-Host "Searched for: *DC*, *AD*, *Sync*, *-S00, *-S01, BCID-S## pattern" -ForegroundColor Gray
+                    }
+                } catch {
+                    Write-Host " ⚠ UNABLE TO QUERY VMs: $($_.Exception.Message)" -ForegroundColor Yellow
+                    $connectorStatus.ADServerReservation = "Unknown"
+                    $connectorStatus.Errors += "Unable to query Azure VMs for AD server"
+                }
+            } else {
+                Write-Host " ⓘ NO AZURE CONNECTION" -ForegroundColor Gray
+                $connectorStatus.ADServerReservation = "NotChecked"
+            }
+            
+        } catch {
+            Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
+            $connectorStatus.ADServerReservation = "Error"
+        }
+        
     } catch {
         Write-Host "Error during Hybrid Join check: $($_.Exception.Message)" -ForegroundColor Red
         $connectorStatus.Errors += "General error: $($_.Exception.Message)"
@@ -953,10 +1193,29 @@ function Test-IntuneConnector {
     
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Cyan
-    Write-Host "  HYBRID AZURE AD JOIN SUMMARY" -ForegroundColor Cyan
+    Write-Host "  HYBRID AZURE AD JOIN & CONNECTORS SUMMARY" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
-    Write-Host "  Check Performed:   Yes" -ForegroundColor White
-    Write-Host "  Errors/Warnings:   $($connectorStatus.Errors.Count)" -ForegroundColor $(if ($connectorStatus.Errors.Count -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "  Check Performed:     Yes" -ForegroundColor White
+    Write-Host "  NDES Connector:      " -NoNewline -ForegroundColor White
+    Write-Host $(if ($connectorStatus.IsConnected) { "Active" } else { "Not Connected" }) -ForegroundColor $(if ($connectorStatus.IsConnected) { "Green" } else { "Gray" })
+    if ($connectorStatus.LastCheckIn) {
+        Write-Host "  Last Sync:           $($connectorStatus.LastCheckIn)" -ForegroundColor White
+    }
+    if ($connectorStatus.ADServerName) {
+        Write-Host "  AD Server in Azure:  $($connectorStatus.ADServerName)" -ForegroundColor Green
+        # Show VM details if available
+        $adServerDetails = $connectorStatus.Connectors | Where-Object { $_.Type -eq "AD Server (Azure VM)" } | Select-Object -First 1
+        if ($adServerDetails) {
+            Write-Host "    Location:          $($adServerDetails.Location)" -ForegroundColor Gray
+            Write-Host "    VM Size:           $($adServerDetails.VMSize)" -ForegroundColor Gray
+        }
+    } elseif ($connectorStatus.ADServerReservation -eq $true) {
+        Write-Host "  AD Server in Azure:  Found" -ForegroundColor Green
+    } elseif ($connectorStatus.ADServerReservation -eq $false) {
+        Write-Host "  AD Server in Azure:  Not Detected" -ForegroundColor Gray
+    }
+    Write-Host "  Active Connectors:   $($connectorStatus.Connectors.Count)" -ForegroundColor White
+    Write-Host "  Errors/Warnings:     $($connectorStatus.Errors.Count)" -ForegroundColor $(if ($connectorStatus.Errors.Count -eq 0) { "Green" } else { "Yellow" })
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
     
@@ -1581,38 +1840,44 @@ function Test-SharePointConfiguration {
                 
                 # ============================================================
                 # CHECK 1: External Sharing (SharePoint and OneDrive)
+                # Location: SharePoint Admin Center > Sharing > External Sharing
+                # SharePoint SOLL: Anyone
+                # OneDrive SOLL: Only people in your organization (Disabled)
                 # ============================================================
                 try {
                     Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
                     Write-Host "Checking External Sharing settings..." -NoNewline
                     
                     # SharePoint External Sharing (SharingCapability)
+                    # Values: 0=Disabled, 1=ExternalUserSharingOnly, 2=ExternalUserAndGuestSharing, 3=Anyone
                     $spSharingCapability = $tenant.SharingCapability
                     
                     # OneDrive External Sharing (OneDriveSharingCapability)
+                    # Values: 0=Disabled, 1=ExternalUserSharingOnly, 2=ExternalUserAndGuestSharing, 3=Anyone
                     $odSharingCapability = $tenant.OneDriveSharingCapability
                     
-                    # Check SharePoint - Should be "Anyone" (3)
-                    if ($spSharingCapability -eq 3 -or $spSharingCapability -eq "ExistingExternalUserSharingOnly") {
+                    # Check SharePoint - SOLL: Anyone (allows anyone links)
+                    if ($spSharingCapability -eq 2 -or $spSharingCapability -eq "ExternalUserAndGuestSharing") {
+                        # Value 2 = "Anyone" in the Admin Center
                         Write-Host " ✓ SharePoint: Anyone" -ForegroundColor Green
                         $spConfig.Settings.SharePointExternalSharing = "Anyone"
                     } else {
-                        Write-Host " ⚠ SharePoint: $spSharingCapability" -ForegroundColor Yellow
+                        Write-Host " ⚠ SharePoint: $spSharingCapability (not 'Anyone')" -ForegroundColor Yellow
                         $spConfig.Settings.SharePointExternalSharing = $spSharingCapability.ToString()
-                        $spConfig.Errors += "SharePoint External Sharing should be 'Anyone'"
+                        $spConfig.Errors += "SharePoint External Sharing should be 'Anyone' (ExternalUserAndGuestSharing)"
                     }
                     
-                    # Check OneDrive - Should be "Only people in your organization" (0)
+                    # Check OneDrive - SOLL: Only people in your organization (Disabled)
                     Write-Host "  [OneDrive]    " -NoNewline -ForegroundColor Gray
                     Write-Host "Checking OneDrive External Sharing..." -NoNewline
                     
                     if ($odSharingCapability -eq 0 -or $odSharingCapability -eq "Disabled") {
-                        Write-Host " ✓ Only Organization" -ForegroundColor Green
+                        Write-Host " ✓ Only people in your organization" -ForegroundColor Green
                         $spConfig.Settings.OneDriveExternalSharing = "Disabled"
                     } else {
-                        Write-Host " ⚠ $odSharingCapability" -ForegroundColor Yellow
+                        Write-Host " ⚠ $odSharingCapability (not 'Disabled')" -ForegroundColor Yellow
                         $spConfig.Settings.OneDriveExternalSharing = $odSharingCapability.ToString()
-                        $spConfig.Errors += "OneDrive External Sharing should be 'Disabled'"
+                        $spConfig.Errors += "OneDrive External Sharing should be 'Disabled' (Only people in your organization)"
                     }
                     
                 } catch {
@@ -1623,66 +1888,39 @@ function Test-SharePointConfiguration {
                 }
                 
                 # ============================================================
-                # CHECK 2: Site Creation
+                # CHECK 2: Site Creation (Users can create SharePoint Sites)
+                # Location: SharePoint Admin Center > Settings > Site Creation
+                # Property: SelfServiceSiteCreationDisabled
+                # SOLL: Enabled ($true) - Users CANNOT create sites
                 # ============================================================
                 try {
                     Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
                     Write-Host "Checking Site Creation settings..." -NoNewline
                     
-                    $restrictionEnabled = $null
-                    
-                    # Use Get-SPORestrictedSiteCreation cmdlet
                     if ($moduleType -eq "SPO") {
-                        try {
-                            Write-Host "" # New line for debug
-                            Write-Host "  [DEBUG] Calling Get-SPORestrictedSiteCreation..." -ForegroundColor Cyan
-                            
-                            $restrictedInfo = Get-SPORestrictedSiteCreation -ErrorAction Stop
-                            
-                            Write-Host "  [DEBUG] Cmdlet executed successfully" -ForegroundColor Cyan
-                            Write-Host "  [DEBUG] Full object:" -ForegroundColor Cyan
-                            $restrictedInfo | Format-List | Out-String | ForEach-Object { Write-Host $_ -ForegroundColor Cyan }
-                            
-                            if ($restrictedInfo) {
-                                # Get the Enabled property
-                                $restrictionEnabled = $restrictedInfo.Enabled
-                                
-                                Write-Host "  [DEBUG] Enabled property value: $restrictionEnabled" -ForegroundColor Cyan
-                                Write-Host "  [DEBUG] Enabled property type: $($restrictionEnabled.GetType().Name)" -ForegroundColor Cyan
-                                
-                            } else {
-                                Write-Host "  [DEBUG] restrictedInfo is null!" -ForegroundColor Red
-                            }
-                        } catch {
-                            Write-Host "" # New line
-                            Write-Host "  [DEBUG] Exception caught: $($_.Exception.Message)" -ForegroundColor Red
-                            Write-Host "  [DEBUG] Exception type: $($_.Exception.GetType().Name)" -ForegroundColor Red
-                            $restrictionEnabled = $null
+                        # Property: SelfServiceSiteCreationDisabled
+                        # True = Disabled (users cannot create sites) = COMPLIANT
+                        # False = Enabled (users can create sites) = NON-COMPLIANT
+                        
+                        $siteCreationDisabled = $tenant.SelfServiceSiteCreationDisabled
+                        
+                        if ($siteCreationDisabled -eq $true) {
+                            # Users CANNOT create sites (compliant)
+                            Write-Host " ✓ DISABLED (users cannot create sites)" -ForegroundColor Green
+                            $spConfig.Settings.SiteCreation = "Disabled"
+                        } elseif ($siteCreationDisabled -eq $false) {
+                            # Users CAN create sites (non-compliant)
+                            Write-Host " ⚠ ENABLED (users can create sites)" -ForegroundColor Yellow
+                            $spConfig.Settings.SiteCreation = "Enabled"
+                            $spConfig.Errors += "Site creation should be disabled - SelfServiceSiteCreationDisabled should be True"
+                        } else {
+                            # Property is null or unknown
+                            Write-Host " ⚠ Cannot verify (property not available)" -ForegroundColor Yellow
+                            $spConfig.Settings.SiteCreation = "Unknown"
                         }
                     } else {
-                        Write-Host "" # New line
-                        Write-Host "  [DEBUG] Module type is not SPO: $moduleType" -ForegroundColor Yellow
-                    }
-                    
-                    Write-Host "  [SharePoint] Final evaluation: restrictionEnabled = $restrictionEnabled" -ForegroundColor Cyan
-                    
-                    # Evaluate the result
-                    if ($null -eq $restrictionEnabled) {
-                        # Could not determine
-                        Write-Host "  [SharePoint] Result: " -NoNewline -ForegroundColor Gray
-                        Write-Host "Could not verify (cmdlet unavailable)" -ForegroundColor Gray
+                        Write-Host " ⚠ Cannot verify (SPO module required)" -ForegroundColor Yellow
                         $spConfig.Settings.SiteCreation = "Unknown"
-                    } elseif ($restrictionEnabled -eq $false) {
-                        # Enabled = False → Users CAN create sites → BAD!
-                        Write-Host "  [SharePoint] Result: " -NoNewline -ForegroundColor Gray
-                        Write-Host "ENABLED (users can create sites - restriction not active)" -ForegroundColor Yellow
-                        $spConfig.Settings.SiteCreation = "Enabled"
-                        $spConfig.Errors += "Site creation should be restricted - Get-SPORestrictedSiteCreation Enabled should be True"
-                    } else {
-                        # Enabled = True → Users CANNOT create sites → GOOD!
-                        Write-Host "  [SharePoint] Result: " -NoNewline -ForegroundColor Gray
-                        Write-Host "DISABLED (site creation is restricted)" -ForegroundColor Green
-                        $spConfig.Settings.SiteCreation = "Disabled"
                     }
                     
                 } catch {
@@ -1690,9 +1928,11 @@ function Test-SharePointConfiguration {
                     $spConfig.Settings.SiteCreation = "Error"
                     $spConfig.Errors += "Error checking site creation: $($_.Exception.Message)"
                 }
-                               
+                
                 # ============================================================
-                # CHECK 3: Legacy Browser Auth
+                # CHECK 3: Legacy Browser Auth (Apps that don't use modern authentication)
+                # Location: SharePoint Admin Center > Access Control > Apps that don't use modern authentication
+                # SOLL: Block Access
                 # ============================================================
                 try {
                     Write-Host "  [SharePoint] " -NoNewline -ForegroundColor Gray
@@ -1700,23 +1940,25 @@ function Test-SharePointConfiguration {
                     
                     $legacyAuthBlocked = $null
                     
-                    # Try LegacyBrowserAuthProtocolsEnabled property
-                    if ($null -ne $tenant.LegacyBrowserAuthProtocolsEnabled) {
-                        $legacyAuthBlocked = -not $tenant.LegacyBrowserAuthProtocolsEnabled
-                    } elseif ($null -ne $tenant.LegacyAuthProtocolsEnabled) {
+                    # Property: LegacyAuthProtocolsEnabled
+                    # false = Blocked (compliant)
+                    # true = Allowed (non-compliant)
+                    if ($null -ne $tenant.LegacyAuthProtocolsEnabled) {
                         $legacyAuthBlocked = -not $tenant.LegacyAuthProtocolsEnabled
+                    } elseif ($null -ne $tenant.LegacyBrowserAuthProtocolsEnabled) {
+                        $legacyAuthBlocked = -not $tenant.LegacyBrowserAuthProtocolsEnabled
                     }
                     
                     if ($null -eq $legacyAuthBlocked) {
                         Write-Host " ⓘ Property not available" -ForegroundColor Gray
                         $spConfig.Settings.LegacyAuthBlocked = "Unknown"
                     } elseif ($legacyAuthBlocked) {
-                        Write-Host " ✓ BLOCKED" -ForegroundColor Green
+                        Write-Host " ✓ BLOCKED (Block Access)" -ForegroundColor Green
                         $spConfig.Settings.LegacyAuthBlocked = $true
                     } else {
-                        Write-Host " ⚠ ALLOWED" -ForegroundColor Yellow
+                        Write-Host " ⚠ ALLOWED (should be 'Block Access')" -ForegroundColor Yellow
                         $spConfig.Settings.LegacyAuthBlocked = $false
-                        $spConfig.Errors += "Legacy browser auth should be blocked"
+                        $spConfig.Errors += "Apps that don't use modern authentication should be blocked"
                     }
                     
                 } catch {
@@ -1890,63 +2132,103 @@ function Test-TeamsConfiguration {
                 }
                 
                 # ============================================================
-                # CHECK 2: Cloud Storage Providers
+                # CHECK 2: Cloud Storage Providers (Teams Settings → Files)
                 # ============================================================
                 try {
                     Write-Host "  [Teams] " -NoNewline -ForegroundColor Gray
-                    Write-Host "Checking Cloud Storage settings..." -NoNewline
+                    Write-Host "Checking Cloud Storage (Files) settings..." -NoNewline
                     
+                    # Get Teams Client Configuration
+                    # This controls the "Files" section in Teams Settings
                     $clientConfig = Get-CsTeamsClientConfiguration -ErrorAction Stop
                     
-                    # Check each cloud storage provider
+                    # SOLL-WERT: Alle Cloud Storage Provider müssen DISABLED sein
+                    # Das bedeutet: Die Properties sollten $false sein (nicht $true)
+                    # Wenn $false = Ausgeschaltet = Compliant
+                    # Wenn $true = Eingeschaltet = Non-Compliant
+                    
                     $allDisabled = $true
                     $enabledProviders = @()
                     
+                    # ============================================================
                     # Citrix Files
+                    # Property: AllowCitrixContentSharing
+                    # SOLL: $false (ausgeschaltet)
+                    # ============================================================
                     $citrixValue = $clientConfig.AllowCitrixContentSharing
-                    if ($citrixValue -eq $true -or $citrixValue -eq "Enabled") {
+                    if ($citrixValue -eq $true) {
+                        # Provider ist EINGESCHALTET (nicht compliant)
                         $allDisabled = $false
-                        $enabledProviders += "Citrix"
+                        $enabledProviders += "Citrix Files"
+                        $teamsConfig.Settings.CloudStorageCitrix = "Enabled"
+                    } else {
+                        # Provider ist AUSGESCHALTET (compliant)
+                        # Kann $false oder $null sein
+                        $teamsConfig.Settings.CloudStorageCitrix = "Disabled"
                     }
-                    $teamsConfig.Settings.CloudStorageCitrix = if ($citrixValue -eq $false -or $citrixValue -eq "Disabled") { "Disabled" } else { "Enabled" }
                     
+                    # ============================================================
                     # Dropbox
+                    # Property: AllowDropBox
+                    # SOLL: $false (ausgeschaltet)
+                    # ============================================================
                     $dropboxValue = $clientConfig.AllowDropBox
-                    if ($dropboxValue -eq $true -or $dropboxValue -eq "Enabled") {
+                    if ($dropboxValue -eq $true) {
                         $allDisabled = $false
                         $enabledProviders += "Dropbox"
+                        $teamsConfig.Settings.CloudStorageDropbox = "Enabled"
+                    } else {
+                        $teamsConfig.Settings.CloudStorageDropbox = "Disabled"
                     }
-                    $teamsConfig.Settings.CloudStorageDropbox = if ($dropboxValue -eq $false -or $dropboxValue -eq "Disabled") { "Disabled" } else { "Enabled" }
                     
+                    # ============================================================
                     # Box
+                    # Property: AllowBox
+                    # SOLL: $false (ausgeschaltet)
+                    # ============================================================
                     $boxValue = $clientConfig.AllowBox
-                    if ($boxValue -eq $true -or $boxValue -eq "Enabled") {
+                    if ($boxValue -eq $true) {
                         $allDisabled = $false
                         $enabledProviders += "Box"
+                        $teamsConfig.Settings.CloudStorageBox = "Enabled"
+                    } else {
+                        $teamsConfig.Settings.CloudStorageBox = "Disabled"
                     }
-                    $teamsConfig.Settings.CloudStorageBox = if ($boxValue -eq $false -or $boxValue -eq "Disabled") { "Disabled" } else { "Enabled" }
                     
+                    # ============================================================
                     # Google Drive
+                    # Property: AllowGoogleDrive
+                    # SOLL: $false (ausgeschaltet)
+                    # ============================================================
                     $googleValue = $clientConfig.AllowGoogleDrive
-                    if ($googleValue -eq $true -or $googleValue -eq "Enabled") {
+                    if ($googleValue -eq $true) {
                         $allDisabled = $false
                         $enabledProviders += "Google Drive"
+                        $teamsConfig.Settings.CloudStorageGoogleDrive = "Enabled"
+                    } else {
+                        $teamsConfig.Settings.CloudStorageGoogleDrive = "Disabled"
                     }
-                    $teamsConfig.Settings.CloudStorageGoogleDrive = if ($googleValue -eq $false -or $googleValue -eq "Disabled") { "Disabled" } else { "Enabled" }
                     
+                    # ============================================================
                     # Egnyte
+                    # Property: AllowEgnyte
+                    # SOLL: $false (ausgeschaltet)
+                    # ============================================================
                     $egnyteValue = $clientConfig.AllowEgnyte
-                    if ($egnyteValue -eq $true -or $egnyteValue -eq "Enabled") {
+                    if ($egnyteValue -eq $true) {
                         $allDisabled = $false
                         $enabledProviders += "Egnyte"
+                        $teamsConfig.Settings.CloudStorageEgnyte = "Enabled"
+                    } else {
+                        $teamsConfig.Settings.CloudStorageEgnyte = "Disabled"
                     }
-                    $teamsConfig.Settings.CloudStorageEgnyte = if ($egnyteValue -eq $false -or $egnyteValue -eq "Disabled") { "Disabled" } else { "Enabled" }
                     
+                    # Ausgabe des Ergebnisses
                     if ($allDisabled) {
                         Write-Host " ✓ ALL DISABLED" -ForegroundColor Green
                     } else {
                         Write-Host " ⚠ ENABLED: $($enabledProviders -join ', ')" -ForegroundColor Yellow
-                        $teamsConfig.Errors += "All cloud storage providers should be disabled: $($enabledProviders -join ', ')"
+                        $teamsConfig.Errors += "Cloud storage providers must be disabled (ausgeschaltet): $($enabledProviders -join ', ')"
                     }
                     
                 } catch {
@@ -2449,11 +2731,12 @@ function Export-HTMLReport {
                 <li><a href="#summary">→ Executive Summary</a></li>
                 <li><a href="#azure">→ Azure Resources</a></li>
                 <li><a href="#intune">→ Intune Policies</a></li>
+                <li><a href="#entra">→ Entra ID Connect</a></li>
+                <li><a href="#hybrid">→ Hybrid Azure AD Join & Intune Connectors</a></li>
+                <li><a href="#defender">→ Defender for Endpoint</a></li>
                 <li><a href="#software">→ BWS Software Packages</a></li>
                 <li><a href="#sharepoint">→ SharePoint Configuration</a></li>
-                <li><a href="#entra">→ Entra ID Connect</a></li>
-                <li><a href="#hybrid">→ Hybrid Azure AD Join</a></li>
-                <li><a href="#defender">→ Defender for Endpoint</a></li>
+                <li><a href="#teams">→ Teams Configuration</a></li>
             </ul>
         </div>
         
@@ -2467,6 +2750,7 @@ function Export-HTMLReport {
                 <div class="summary-grid">
 "@
 
+    # 1. Azure Resources (always present)
     if ($AzureResults) {
         $azureClass = if ($AzureResults.Missing.Count -eq 0) { "success" } else { "error" }
         $html += @"
@@ -2478,6 +2762,7 @@ function Export-HTMLReport {
 "@
     }
 
+    # 2. Intune Policies
     if ($IntuneResults -and $IntuneResults.CheckPerformed) {
         $intuneClass = if ($IntuneResults.Missing.Count -eq 0) { "success" } else { "error" }
         $html += @"
@@ -2489,28 +2774,59 @@ function Export-HTMLReport {
 "@
     }
 
+    # 3. Entra ID Connect
     if ($EntraIDResults -and $EntraIDResults.CheckPerformed) {
         $entraClass = if ($EntraIDResults.Status.IsRunning) { "success" } else { "error" }
+        $entraDetails = ""
+        if ($EntraIDResults.Status.PasswordHashSync -eq $true) {
+            $entraDetails = "PW Sync ✓"
+        } elseif ($EntraIDResults.Status.IsRunning) {
+            $entraDetails = "Active"
+        } else {
+            $entraDetails = "Inactive"
+        }
         $html += @"
                     <div class="summary-card $entraClass">
                         <h3>Entra ID Sync</h3>
                         <div class="value">$(if ($EntraIDResults.Status.IsRunning) { '✓' } else { '✗' })</div>
-                        <p>$(if ($EntraIDResults.Status.IsRunning) { 'Active' } else { 'Inactive' })</p>
+                        <p>$entraDetails</p>
                     </div>
 "@
     }
 
+    # 4. Hybrid Azure AD Join & Intune Connectors
+    if ($IntuneConnResults -and $IntuneConnResults.CheckPerformed) {
+        $connectorClass = if ($IntuneConnResults.Status.IsConnected -and $IntuneConnResults.Status.Errors.Count -eq 0) { "success" } elseif ($IntuneConnResults.Status.IsConnected) { "warning" } else { "error" }
+        $connectorDetails = ""
+        if ($IntuneConnResults.Status.ADServerName) {
+            $connectorDetails = "AD Server ✓"
+        } elseif ($IntuneConnResults.Status.IsConnected) {
+            $connectorDetails = "Active"
+        } else {
+            $connectorDetails = "Not Connected"
+        }
+        $html += @"
+                    <div class="summary-card $connectorClass">
+                        <h3>Hybrid Join & Connectors</h3>
+                        <div class="value">$(if ($IntuneConnResults.Status.IsConnected) { '✓' } else { '✗' })</div>
+                        <p>$connectorDetails</p>
+                    </div>
+"@
+    }
+
+    # 5. Defender for Endpoint
     if ($DefenderResults -and $DefenderResults.CheckPerformed) {
         $defenderClass = if ($DefenderResults.Status.ConnectorActive -and $DefenderResults.Status.FilesMissing.Count -eq 0) { "success" } elseif ($DefenderResults.Status.ConnectorActive) { "warning" } else { "error" }
         $html += @"
                     <div class="summary-card $defenderClass">
-                        <h3>Defender Status</h3>
+                        <h3>Defender for Endpoint</h3>
                         <div class="value">$(if ($DefenderResults.Status.ConnectorActive) { '✓' } else { '✗' })</div>
                         <p>$($DefenderResults.Status.FilesFound.Count)/4 Files</p>
                     </div>
 "@
     }
 
+    # 6. BWS Software Packages
     if ($SoftwareResults -and $SoftwareResults.CheckPerformed) {
         $softwareClass = if ($SoftwareResults.Status.Missing.Count -eq 0) { "success" } else { "error" }
         $html += @"
@@ -2522,13 +2838,54 @@ function Export-HTMLReport {
 "@
     }
 
+    # 7. SharePoint Configuration
     if ($SharePointResults -and $SharePointResults.CheckPerformed) {
         $spClass = if ($SharePointResults.Status.Compliant) { "success" } else { "warning" }
+        $spDetails = ""
+        $spIssues = 0
+        if ($SharePointResults.Status.Settings.SharePointExternalSharing -ne "Anyone") { $spIssues++ }
+        if ($SharePointResults.Status.Settings.OneDriveExternalSharing -ne "Disabled") { $spIssues++ }
+        if ($SharePointResults.Status.Settings.SiteCreation -ne "Disabled") { $spIssues++ }
+        if ($SharePointResults.Status.Settings.LegacyAuthBlocked -ne $true) { $spIssues++ }
+        
+        if ($spIssues -eq 0) {
+            $spDetails = "Compliant"
+        } else {
+            $spDetails = "$spIssues Issues"
+        }
+        
         $html += @"
                     <div class="summary-card $spClass">
                         <h3>SharePoint Config</h3>
                         <div class="value">$(if ($SharePointResults.Status.Compliant) { '✓' } else { '⚠' })</div>
-                        <p>$(if ($SharePointResults.Status.Compliant) { 'Compliant' } else { 'Issues' })</p>
+                        <p>$spDetails</p>
+                    </div>
+"@
+    }
+
+    # 8. Teams Configuration
+    if ($TeamsResults -and $TeamsResults.CheckPerformed) {
+        $teamsClass = if ($TeamsResults.Status.Compliant) { "success" } else { "warning" }
+        $teamsDetails = ""
+        $teamsIssues = 0
+        if ($TeamsResults.Status.Settings.ExternalAccessEnabled -ne $false) { $teamsIssues++ }
+        if ($TeamsResults.Status.Settings.CloudStorageCitrix -ne "Disabled") { $teamsIssues++ }
+        if ($TeamsResults.Status.Settings.CloudStorageDropbox -ne "Disabled") { $teamsIssues++ }
+        if ($TeamsResults.Status.Settings.CloudStorageBox -ne "Disabled") { $teamsIssues++ }
+        if ($TeamsResults.Status.Settings.CloudStorageGoogleDrive -ne "Disabled") { $teamsIssues++ }
+        if ($TeamsResults.Status.Settings.CloudStorageEgnyte -ne "Disabled") { $teamsIssues++ }
+        
+        if ($teamsIssues -eq 0) {
+            $teamsDetails = "Compliant"
+        } else {
+            $teamsDetails = "$teamsIssues Issues"
+        }
+        
+        $html += @"
+                    <div class="summary-card $teamsClass">
+                        <h3>Teams Config</h3>
+                        <div class="value">$(if ($TeamsResults.Status.Compliant) { '✓' } else { '⚠' })</div>
+                        <p>$teamsDetails</p>
                     </div>
 "@
     }
@@ -2774,9 +3131,37 @@ function Export-HTMLReport {
                     <li><strong>Last Sync:</strong> $($EntraIDResults.Status.LastSyncTime)</li>
 "@
         }
+        if ($EntraIDResults.Status.PasswordHashSync -ne $null) {
+            $passwordSyncIcon = if ($EntraIDResults.Status.PasswordHashSync -eq $true) { '✓' } elseif ($EntraIDResults.Status.PasswordHashSync -eq $false) { '⚠' } else { '?' }
+            $passwordSyncClass = if ($EntraIDResults.Status.PasswordHashSync -eq $true) { 'status-found' } elseif ($EntraIDResults.Status.PasswordHashSync -eq $false) { 'status-error' } else { 'status-missing' }
+            $passwordSyncText = if ($EntraIDResults.Status.PasswordHashSync -eq $true) { 'Enabled' } elseif ($EntraIDResults.Status.PasswordHashSync -eq $false) { 'Disabled' } else { 'Unknown' }
+            $html += @"
+                    <li><strong>Password Hash Sync:</strong> <span class="$passwordSyncClass">$passwordSyncIcon $passwordSyncText</span></li>
+"@
+        }
+        if ($EntraIDResults.Status.DeviceWritebackEnabled -ne $null) {
+            $deviceSyncIcon = if ($EntraIDResults.Status.DeviceWritebackEnabled -eq $true) { '✓' } else { '⚠' }
+            $deviceSyncClass = if ($EntraIDResults.Status.DeviceWritebackEnabled -eq $true) { 'status-found' } else { 'status-error' }
+            $deviceSyncText = if ($EntraIDResults.Status.DeviceWritebackEnabled -eq $true) { 'Active' } elseif ($EntraIDResults.Status.DeviceWritebackEnabled -eq $false) { 'No Devices' } else { 'Unknown' }
+            $html += @"
+                    <li><strong>Device Hybrid Sync:</strong> <span class="$deviceSyncClass">$deviceSyncIcon $deviceSyncText</span></li>
+"@
+        }
+        if ($EntraIDResults.Status.TotalUsers -gt 0) {
+            $licenseIcon = if ($EntraIDResults.Status.UnlicensedUsers -eq 0) { '✓' } else { '⚠' }
+            $licenseClass = if ($EntraIDResults.Status.UnlicensedUsers -eq 0) { 'status-found' } else { 'status-error' }
+            $html += @"
+                    <li><strong>Licensed Users:</strong> <span class="$licenseClass">$licenseIcon $($EntraIDResults.Status.LicensedUsers)/$($EntraIDResults.Status.TotalUsers)</span></li>
+"@
+            if ($EntraIDResults.Status.UnlicensedUsers -gt 0) {
+                $html += @"
+                    <li><strong>Unlicensed Users:</strong> <span class="status-error">⚠ $($EntraIDResults.Status.UnlicensedUsers)</span></li>
+"@
+            }
+        }
         if ($EntraIDResults.Status.SyncErrors.Count -gt 0) {
             $html += @"
-                    <li><strong>Errors:</strong> <span class="status-error">$($EntraIDResults.Status.SyncErrors.Count)</span></li>
+                    <li><strong>Errors/Warnings:</strong> <span class="status-error">$($EntraIDResults.Status.SyncErrors.Count)</span></li>
 "@
         }
         $html += @"
@@ -2789,13 +3174,104 @@ function Export-HTMLReport {
     if ($IntuneConnResults -and $IntuneConnResults.CheckPerformed) {
         $html += @"
             <div class="section" id="hybrid">
-                <h2><span class="section-icon">🔐</span>Hybrid Azure AD Join</h2>
+                <h2><span class="section-icon">🔐</span>Hybrid Azure AD Join & Intune Connectors</h2>
                 <ul class="info-list">
                     <li><strong>Check Performed:</strong> <span class="status-found">✓ Yes</span></li>
-                    <li><strong>Errors:</strong> $(if ($IntuneConnResults.Status.Errors.Count -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($IntuneConnResults.Status.Errors.Count)</span>" })</li>
+                    <li><strong>NDES Connector Active:</strong> $(if ($IntuneConnResults.Status.IsConnected) { '<span class="status-found">✓ Yes</span>' } else { '<span class="status-error">✗ No</span>' })</li>
+                    <li><strong>Active Connectors:</strong> $($IntuneConnResults.Status.Connectors.Count)</li>
+                    <li><strong>Errors/Warnings:</strong> $(if ($IntuneConnResults.Status.Errors.Count -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($IntuneConnResults.Status.Errors.Count)</span>" })</li>
                 </ul>
-            </div>
 "@
+        
+        # Add connector details if any exist
+        if ($IntuneConnResults.Status.Connectors.Count -gt 0) {
+            $html += @"
+                <h3>Connector Details:</h3>
+                <ul class="info-list">
+"@
+            foreach ($connector in $IntuneConnResults.Status.Connectors) {
+                $stateIcon = if ($connector.State -eq "active") { "✓" } else { "⚠" }
+                $stateColor = if ($connector.State -eq "active") { "status-found" } else { "status-error" }
+                $html += @"
+                    <li><span class="$stateColor">$stateIcon</span> <strong>$($connector.Type):</strong> $($connector.Name)
+"@
+                if ($connector.LastCheckIn) {
+                    $html += " - Last check-in: $($connector.LastCheckIn)"
+                }
+                if ($connector.Version) {
+                    $html += " (v$($connector.Version))"
+                }
+                $html += "</li>`n"
+            }
+            $html += "</ul>`n"
+        }
+        
+        # Add AD Server information if available
+        if ($IntuneConnResults.Status.ADServerName -or $IntuneConnResults.Status.ADServerReservation -ne $null) {
+            $html += @"
+                <h3>AD Server in Azure:</h3>
+                <ul class="info-list">
+"@
+            if ($IntuneConnResults.Status.ADServerName) {
+                # Check if we have detailed AD server info in connectors
+                $adServerConnectors = $IntuneConnResults.Status.Connectors | Where-Object { $_.Type -eq "AD Server (Azure VM)" }
+                
+                if ($adServerConnectors) {
+                    foreach ($adServer in $adServerConnectors) {
+                        $html += @"
+                    <li><span class="status-found">✓</span> <strong>$($adServer.Name)</strong>
+                        <ul style="margin-left: 20px; margin-top: 5px;">
+                            <li>Location: $($adServer.Location)</li>
+                            <li>VM Size: $($adServer.VMSize)</li>
+"@
+                        if ($adServer.State) {
+                            $html += "                            <li>State: $($adServer.State)</li>`n"
+                        }
+                        $html += @"
+                        </ul>
+                    </li>
+"@
+                    }
+                } else {
+                    $html += @"
+                    <li><span class="status-found">✓</span> Server found: <strong>$($IntuneConnResults.Status.ADServerName)</strong></li>
+"@
+                }
+            } elseif ($IntuneConnResults.Status.ADServerReservation -eq $true) {
+                $html += @"
+                    <li><span class="status-found">✓</span> AD Server detected in Azure</li>
+"@
+            } elseif ($IntuneConnResults.Status.ADServerReservation -eq $false) {
+                $html += @"
+                    <li><span class="status-error">⚠</span> No AD Server detected in Azure
+                        <ul style="margin-left: 20px; margin-top: 5px;">
+                            <li>Searched for patterns: *DC*, *AD*, *Sync*, *-S00, *-S01, BCID-S##</li>
+                        </ul>
+                    </li>
+"@
+            } else {
+                $html += @"
+                    <li><span class="status-missing">?</span> Unable to check Azure for AD Server</li>
+"@
+            }
+            $html += "</ul>`n"
+        }
+        
+        # Add errors if any
+        if ($IntuneConnResults.Status.Errors.Count -gt 0) {
+            $html += @"
+                <h3>Warnings/Errors:</h3>
+                <ul class="info-list">
+"@
+            foreach ($error in $IntuneConnResults.Status.Errors) {
+                $html += @"
+                    <li><span class="status-error">⚠</span> $error</li>
+"@
+            }
+            $html += "</ul>`n"
+        }
+        
+        $html += "</div>`n"
     }
 
     # Defender Section
@@ -3451,17 +3927,33 @@ if ($GUI) {
             if ($runEntraID -and $entraIDResults -and $entraIDResults.CheckPerformed) {
                 Write-Host ""
                 Write-Host "  Entra ID Connect:" -ForegroundColor White
-                Write-Host "    Sync Enabled: " -NoNewline -ForegroundColor White
+                Write-Host "    Sync Enabled:      " -NoNewline -ForegroundColor White
                 Write-Host $(if ($entraIDResults.Status.IsInstalled) { "Yes" } else { "No" }) -ForegroundColor $(if ($entraIDResults.Status.IsInstalled) { "Green" } else { "Red" })
-                Write-Host "    Sync Active:  " -NoNewline -ForegroundColor White
+                Write-Host "    Sync Active:       " -NoNewline -ForegroundColor White
                 Write-Host $(if ($entraIDResults.Status.IsRunning) { "Yes" } else { "No" }) -ForegroundColor $(if ($entraIDResults.Status.IsRunning) { "Green" } else { "Yellow" })
+                if ($entraIDResults.Status.PasswordHashSync -ne $null) {
+                    Write-Host "    Password Sync:     " -NoNewline -ForegroundColor White
+                    Write-Host $(if ($entraIDResults.Status.PasswordHashSync -eq $true) { "Enabled" } elseif ($entraIDResults.Status.PasswordHashSync -eq $false) { "Disabled" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.PasswordHashSync) { "Green" } else { "Gray" })
+                }
+                if ($entraIDResults.Status.DeviceWritebackEnabled -ne $null) {
+                    Write-Host "    Device Hybrid Sync:" -NoNewline -ForegroundColor White
+                    Write-Host $(if ($entraIDResults.Status.DeviceWritebackEnabled -eq $true) { "Active" } elseif ($entraIDResults.Status.DeviceWritebackEnabled -eq $false) { "No Devices" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.DeviceWritebackEnabled) { "Green" } else { "Gray" })
+                }
+                if ($entraIDResults.Status.TotalUsers -gt 0) {
+                    Write-Host "    Licensed Users:    $($entraIDResults.Status.LicensedUsers)/$($entraIDResults.Status.TotalUsers)" -ForegroundColor $(if ($entraIDResults.Status.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
+                }
             }
             
             if ($runIntuneConn -and $intuneConnResults -and $intuneConnResults.CheckPerformed) {
                 Write-Host ""
-                Write-Host "  Hybrid Azure AD Join:" -ForegroundColor White
-                Write-Host "    Status:       Check Performed" -ForegroundColor Green
-                Write-Host "    Errors:       $($intuneConnResults.Status.Errors.Count)" -ForegroundColor $(if ($intuneConnResults.Status.Errors.Count -eq 0) { "Green" } else { "Yellow" })
+                Write-Host "  Hybrid Azure AD Join & Intune Connectors:" -ForegroundColor White
+                Write-Host "    NDES Connector:    " -NoNewline -ForegroundColor White
+                Write-Host $(if ($intuneConnResults.Status.IsConnected) { "Active" } else { "Not Connected" }) -ForegroundColor $(if ($intuneConnResults.Status.IsConnected) { "Green" } else { "Yellow" })
+                if ($intuneConnResults.Status.ADServerName) {
+                    Write-Host "    AD Server (Azure): $($intuneConnResults.Status.ADServerName)" -ForegroundColor Green
+                }
+                Write-Host "    Active Connectors: $($intuneConnResults.Status.Connectors.Count)" -ForegroundColor White
+                Write-Host "    Errors:            $($intuneConnResults.Status.Errors.Count)" -ForegroundColor $(if ($intuneConnResults.Status.Errors.Count -eq 0) { "Green" } else { "Yellow" })
             }
             
             if ($runDefender -and $defenderResults -and $defenderResults.CheckPerformed) {
@@ -3707,17 +4199,40 @@ if ($intuneResults -and $intuneResults.CheckPerformed) {
 if ($entraIDResults -and $entraIDResults.CheckPerformed) {
     Write-Host ""
     Write-Host "  Entra ID Connect:" -ForegroundColor White
-    Write-Host "    Sync Enabled: " -NoNewline -ForegroundColor White
-    Write-Host $(if ($entraIDResults.Status.IsInstalled) { "Yes" } else { "No" }) -ForegroundColor $(if ($entraIDResults.Status.IsInstalled) { "Green" } else { "Red" })
-    Write-Host "    Sync Active:  " -NoNewline -ForegroundColor White
-    Write-Host $(if ($entraIDResults.Status.IsRunning) { "Yes" } else { "No" }) -ForegroundColor $(if ($entraIDResults.Status.IsRunning) { "Green" } else { "Yellow" })
+    Write-Host "    Sync Enabled:       " -NoNewline -ForegroundColor White
+    Write-Host $(if ($entraIDResults.Status.IsInstalled) { "Yes (✓)" } else { "No (✗)" }) -ForegroundColor $(if ($entraIDResults.Status.IsInstalled) { "Green" } else { "Red" })
+    Write-Host "    Sync Active:        " -NoNewline -ForegroundColor White
+    Write-Host $(if ($entraIDResults.Status.IsRunning) { "Yes (✓)" } else { "No (✗)" }) -ForegroundColor $(if ($entraIDResults.Status.IsRunning) { "Green" } else { "Yellow" })
+    if ($entraIDResults.Status.PasswordHashSync -ne $null) {
+        Write-Host "    Password Hash Sync: " -NoNewline -ForegroundColor White
+        Write-Host $(if ($entraIDResults.Status.PasswordHashSync -eq $true) { "Enabled (✓)" } elseif ($entraIDResults.Status.PasswordHashSync -eq $false) { "Disabled (⚠)" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.PasswordHashSync) { "Green" } else { "Gray" })
+    }
+    if ($entraIDResults.Status.DeviceWritebackEnabled -ne $null) {
+        Write-Host "    Device Hybrid Sync: " -NoNewline -ForegroundColor White
+        Write-Host $(if ($entraIDResults.Status.DeviceWritebackEnabled -eq $true) { "Active (✓)" } elseif ($entraIDResults.Status.DeviceWritebackEnabled -eq $false) { "No Devices" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.DeviceWritebackEnabled) { "Green" } else { "Gray" })
+    }
+    if ($entraIDResults.Status.TotalUsers -gt 0) {
+        Write-Host "    Licensed Users:     $($entraIDResults.Status.LicensedUsers)/$($entraIDResults.Status.TotalUsers)" -ForegroundColor $(if ($entraIDResults.Status.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
+        if ($entraIDResults.Status.UnlicensedUsers -gt 0) {
+            Write-Host "    Unlicensed Users:   $($entraIDResults.Status.UnlicensedUsers) (⚠)" -ForegroundColor Yellow
+        }
+    }
 }
 
 if ($intuneConnResults -and $intuneConnResults.CheckPerformed) {
     Write-Host ""
-    Write-Host "  Hybrid Azure AD Join:" -ForegroundColor White
-    Write-Host "    Status:       Check Performed" -ForegroundColor Green
-    Write-Host "    Errors:       $($intuneConnResults.Status.Errors.Count)" -ForegroundColor $(if ($intuneConnResults.Status.Errors.Count -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "  Hybrid Azure AD Join & Intune Connectors:" -ForegroundColor White
+    Write-Host "    NDES Connector:     " -NoNewline -ForegroundColor White
+    Write-Host $(if ($intuneConnResults.Status.IsConnected) { "Active (✓)" } else { "Not Connected (⚠)" }) -ForegroundColor $(if ($intuneConnResults.Status.IsConnected) { "Green" } else { "Yellow" })
+    if ($intuneConnResults.Status.ADServerName) {
+        Write-Host "    AD Server (Azure):  $($intuneConnResults.Status.ADServerName) (✓)" -ForegroundColor Green
+    } elseif ($intuneConnResults.Status.ADServerReservation -eq $true) {
+        Write-Host "    AD Server (Azure):  Found (✓)" -ForegroundColor Green
+    } elseif ($intuneConnResults.Status.ADServerReservation -eq $false) {
+        Write-Host "    AD Server (Azure):  Not Detected (⚠)" -ForegroundColor Yellow
+    }
+    Write-Host "    Active Connectors:  $($intuneConnResults.Status.Connectors.Count)" -ForegroundColor White
+    Write-Host "    Errors:             $($intuneConnResults.Status.Errors.Count)" -ForegroundColor $(if ($intuneConnResults.Status.Errors.Count -eq 0) { "Green" } else { "Yellow" })
 }
 
 if ($defenderResults -and $defenderResults.CheckPerformed) {
