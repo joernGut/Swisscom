@@ -1,6 +1,6 @@
 <#
 ================================================================================
-  Author: Jörn Gutting (optimised by Claude)
+  Author: Jörn Gutting 
   Date:   2025-02-17
   Script: Azure Virtual Desktop (AVD) Sizing Calculator (WPF GUI) - PowerShell 7
   Version: 2.2.0
