@@ -230,7 +230,7 @@ function Get-BWS-ResourceNames {
         
         # Public IPs
         BnsPublicIP = "pip-" + $BCID.ToLower() + "-bwsbns-nch-0"
-        InetOutboundS00 = "pip-" + $BCID.ToLower() + "-internet-BBE0-S00-nch-0"
+        InetOutboundS00 = "pip-" + $BCID.ToLower() + "-internet-" + $BCID.ToLower() + "s00-nch-0"
         
         # Connections
         ConBwsBnsEC = "s2sp1-" + $BCID.ToLower() + "-bwsbns-nch-0"
