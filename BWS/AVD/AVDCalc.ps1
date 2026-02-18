@@ -1,25 +1,10 @@
 <#
 ================================================================================
-  Author: Jörn Gutting 
+  Author: Jörn Gutting
   Date:   2025-02-17
   Script: Azure Virtual Desktop (AVD) Sizing Calculator (WPF GUI) - PowerShell 7
   Version: 2.2.0
 
-  Changes v2.2 over v2.1
-  -----------------------
-  - NEW: Load Balancing selection (Breadth-first / Depth-first)
-    * Max Session Limit auto-calculation from users/host
-    * Autoscale Scaling Plan recommendations per phase
-    * Ramp-Up: BreadthFirst, Peak: user choice, Ramp-Down/Off-Peak: DepthFirst
-    * Load Balancing impact shown in Results and Notes
-  - NEW: Export Report (DOCX via pandoc, fallback to Markdown)
-    * Professional sizing report with all sections
-    * Executive Summary, Workload, Applications, Load Balancing
-    * Storage, VM Selection, Pricing, Recommendations
-    * Autoscale Scaling Plan table
-  - Fixed: .Count on potentially unwrapped arrays (StrictMode safe)
-  - Fixed: Get-AzVmSizesInLocation fallback via Get-AzComputeResourceSku
-  - Fixed: $peakUsers: scope qualifier parser error
 ================================================================================
 #>
 
@@ -347,9 +332,15 @@ $script:AzureDiskCatalog = @(
 )
 function Get-OptimalOsDiskSku {
   param([Parameter(Mandatory)][int]$MinSizeGiB, [Parameter(Mandatory)][int]$TargetIOPS, [int]$TargetMBps = 100)
+  # Prefer disk where provisioned (sustained) IOPS meets the target
   foreach ($disk in $script:AzureDiskCatalog) {
     if ($disk.SizeGiB -ge $MinSizeGiB -and $disk.IOPS -ge $TargetIOPS -and $disk.MBps -ge $TargetMBps) { return $disk }
   }
+  # Fallback: provisioned IOPS meets target (relax MBps)
+  foreach ($disk in $script:AzureDiskCatalog) {
+    if ($disk.SizeGiB -ge $MinSizeGiB -and $disk.IOPS -ge $TargetIOPS) { return $disk }
+  }
+  # Last resort: burst IOPS (credit-based, max 30 min for P20 and smaller)
   foreach ($disk in $script:AzureDiskCatalog) {
     if ($disk.SizeGiB -ge $MinSizeGiB -and $disk.BurstIOPS -ge $TargetIOPS) { return $disk }
   }
@@ -482,19 +473,20 @@ $Guidelines = [ordered]@{
     # RAM calculation now uses $VmSeriesRamRatio catalog (real Azure VM specs)
     # Per-user RAM from GO-EUC research: Light=2GB, Medium=3-4GB, Heavy=5-6GB
     # Users/host = min(CPU-based, RAM-based) - dual-limit system
-    Light  = [ordered]@{ UsersPerVcpu=6; MinVcpu=8; MinRamGB=16; MinOsDiskGB=32;  MinProfileGB=30; RamPerUserGB=2
+    # MinOsDiskGB: Windows 11 multi-session image ~25 GB + apps + updates + paging = 128 GB minimum
+    Light  = [ordered]@{ UsersPerVcpu=6; MinVcpu=8; MinRamGB=16; MinOsDiskGB=128; MinProfileGB=30; RamPerUserGB=2
       Examples='D8s_v5, D8s_v4, F8s_v2, D8as_v4, D16s_v5' }
-    Medium = [ordered]@{ UsersPerVcpu=4; MinVcpu=8; MinRamGB=16; MinOsDiskGB=32;  MinProfileGB=30; RamPerUserGB=4
+    Medium = [ordered]@{ UsersPerVcpu=4; MinVcpu=8; MinRamGB=16; MinOsDiskGB=128; MinProfileGB=30; RamPerUserGB=4
       Examples='D8s_v5, D8s_v4, F8s_v2, D8as_v4, D16s_v5' }
-    Heavy  = [ordered]@{ UsersPerVcpu=2; MinVcpu=8; MinRamGB=16; MinOsDiskGB=32;  MinProfileGB=30; RamPerUserGB=6
+    Heavy  = [ordered]@{ UsersPerVcpu=2; MinVcpu=8; MinRamGB=16; MinOsDiskGB=128; MinProfileGB=30; RamPerUserGB=6
       Examples='D8s_v5, D8s_v4, F8s_v2, D16s_v5, D16s_v4' }
-    Power  = [ordered]@{ UsersPerVcpu=1; MinVcpu=6; MinRamGB=56; MinOsDiskGB=340; MinProfileGB=30; RamPerUserGB=8
+    Power  = [ordered]@{ UsersPerVcpu=1; MinVcpu=6; MinRamGB=56; MinOsDiskGB=256; MinProfileGB=30; RamPerUserGB=8
       Examples='D16ds_v5, D16s_v4, NV6, NV16as_v4' }
   }
   SingleSession = [ordered]@{
-    Light  = [ordered]@{ Vcpu=2; RamGB=8;  MinOsDiskGB=32; MinProfileGB=30; Examples='D2s_v5, D2s_v4' }
-    Medium = [ordered]@{ Vcpu=4; RamGB=16; MinOsDiskGB=32; MinProfileGB=30; Examples='D4s_v5, D4s_v4' }
-    Heavy  = [ordered]@{ Vcpu=8; RamGB=32; MinOsDiskGB=32; MinProfileGB=30; Examples='D8s_v5, D8s_v4' }
+    Light  = [ordered]@{ Vcpu=2; RamGB=8;  MinOsDiskGB=128; MinProfileGB=30; Examples='D2s_v5, D2s_v4' }
+    Medium = [ordered]@{ Vcpu=4; RamGB=16; MinOsDiskGB=128; MinProfileGB=30; Examples='D4s_v5, D4s_v4' }
+    Heavy  = [ordered]@{ Vcpu=8; RamGB=32; MinOsDiskGB=128; MinProfileGB=30; Examples='D8s_v5, D8s_v4' }
   }
   CpuScalingFactorMin = 1.5
   CpuScalingFactorMax = 1.9
@@ -529,11 +521,15 @@ function Get-FsLogixStorageTierRecommendation {
     $notes.Add('Standard acceptable for small Light workloads. Validate logon latency.')
   } elseif ($BurstIOPS -le 100000) {
     $tier = 'Azure Files Premium (SSD)'
-    if ($BurstIOPS -gt 20000) { $shareCount = [int][Math]::Ceiling($BurstIOPS / 100000.0) }
-    if ($shareCount -gt 1) { $notes.Add("Distribute across $shareCount shares for burst headroom.") }
+    # Share count: max of IOPS-based and user-count-based (MS: ~1000 concurrent users/share)
+    $sharesFromIops = [int][Math]::Ceiling($BurstIOPS / 100000.0)
+    $sharesFromUsers = [int][Math]::Ceiling($ConcurrentUsers / 1000.0)
+    $shareCount = [Math]::Max(1, [Math]::Max($sharesFromIops, $sharesFromUsers))
+    if ($shareCount -gt 1) { $notes.Add("Distribute across $shareCount Premium shares (~1000 users/share, 100K IOPS/share).") }
   } else { $tier = 'Azure NetApp Files'; $notes.Add('Burst >100K IOPS: Azure NetApp Files recommended.') }
-  if ($ConcurrentUsers -ge 500 -and $tier -notmatch 'NetApp') { $notes.Add("$ConcurrentUsers users: split across multiple shares (~500 users/share).") }
-  $notes.Add('Validate: SMB latency, logon times, storage throttling in pilot.')
+  if ($ConcurrentUsers -ge 500 -and $shareCount -le 1) { $notes.Add("$ConcurrentUsers concurrent users: consider splitting across 2+ shares for logon storm resilience.") }
+  $notes.Add('Premium SSD file shares recommended for production AVD. Provision capacity to meet IOPS needs.')
+  $notes.Add('Validate: SMB latency <5ms, logon times, storage throttling in pilot.')
   [pscustomobject]@{ RecommendedTier=$tier; RecommendedShares=$shareCount; Notes=$notes.ToArray() }
 }
 #endregion
@@ -737,59 +733,80 @@ function Get-AzVmSizesInLocation {
 }
 function Get-BestVmSize {
   param([Parameter(Mandatory)][object[]]$Sizes, [Parameter(Mandatory)][int]$MinVcpu, [Parameter(Mandatory)][double]$MinRamGB,
-    [int]$MaxVcpu=0,  # 0 = no max (from user's vCPU range)
+    [int]$MaxVcpu=0,
     [string]$Series='Any', [string]$Workload='Medium', [bool]$HasDatabase=$false, [bool]$RequiresGPU=$false)
   if ($MinVcpu -lt 1 -or $MinRamGB -le 0) { return $null }
   $ramMB = [int]([Math]::Ceiling($MinRamGB * 1024))
 
-  # Step 1: AVD-compatible families only (exclude HPC, AI-training, storage-only, ARM-based, confidential)
-  # Allowed: D, E, F, NV, NC, B, M (and their sub-variants like Ds, Dds, Das, Eds, etc.)
+  # --- Step 1: AVD-compatible families only ---
   $avdFamilies = '^Standard_(D|E|F|NV|NC|B|M)\d'
-  $avdFiltered = $Sizes | Where-Object { $_.Name -match $avdFamilies }
-
-  # Exclude ARM/Cobalt (p suffix in family), Confidential (DC/EC), and HPC (H, ND, A)
-  $avdFiltered = $avdFiltered | Where-Object {
+  $avdFiltered = @($Sizes | Where-Object {
+    $_.Name -match $avdFamilies -and
     $_.Name -notmatch '^Standard_(DC|EC|H|ND|A)\d' -and
-    $_.Name -notmatch '^Standard_[A-Z]+p[a-z]*\d'  # ARM-based (Cobalt/Ampere)
-  }
+    $_.Name -notmatch '^Standard_[A-Z]+p[a-z]*\d'
+  })
+  if ($avdFiltered.Count -lt 1) { $avdFiltered = @($Sizes) }
 
-  if (-not $avdFiltered -or @($avdFiltered).Count -lt 1) { $avdFiltered = $Sizes }
-
-  # Step 2: Filter by min specs
-  $filtered = @($avdFiltered | Where-Object { $_.NumberOfCores -ge $MinVcpu -and $_.MemoryInMB -ge $ramMB })
-
-  # Step 3: Apply vCPU max if specified
-  $rangeNote = $null
-  if ($MaxVcpu -gt 0) {
-    $withinRange = @($filtered | Where-Object { $_.NumberOfCores -le $MaxVcpu })
-    if ($withinRange.Count -gt 0) {
-      $filtered = $withinRange
-    } else {
-      # No VMs within range that meet min specs -> allow exceeding with warning
-      $rangeNote = "No VM found within vCPU range ($MinVcpu-$MaxVcpu) meeting RAM requirement ($MinRamGB GB). Range exceeded."
+  # --- Step 2: Apply STRICT series filter FIRST (if user chose a specific series) ---
+  $isStrictSeries = ($Series -ne 'Any')
+  if ($isStrictSeries) {
+    $avdFiltered = @($avdFiltered | Where-Object { $_.Name -match "^Standard_${Series}" })
+    if ($avdFiltered.Count -lt 1) {
+      # NO VMs of this series available in this region at all
+      return [pscustomobject]@{
+        _Error = $true
+        _Message = "No $Series-series VMs available in this region. Change VM series to 'Any (auto)' or select a different region."
+      }
     }
   }
 
-  # Step 4: Apply series filter
-  if ($Series -ne 'Any') {
-    $seriesFiltered = @($filtered | Where-Object { $_.Name -match "^Standard_${Series}" })
-    if ($seriesFiltered.Count -gt 0) { $filtered = $seriesFiltered }
-    # else: fall back to all AVD-compatible VMs that meet specs
+  # --- Step 3: Find VMs that meet the EXACT calculated specs ---
+  # Smallest VM that meets BOTH min vCPU AND min RAM
+  $candidates = @($avdFiltered | Where-Object { $_.NumberOfCores -ge $MinVcpu -and $_.MemoryInMB -ge $ramMB })
+
+  # Apply vCPU max range
+  $rangeNote = $null
+  if ($MaxVcpu -gt 0 -and $candidates.Count -gt 0) {
+    $withinRange = @($candidates | Where-Object { $_.NumberOfCores -le $MaxVcpu })
+    if ($withinRange.Count -gt 0) {
+      $candidates = $withinRange
+    } else {
+      $rangeNote = "No VM within vCPU range ($MinVcpu-$MaxVcpu) meets RAM requirement ($([Math]::Round($MinRamGB,1)) GB). Range exceeded."
+    }
   }
 
-  if ($filtered.Count -lt 1) { return $null }
+  # No candidates at all for this series
+  if ($candidates.Count -lt 1) {
+    if ($isStrictSeries) {
+      return [pscustomobject]@{
+        _Error = $true
+        _Message = "No $Series-series VM found with >= $MinVcpu vCPU and >= $([Math]::Round($MinRamGB,1)) GB RAM. Try 'Any (auto)' or reduce requirements."
+      }
+    }
+    return $null
+  }
 
-  # Step 5: Prefer v5+ generation
-  $preferred = @(); foreach ($x in $filtered) { $m = Get-VmNameMetadata -Name $x.Name; if ($m.Generation -ge 5) { $preferred += $x } }
-  $pool = if ($preferred.Count -gt 0) { $preferred } else { $filtered }
+  # --- Step 4: Select the SMALLEST matching VM ---
+  # Primary: fewest vCPUs (closest to calculated need)
+  # Secondary: least RAM (don't over-provision)
+  # Then: prefer v5+, prefer 's' suffix (premium storage)
+  $preferred = @(); foreach ($x in $candidates) { $m = Get-VmNameMetadata -Name $x.Name; if ($m.Generation -ge 5) { $preferred += $x } }
+  $pool = if ($preferred.Count -gt 0) { $preferred } else { $candidates }
 
-  # Step 6: Rank and select best
   $ranked = foreach ($x in $pool) { $m = Get-VmNameMetadata -Name $x.Name
-    [pscustomobject]@{ Obj=$x; Cores=[int]$x.NumberOfCores
-      FamRank=(Get-AvdVmFamilyRank -Family $m.Family -Workload $Workload -HasDatabase $HasDatabase -RequiresGPU $RequiresGPU)
-      GenRank=(Get-GenerationRank -Generation $m.Generation); SufRank=(Get-SuffixRank -HasS $m.HasS -HasD $m.HasD)
-      Mem=[int]$x.MemoryInMB; Name=[string]$x.Name } }
-  $best = ($ranked | Sort-Object FamRank, Cores, GenRank, SufRank, Mem, Name | Select-Object -First 1).Obj
+    [pscustomobject]@{
+      Obj=$x; Cores=[int]$x.NumberOfCores; Mem=[int]$x.MemoryInMB
+      # For 'Any' series: rank by family preference; for strict series: all same rank
+      FamRank = if ($isStrictSeries) { 0 } else { (Get-AvdVmFamilyRank -Family $m.Family -Workload $Workload -HasDatabase $HasDatabase -RequiresGPU $RequiresGPU) }
+      GenRank=(Get-GenerationRank -Generation $m.Generation)
+      SufRank=(Get-SuffixRank -HasS $m.HasS -HasD $m.HasD)
+      Name=[string]$x.Name
+    }
+  }
+
+  # Sort: smallest cores first, then least RAM, then best family/generation
+  $best = ($ranked | Sort-Object Cores, Mem, FamRank, GenRank, SufRank, Name | Select-Object -First 1).Obj
+
   if ($rangeNote -and $best) {
     $best | Add-Member -NotePropertyName RangeExceededNote -NotePropertyValue $rangeNote -Force
   }
@@ -912,11 +929,11 @@ function Get-AvdSizing {
       $usersPerHost = [Math]::Min($usersPerHostCpu, [Math]::Max(1, $usersPerHostRam))
       $hostsForPeak = Get-CeilingInt -Value ($peakConcurrent / $usersPerHost)
 
-      # Final RAM estimate: what this user count actually needs
+      # RAM estimate: what this user count actually needs (NOT the VM lookup size)
       $ramFromUsers = $osOverheadGB + ($usersPerHost * $perUserRamGB)
-      $ramEstimated = [Math]::Max($minRamBP, [Math]::Max($ramFromLookup, $ramFromUsers))
 
       # Add application overhead
+      $ramEstimated = $ramFromUsers
       if ($AppOverhead) {
         $ramEstimated += $AppOverhead.TotalRamOverheadGB
         # If DB needs 8:1 ratio, enforce it
@@ -925,6 +942,9 @@ function Get-AvdSizing {
           $ramEstimated = [Math]::Max($ramEstimated, $minRamForRatio)
         }
       }
+
+      # Ensure minimum from MS baseline, but do NOT inflate to VM lookup size
+      $ramEstimated = [Math]::Max($minRamBP, $ramEstimated)
 
       $ramProvisioned = $ramEstimated / $MemTargetUtil
 
@@ -936,6 +956,7 @@ function Get-AvdSizing {
       if (-not $best) { $best = $opt }
       elseif ($opt.HostsForPeak -lt $best.HostsForPeak) { $best = $opt }
       elseif ($opt.HostsForPeak -eq $best.HostsForPeak -and $opt.VcpuPerHost -lt $best.VcpuPerHost) { $best = $opt }
+      elseif ($opt.HostsForPeak -eq $best.HostsForPeak -and $opt.VcpuPerHost -eq $best.VcpuPerHost -and $opt.RamGB_Provisioned -lt $best.RamGB_Provisioned) { $best = $opt }
     }
     if (-not $best) { throw "No suitable pooled sizing found." }
 
@@ -1073,7 +1094,8 @@ function Get-AvdSizing {
 function Set-ResultsGrid {
   param([Parameter(Mandatory)]$Sizing, $VmPick, $VmPrice,
     [Parameter(Mandatory)][System.Windows.Controls.DataGrid]$GridResults,
-    [Parameter(Mandatory)][System.Windows.Controls.TextBox]$TxtNotes)
+    [Parameter(Mandatory)][System.Windows.Controls.TextBox]$TxtNotes,
+    $HidePricing=$true)
 
   $rows = [System.Collections.Generic.List[object]]::new()
   $r = $Sizing.Recommended
@@ -1148,7 +1170,7 @@ function Set-ResultsGrid {
     $rows.Add([pscustomobject]@{ Key='VM vCPU'; Value=$VmPick.NumberOfCores })
     $rows.Add([pscustomobject]@{ Key='VM RAM (GB)'; Value=[Math]::Round($VmPick.MemoryInMB/1024,2) })
   }
-  if ($VmPrice -and -not ($VmPrice.PSObject.Properties.Name -contains 'Error' -and $VmPrice.Error)) {
+  if ($VmPrice -and -not $HidePricing -and -not ($VmPrice.PSObject.Properties.Name -contains 'Error' -and $VmPrice.Error)) {
     $rows.Add([pscustomobject]@{ Key='--- PRICING ---'; Value='' })
     $rows.Add([pscustomobject]@{ Key='Price/Hour'; Value="$($VmPrice.RetailPricePerHour) $($VmPrice.CurrencyCode)" })
     $monthly = [Math]::Round($VmPrice.RetailPricePerHour * 730, 2)
@@ -1217,68 +1239,101 @@ $XamlString = @"
       <!-- TAB 1: Workload -->
       <TabItem Header="Workload">
         <Grid Margin="10">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="360"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-          <StackPanel Grid.Column="0">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="380"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+
+          <!-- LEFT: Input fields with descriptions -->
+          <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Padding="0,0,12,0">
+          <StackPanel>
             <TextBlock FontWeight="Bold" Text="Host pool type"/>
-            <ComboBox x:Name="CmbHostPoolType" Margin="0,6,0,14" SelectedIndex="0">
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Pooled: multiple users share each VM (cost-efficient). Personal: 1:1 user-to-VM mapping (isolated, persistent)."/>
+            <ComboBox x:Name="CmbHostPoolType" Margin="0,4,0,12" SelectedIndex="0">
               <ComboBoxItem Content="Pooled (multi-session)"/><ComboBoxItem Content="Personal (single-session)"/>
             </ComboBox>
+
             <TextBlock FontWeight="Bold" Text="Workload class"/>
-            <ComboBox x:Name="CmbWorkload" Margin="0,6,0,14" SelectedIndex="1">
-              <ComboBoxItem Content="Light"/><ComboBoxItem Content="Medium"/><ComboBoxItem Content="Heavy"/><ComboBoxItem Content="Power"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Determines users/vCPU density and RAM/user. Based on Microsoft session host sizing guidelines."/>
+            <ComboBox x:Name="CmbWorkload" Margin="0,4,0,4" SelectedIndex="1">
+              <ComboBoxItem Content="Light — 6 users/vCPU, 2 GB RAM/user"/>
+              <ComboBoxItem Content="Medium — 4 users/vCPU, 4 GB RAM/user"/>
+              <ComboBoxItem Content="Heavy — 2 users/vCPU, 6 GB RAM/user"/>
+              <ComboBoxItem Content="Power — 1 user/vCPU, 8 GB RAM/user"/>
             </ComboBox>
-            <TextBlock FontWeight="Bold" Text="Users"/>
-            <StackPanel Orientation="Horizontal" Margin="0,6,0,14">
-              <TextBox x:Name="TxtTotalUsers" Width="120" Text="100"/><TextBlock Margin="10,4,0,0" Text="Total (named)"/>
+            <TextBlock Foreground="#888" FontSize="10" FontStyle="Italic" TextWrapping="Wrap" Margin="0,0,0,12" Text="Light: basic office/web. Medium: Office + Teams + LOB. Heavy: multi-app, analytics. Power: CAD/dev, GPU workloads."/>
+
+            <TextBlock FontWeight="Bold" Text="Total users (named)"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Total number of named users in the organisation who will use AVD."/>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,12">
+              <TextBox x:Name="TxtTotalUsers" Width="120" Text="100"/>
             </StackPanel>
+
             <TextBlock FontWeight="Bold" Text="Concurrency"/>
-            <StackPanel Orientation="Horizontal" Margin="0,6,0,8">
-              <ComboBox x:Name="CmbConcurrencyMode" Width="160" SelectedIndex="0">
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="How many users are active at the same time. Percent: e.g. 60 = 60% of total users. User: absolute number of concurrent users."/>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,12">
+              <ComboBox x:Name="CmbConcurrencyMode" Width="120" SelectedIndex="0">
                 <ComboBoxItem Content="Percent"/><ComboBoxItem Content="User"/>
               </ComboBox>
-              <TextBox x:Name="TxtConcurrencyValue" Width="120" Margin="10,0,0,0" Text="60"/>
-              <TextBlock x:Name="LblConcurrencyHint" Margin="10,4,0,0" Text="% or #"/>
+              <TextBox x:Name="TxtConcurrencyValue" Width="80" Margin="8,0,0,0" Text="60"/>
+              <TextBlock x:Name="LblConcurrencyHint" Margin="8,4,0,0" Text="% or #"/>
             </StackPanel>
+
             <TextBlock FontWeight="Bold" Text="Peak factor"/>
-            <StackPanel Orientation="Horizontal" Margin="0,6,0,14">
-              <TextBox x:Name="TxtPeakFactor" Width="120" Text="1.0"/><TextBlock Margin="10,4,0,0" Text="e.g. 1.2"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Multiplier for peak spikes above normal concurrency. 1.0 = no extra peak. 1.2 = 20% spike capacity."/>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,12">
+              <TextBox x:Name="TxtPeakFactor" Width="120" Text="1.0"/><TextBlock Margin="8,4,0,0" Foreground="#888" Text="1.0 = no spike buffer"/>
             </StackPanel>
-            <Separator Margin="0,8,0,8"/>
-            <StackPanel Orientation="Horizontal" Margin="0,6,0,8">
-              <TextBox x:Name="TxtNPlusOne" Width="120" Text="1"/><TextBlock Margin="10,4,0,0" Text="N+1 hosts"/>
+
+            <Separator Margin="0,4,0,8"/>
+            <TextBlock FontWeight="Bold" Text="N+1 redundancy"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Extra hosts for failover. 1 = one standby host. Set 0 to disable."/>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,8">
+              <TextBox x:Name="TxtNPlusOne" Width="120" Text="1"/>
             </StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-              <TextBox x:Name="TxtExtraHeadroomPct" Width="120" Text="0"/><TextBlock Margin="10,4,0,0" Text="extra headroom %"/>
+            <TextBlock FontWeight="Bold" Text="Extra headroom"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Additional percentage added to peak concurrent users for future growth."/>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,8">
+              <TextBox x:Name="TxtExtraHeadroomPct" Width="120" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#888" Text="%"/>
             </StackPanel>
-            <Separator Margin="0,8,0,8"/>
-            <TextBlock FontWeight="Bold" Text="Load Balancing (pooled)"/>
-            <ComboBox x:Name="CmbLoadBalancing" Margin="0,6,0,8" SelectedIndex="0">
+
+            <Separator Margin="0,4,0,8"/>
+            <TextBlock FontWeight="Bold" Text="Load Balancing (pooled only)"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Breadth-first: spreads sessions evenly (best UX, higher cost). Depth-first: fills one host before the next (saves cost, allows deallocation)."/>
+            <ComboBox x:Name="CmbLoadBalancing" Margin="0,4,0,8" SelectedIndex="0">
               <ComboBoxItem Content="Breadth-first (best UX)"/>
               <ComboBoxItem Content="Depth-first (cost optimised)"/>
             </ComboBox>
             <TextBlock FontWeight="Bold" Text="Max session limit per host"/>
-            <StackPanel Orientation="Horizontal" Margin="0,6,0,8">
-              <TextBox x:Name="TxtMaxSessionLimit" Width="120" Text="0"/><TextBlock Margin="10,4,0,0" Text="0 = auto-calculate"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Limits sessions per VM. 0 = auto-calculated from users/host. Important for Depth-first (never leave at default 999999)."/>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,8">
+              <TextBox x:Name="TxtMaxSessionLimit" Width="120" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#888" Text="0 = auto"/>
             </StackPanel>
           </StackPanel>
+          </ScrollViewer>
+
+          <!-- RIGHT: Tuning Parameters -->
           <Border Grid.Column="1" Padding="12" BorderBrush="#DDD" BorderThickness="1" CornerRadius="6" Background="#FAFAFA">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel>
               <TextBlock FontSize="14" FontWeight="Bold" Text="Tuning Parameters"/>
-              <Separator Margin="0,8,0,8"/>
-              <TextBlock FontWeight="Bold" Text="FSLogix profile"/>
-              <StackPanel Orientation="Horizontal" Margin="0,6,0,6"><TextBox x:Name="TxtProfileGB" Width="100" Text="30"/><TextBlock Margin="10,4,0,0" Text="GB/user (min 30)"/></StackPanel>
-              <StackPanel Orientation="Horizontal" Margin="0,0,0,6"><TextBox x:Name="TxtProfileGrowthPct" Width="100" Text="20"/><TextBlock Margin="10,4,0,0" Text="growth %"/></StackPanel>
-              <StackPanel Orientation="Horizontal" Margin="0,0,0,8"><TextBox x:Name="TxtProfileOverheadPct" Width="100" Text="10"/><TextBlock Margin="10,4,0,0" Text="overhead %"/></StackPanel>
-              <Separator Margin="0,8,0,8"/>
-              <TextBlock FontWeight="Bold" Text="CPU/RAM/Reserve"/>
-              <StackPanel Orientation="Horizontal" Margin="0,6,0,6"><TextBox x:Name="TxtCpuUtil" Width="100" Text="0.80"/><TextBlock Margin="10,4,0,0" Text="CPU target (0..1)"/></StackPanel>
-              <StackPanel Orientation="Horizontal" Margin="0,0,0,6"><TextBox x:Name="TxtMemUtil" Width="100" Text="0.80"/><TextBlock Margin="10,4,0,0" Text="Memory target (0..1)"/></StackPanel>
-              <StackPanel Orientation="Horizontal" Margin="0,0,0,8"><TextBox x:Name="TxtVirtOverhead" Width="100" Text="0.15"/><TextBlock Margin="10,4,0,0" Text="System Reserve (MS: 0.15-0.20)"/></StackPanel>
-              <Separator Margin="0,8,0,8"/>
-              <TextBlock FontWeight="Bold" Text="vCPU range (pooled)"/>
-              <StackPanel Orientation="Horizontal" Margin="0,6,0,6"><TextBox x:Name="TxtMinVcpuHost" Width="100" Text="8"/><TextBlock Margin="10,4,0,0" Text="min vCPU/host (MS: 4)"/></StackPanel>
-              <StackPanel Orientation="Horizontal"><TextBox x:Name="TxtMaxVcpuHost" Width="100" Text="128"/><TextBlock Margin="10,4,0,0" Text="max vCPU/host (MS rec: 24)"/></StackPanel>
+              <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,6" Text="Advanced settings. Default values follow Microsoft best practice — change only if you have specific requirements."/>
+              <Separator Margin="0,4,0,8"/>
+              <TextBlock FontWeight="Bold" Text="FSLogix profile storage"/>
+              <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Profile container size per user. MS minimum: 30 GB. Growth: annual expansion. Overhead: VHD/metadata."/>
+              <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtProfileGB" Width="100" Text="30"/><TextBlock Margin="8,4,0,0" Text="GB/user (min 30)"/></StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><TextBox x:Name="TxtProfileGrowthPct" Width="100" Text="20"/><TextBlock Margin="8,4,0,0" Text="growth %"/></StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,8"><TextBox x:Name="TxtProfileOverheadPct" Width="100" Text="10"/><TextBlock Margin="8,4,0,0" Text="overhead %"/></StackPanel>
+              <Separator Margin="0,4,0,8"/>
+              <TextBlock FontWeight="Bold" Text="CPU / RAM / System Reserve"/>
+              <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="CPU target: max utilisation before throttling. Memory target: usable RAM after OS. System reserve: virtualisation overhead (MS: 15-20%)."/>
+              <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtCpuUtil" Width="100" Text="0.80"/><TextBlock Margin="8,4,0,0" Text="CPU target (0.80 = 80%)"/></StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><TextBox x:Name="TxtMemUtil" Width="100" Text="0.80"/><TextBlock Margin="8,4,0,0" Text="Memory target (0.80 = 80%)"/></StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,8"><TextBox x:Name="TxtVirtOverhead" Width="100" Text="0.15"/><TextBlock Margin="8,4,0,0" Text="System Reserve (MS: 0.15-0.20)"/></StackPanel>
+              <Separator Margin="0,4,0,8"/>
+              <TextBlock FontWeight="Bold" Text="vCPU range per host (pooled)"/>
+              <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Min: smallest VM to consider (MS: 4 vCPU). Max: largest VM allowed. MS recommends max 24 for multi-session. Set 128 for unrestricted."/>
+              <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtMinVcpuHost" Width="100" Text="8"/><TextBlock Margin="8,4,0,0" Text="min vCPU/host (MS: 4)"/></StackPanel>
+              <StackPanel Orientation="Horizontal"><TextBox x:Name="TxtMaxVcpuHost" Width="100" Text="128"/><TextBlock Margin="8,4,0,0" Text="max vCPU/host (MS rec: 24)"/></StackPanel>
             </StackPanel>
+            </ScrollViewer>
           </Border>
         </Grid>
       </TabItem>
@@ -1288,8 +1343,10 @@ $XamlString = @"
         <Grid Margin="10">
           <Grid.ColumnDefinitions><ColumnDefinition Width="350"/><ColumnDefinition Width="350"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
 
-          <StackPanel Grid.Column="0">
-            <TextBlock FontSize="14" FontWeight="Bold" Text="Client Applications" Margin="0,0,0,8"/>
+          <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Padding="0,0,8,0">
+          <StackPanel>
+            <TextBlock FontSize="14" FontWeight="Bold" Text="Client Applications" Margin="0,0,0,4"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Standard office and productivity apps. Each adds CPU + RAM overhead per concurrent user on multi-session hosts."/>
             <CheckBox x:Name="ChkOffice" Content="Microsoft 365 (Word/Excel/PPT)" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkTeams" Content="Microsoft Teams" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkBrowser" Content="Web Browser (Edge/Chrome)" Margin="0,4,0,0"/>
@@ -1297,61 +1354,80 @@ $XamlString = @"
             <CheckBox x:Name="ChkPdf" Content="PDF Editor (Acrobat/Foxit)" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkErp" Content="ERP Client (SAP GUI / Dynamics)" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkPowerBi" Content="Power BI Desktop" Margin="0,4,0,0"/>
+            <TextBlock Foreground="#888" FontSize="10" FontStyle="Italic" TextWrapping="Wrap" Margin="0,6,0,0" Text="Tip: Teams + Browser together add significant RAM. Consider Teams media optimisation (WebRTC redirect) to reduce host CPU."/>
 
-            <TextBlock FontSize="14" FontWeight="Bold" Text="Development Tools" Margin="0,16,0,8"/>
+            <TextBlock FontSize="14" FontWeight="Bold" Text="Development Tools" Margin="0,18,0,4"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Dev tools increase CPU and RAM significantly. Docker requires nested virtualisation (Personal host pool only). Consider Personal pool for developers."/>
             <CheckBox x:Name="ChkVS" Content="Visual Studio" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkVSCode" Content="VS Code" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkDocker" Content="Docker Desktop" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkGit" Content="Git / Build Tools" Margin="0,4,0,0"/>
           </StackPanel>
+          </ScrollViewer>
 
-          <StackPanel Grid.Column="1">
-            <TextBlock FontSize="14" FontWeight="Bold" Text="Database Engines" Margin="0,0,0,8"/>
+          <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" Padding="0,0,8,0">
+          <StackPanel>
+            <TextBlock FontSize="14" FontWeight="Bold" Text="Database Engines" Margin="0,0,0,4"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Running a DB on a session host is atypical. The calculator will switch to E-series (8 GB/vCPU) and add a data disk. For production, use Azure SQL or a managed PaaS service instead."/>
             <CheckBox x:Name="ChkSqlExpress" Content="SQL Server Express/Developer" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkSqlStd" Content="SQL Server Standard/Enterprise" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkPostgres" Content="PostgreSQL" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkMySql" Content="MySQL / MariaDB" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkSqlite" Content="SQLite / MS Access (local DB)" Margin="0,4,0,0"/>
 
-            <TextBlock FontSize="14" FontWeight="Bold" Text="CAD / GPU Applications" Margin="0,16,0,8"/>
+            <TextBlock FontSize="14" FontWeight="Bold" Text="CAD / GPU Applications" Margin="0,18,0,4"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="GPU apps require NV-series VMs with dedicated NVIDIA GPU. These VMs are significantly more expensive. Personal host pool is strongly recommended. ISV GPU certification may be needed."/>
             <CheckBox x:Name="ChkAutoCAD" Content="AutoCAD / AutoCAD LT" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkRevit" Content="Revit / 3ds Max" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkSolidWorks" Content="SolidWorks / CATIA" Margin="0,4,0,0"/>
             <CheckBox x:Name="ChkVideoEdit" Content="Video Editing (Premiere/DaVinci)" Margin="0,4,0,0"/>
 
             <Separator Margin="0,16,0,8"/>
-            <TextBlock FontWeight="Bold" Text="Database data volume per host (GB)" Margin="0,0,0,4"/>
-            <TextBox x:Name="TxtDbDataGB" Width="120" HorizontalAlignment="Left" Text="50"/>
+            <TextBlock FontWeight="Bold" Text="Database data volume per host"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="Size for the dedicated data disk (Premium SSD v2). Only used when a database engine is selected."/>
+            <StackPanel Orientation="Horizontal">
+              <TextBox x:Name="TxtDbDataGB" Width="120" HorizontalAlignment="Left" Text="50"/>
+              <TextBlock Margin="8,4,0,0" Foreground="#888" Text="GB"/>
+            </StackPanel>
           </StackPanel>
+          </ScrollViewer>
 
           <Border Grid.Column="2" Padding="12" BorderBrush="#DDD" BorderThickness="1" CornerRadius="6" Background="#FAFAFA">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel>
-              <TextBlock FontSize="14" FontWeight="Bold" Text="Application Sizing Info"/>
-              <TextBlock Margin="0,8,0,0" TextWrapping="Wrap" FontSize="12">
-Each selected application adds CPU, RAM, and disk overhead to the baseline sizing.
+              <TextBlock FontSize="14" FontWeight="Bold" Text="How Applications Affect Sizing"/>
+              <Separator Margin="0,8,0,8"/>
+              <TextBlock TextWrapping="Wrap" FontSize="12" FontWeight="SemiBold" Text="Overhead Calculation"/>
+              <TextBlock Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11.5" Foreground="#444">
+Each selected app adds per-user CPU and RAM overhead on top of the baseline workload. The calculator sums all overheads and reduces users/host accordingly.
+              </TextBlock>
 
-Client apps: Overhead is per user (multi-session) or per host (personal).
+              <TextBlock TextWrapping="Wrap" FontSize="12" FontWeight="SemiBold" Text="VM Series Auto-Selection"/>
+              <TextBlock Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11.5" Foreground="#444">
+The calculator automatically picks the best VM series:
+• No special apps → D-series (general purpose)
+• Database selected → E-series (8 GB/vCPU for SQL)
+• GPU/CAD selected → NV-series (dedicated GPU)
+• GPU + Database → NV-series wins (GPU is hard constraint). Tip: offload DB to Azure SQL.
+              </TextBlock>
 
-Database engines on AVD hosts:
-- Not typical for AVD, but supported for dev/test scenarios
-- Best practice: E-series VM (8:1 memory:vCore)
-- Separate Premium SSD v2 data disks for data/log/tempdb
-- Personal host pool strongly recommended
-- Production DBs: use Azure SQL or managed PaaS instead
+              <TextBlock TextWrapping="Wrap" FontSize="12" FontWeight="SemiBold" Text="Database Engines"/>
+              <TextBlock Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11.5" Foreground="#444">
+• Switches to E-series (memory-optimised)
+• Adds Premium SSD v2 data disk recommendation
+• Personal host pool strongly recommended
+• Pooled + DB will show a warning
+              </TextBlock>
 
-CAD/GPU apps:
-- Require NV-series VMs with dedicated GPU
-- Personal host pool recommended
-- ISV GPU certification may be required
-
-The calculator will automatically:
-- Increase vCPU + RAM per host
-- Switch to E-series for database workloads
-- Switch to NV-series for GPU workloads
-- Add data disk recommendations
-- Flag warnings for incompatible configurations
+              <TextBlock TextWrapping="Wrap" FontSize="12" FontWeight="SemiBold" Text="CAD / GPU Applications"/>
+              <TextBlock Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11.5" Foreground="#444">
+• Switches to NV-series (NVIDIA A10 GPU)
+• NV-series VMs: 2-4 users/host typical
+• Significantly higher cost per host
+• Personal pool recommended for heavy 3D
               </TextBlock>
             </StackPanel>
+            </ScrollViewer>
           </Border>
         </Grid>
       </TabItem>
@@ -1360,56 +1436,88 @@ The calculator will automatically:
       <TabItem Header="VM Template">
         <Grid Margin="10">
           <Grid.ColumnDefinitions><ColumnDefinition Width="470"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-          <StackPanel Grid.Column="0">
+          <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Padding="0,0,12,0">
+          <StackPanel>
             <TextBlock FontWeight="Bold" Text="Azure region"/>
-            <TextBox x:Name="TxtLocation" Margin="0,6,0,12" Text="Switzerland North"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="The Azure region where session hosts will be deployed. VM availability and pricing vary by region. Use the display name (e.g. 'Switzerland North', 'West Europe')."/>
+            <TextBox x:Name="TxtLocation" Margin="0,4,0,12" Text="Switzerland North"/>
+
             <TextBlock FontWeight="Bold" Text="VM series preference"/>
-            <ComboBox x:Name="CmbVmSeries" Margin="0,6,0,14" SelectedIndex="0">
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Select a specific VM family or leave 'Any' to let the calculator pick based on workload and app requirements. A specific series is strictly enforced — no fallback to other series."/>
+            <ComboBox x:Name="CmbVmSeries" Margin="0,4,0,12" SelectedIndex="0">
               <ComboBoxItem Content="Any (auto)"/><ComboBoxItem Content="D (general purpose, 4 GB/vCPU)"/>
               <ComboBoxItem Content="E (memory, 8 GB/vCPU)"/><ComboBoxItem Content="F (compute, 2 GB/vCPU)"/>
               <ComboBoxItem Content="NV (GPU visualisation)"/><ComboBoxItem Content="NC (GPU compute)"/>
               <ComboBoxItem Content="B (burstable)"/>
             </ComboBox>
+
             <TextBlock FontWeight="Bold" Text="Currency"/>
-            <ComboBox x:Name="CmbCurrency" Margin="0,6,0,14" SelectedIndex="2">
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Currency for VM pricing. Prices are fetched from the Azure Retail Prices API (list prices, no discounts or RI)."/>
+            <ComboBox x:Name="CmbCurrency" Margin="0,4,0,8" SelectedIndex="2">
               <ComboBoxItem Content="USD"/><ComboBoxItem Content="EUR"/><ComboBoxItem Content="CHF"/>
             </ComboBox>
-            <Separator Margin="0,8,0,8"/>
+            <CheckBox x:Name="ChkHidePricing" Content="Hide pricing information" IsChecked="True" Margin="0,0,0,12"/>
+            <TextBlock Foreground="#888" FontSize="10" FontStyle="Italic" TextWrapping="Wrap" Margin="0,0,0,12" Text="When checked, no pricing data is shown in the results grid or the exported HTML report. Uncheck to display Azure retail list prices."/>
+
+            <Separator Margin="0,4,0,8"/>
             <TextBlock FontWeight="Bold" Text="Marketplace image"/>
-            <StackPanel Orientation="Horizontal" Margin="0,6,0,6"><TextBox x:Name="TxtPublisher" Width="240" Text="MicrosoftWindowsDesktop"/><TextBlock Margin="10,4,0,0" Text="publisher"/></StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,6"><TextBox x:Name="TxtOffer" Width="240" Text="office-365"/><TextBlock Margin="10,4,0,0" Text="offer"/></StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,6"><ComboBox x:Name="CmbSku" Width="320"/><TextBlock Margin="10,4,0,0" Text="SKU"/></StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,12"><TextBox x:Name="TxtVersion" Width="240" Text="latest"/><TextBlock Margin="10,4,0,0" Text="version"/></StackPanel>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="The Windows image for session hosts. Click 'Azure Login' to authenticate, then 'Load SKUs' to discover available images. The default is Windows 11 Enterprise multi-session with M365 Apps."/>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtPublisher" Width="240" Text="MicrosoftWindowsDesktop"/><TextBlock Margin="8,4,0,0" Foreground="#888" Text="publisher"/></StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><TextBox x:Name="TxtOffer" Width="240" Text="office-365"/><TextBlock Margin="8,4,0,0" Foreground="#888" Text="offer"/></StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><ComboBox x:Name="CmbSku" Width="320"/><TextBlock Margin="8,4,0,0" Foreground="#888" Text="SKU"/></StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,10"><TextBox x:Name="TxtVersion" Width="240" Text="latest"/><TextBlock Margin="8,4,0,0" Foreground="#888" Text="version"/></StackPanel>
             <StackPanel Orientation="Horizontal">
               <Button x:Name="BtnAzLogin" Content="Azure Login" Width="140" Margin="0,0,10,0"/>
               <Button x:Name="BtnDiscoverSkus" Content="Load SKUs" Width="140"/>
             </StackPanel>
+
             <Separator Margin="0,12,0,8"/>
             <TextBlock FontWeight="Bold" Text="Template JSON"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="After clicking 'Pick VM from Azure' on the Results tab, the ARM template JSON for the selected VM, image and region is generated here. Copy this into your IaC deployment."/>
             <TextBox x:Name="TxtTemplateOut" Height="160" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
           </StackPanel>
+          </ScrollViewer>
+
           <Border Grid.Column="1" Padding="12" BorderBrush="#DDD" BorderThickness="1" CornerRadius="6" Background="#FAFAFA">
-            <TextBlock TextWrapping="Wrap" FontSize="12">
-VM auto-selection (v2.2):
-- Standard AVD: D-series (4 GB/vCPU)
-- Database workloads: E-series (8 GB/vCPU)
-- GPU/CAD workloads: NV-series (7+ GB/vCPU)
-- Compute-heavy: F-series (2 GB/vCPU)
-- B-series (burstable): penalised, not for prod
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+              <TextBlock FontSize="14" FontWeight="Bold" Text="VM Selection Logic"/>
+              <Separator Margin="0,8,0,8"/>
 
-Priority: GPU > Database > Standard
-- CAD + DB: NV-series wins (GPU is hard req.)
-  Tip: Use Azure SQL for DB layer instead.
+              <TextBlock TextWrapping="Wrap" FontSize="12" FontWeight="SemiBold" Text="Series Auto-Selection (when 'Any')"/>
+              <TextBlock Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11.5" Foreground="#444">
+The picker selects the optimal VM series based on your apps:
+• Standard workloads → D-series (4 GB/vCPU)
+• Database engines → E-series (8 GB/vCPU)
+• GPU/CAD apps → NV-series (NVIDIA A10)
+• GPU always takes priority over database
+              </TextBlock>
 
-RAM per VM series (GB/vCPU):
-  D=4  E=8  F=2  NV=7  NC=8  B=4  M=28
+              <TextBlock TextWrapping="Wrap" FontSize="12" FontWeight="SemiBold" Text="Strict Series Mode"/>
+              <TextBlock Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11.5" Foreground="#444">
+When you select a specific series (e.g. 'E'), only VMs of that series are considered. If no VM of that series meets the calculated requirements, an error is shown — no silent fallback to another series.
+              </TextBlock>
 
-MS Best Practice verified:
-- Users/host limited by CPU AND RAM
-- vCPU range: 4-24 (16 optimal, >32 bad)
-- Virtualisation overhead: 15-20%
-- Profile storage: 30 GB min/user
-            </TextBlock>
+              <TextBlock TextWrapping="Wrap" FontSize="12" FontWeight="SemiBold" Text="Smallest Matching VM"/>
+              <TextBlock Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11.5" Foreground="#444">
+The picker always selects the smallest VM that meets the calculated vCPU and RAM requirements. It prefers v5/v6 generations and Premium Storage ('s' suffix) capable VMs.
+              </TextBlock>
+
+              <TextBlock TextWrapping="Wrap" FontSize="12" FontWeight="SemiBold" Text="AVD-Compatible Only"/>
+              <TextBlock Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11.5" Foreground="#444">
+Only VM families suitable for AVD host pools are considered: D, E, F, NV, NC, B, M.
+Excluded: A (too weak), H (HPC), ND (AI training), L (storage), DC/EC (confidential), ARM-based.
+              </TextBlock>
+
+              <TextBlock TextWrapping="Wrap" FontSize="12" FontWeight="SemiBold" Text="RAM per VM Series"/>
+              <TextBlock Margin="0,4,0,4" TextWrapping="Wrap" FontSize="11.5" FontFamily="Consolas" Foreground="#444">
+D = 4 GB/vCPU    E = 8 GB/vCPU
+F = 2 GB/vCPU   NV = 7 GB/vCPU
+NC = 8 GB/vCPU    B = 4 GB/vCPU
+M = 28 GB/vCPU
+              </TextBlock>
+            </StackPanel>
+            </ScrollViewer>
           </Border>
         </Grid>
       </TabItem>
@@ -1417,10 +1525,14 @@ MS Best Practice verified:
       <!-- TAB 4: Results -->
       <TabItem Header="Results">
         <Grid Margin="10">
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-          <TextBlock Grid.Row="0" FontWeight="Bold" Text="Sizing Results"/>
-          <DataGrid Grid.Row="1" x:Name="GridResults" AutoGenerateColumns="True" IsReadOnly="True" Margin="0,8,0,8"/>
-          <TextBox Grid.Row="2" x:Name="TxtNotes" Height="180" TextWrapping="Wrap" AcceptsReturn="True"
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <StackPanel Grid.Row="0" Margin="0,0,0,6">
+            <TextBlock FontSize="14" FontWeight="Bold" Text="Sizing Results"/>
+            <TextBlock Foreground="#666" FontSize="11" TextWrapping="Wrap" Text="Click 'Calculate' to compute host sizing. Then 'Pick VM from Azure' to find the best matching VM template with pricing. Use 'Export HTML Report' or 'Export JSON' to save results."/>
+          </StackPanel>
+          <DataGrid Grid.Row="1" x:Name="GridResults" AutoGenerateColumns="True" IsReadOnly="True" Margin="0,4,0,8"/>
+          <TextBlock Grid.Row="2" Foreground="#666" FontSize="11" Text="Notes, warnings and recommendations:" Margin="0,0,0,2"/>
+          <TextBox Grid.Row="3" x:Name="TxtNotes" Height="170" TextWrapping="Wrap" AcceptsReturn="True"
                    VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11"/>
         </Grid>
       </TabItem>
@@ -1471,7 +1583,7 @@ $TxtDbDataGB = $Window.FindName('TxtDbDataGB')
 
 # VM Template tab
 $TxtLocation = $Window.FindName('TxtLocation'); $CmbVmSeries = $Window.FindName('CmbVmSeries')
-$CmbCurrency = $Window.FindName('CmbCurrency')
+$CmbCurrency = $Window.FindName('CmbCurrency'); $ChkHidePricing = $Window.FindName('ChkHidePricing')
 $TxtPublisher = $Window.FindName('TxtPublisher'); $TxtOffer = $Window.FindName('TxtOffer')
 $CmbSku = $Window.FindName('CmbSku'); $TxtVersion = $Window.FindName('TxtVersion')
 $BtnAzLogin = $Window.FindName('BtnAzLogin'); $BtnDiscoverSkus = $Window.FindName('BtnDiscoverSkus')
@@ -1523,7 +1635,8 @@ $BtnDiscoverSkus.add_Click({
 $BtnCalculate.add_Click({
   try {
     $hostPoolType = if ((Get-ComboText -Combo $CmbHostPoolType) -like 'Personal*') { 'Personal' } else { 'Pooled' }
-    $workload = Get-ComboText -Combo $CmbWorkload
+    $workloadRaw = Get-ComboText -Combo $CmbWorkload
+    $workload = ($workloadRaw -split '\s*[\u2014—-]\s*')[0].Trim()  # Extract 'Light' from 'Light — 6 users/vCPU...'
     $totalUsers = ConvertTo-IntSafe -Text $TxtTotalUsers.Text -Default 0
     if ($totalUsers -lt 1) { throw "Total Users must be >= 1." }
 
@@ -1571,8 +1684,9 @@ $BtnCalculate.add_Click({
       apps = $selectedApps
     } | ConvertTo-Json -Depth 10)
 
+    $hidePricingVal = ($ChkHidePricing.IsChecked -eq $true)
     Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick -VmPrice $script:LastVmPrice `
-      -GridResults $GridResults -TxtNotes $TxtNotes
+      -GridResults $GridResults -TxtNotes $TxtNotes -HidePricing $hidePricingVal
     $Window.FindName('Tabs').SelectedIndex = 3
   } catch { Write-UiError "Calculation failed: $($_.Exception.Message)" }
 })
@@ -1605,7 +1719,16 @@ $BtnPickVm.add_Click({
     $best = Get-BestVmSize -Sizes $sizes -MinVcpu $script:LastSizing.Recommended.VcpuPerHost `
       -MinRamGB $script:LastSizing.Recommended.RamGB_Provisioned -MaxVcpu $maxVcpuRange `
       -Series $series -Workload $script:LastSizing.Workload -HasDatabase $hasDb -RequiresGPU $needsGpu
-    if (-not $best) { Write-UiWarning "No AVD-compatible VM found (series=$series, min $($script:LastSizing.Recommended.VcpuPerHost) vCPU, min $([Math]::Round($script:LastSizing.Recommended.RamGB_Provisioned,0)) GB RAM).`n`nTry: select 'Any (auto)' for VM series, or increase vCPU max range."; return }
+
+    # Handle strict error (no VM found in requested series)
+    if (-not $best) {
+      Write-UiWarning "No AVD-compatible VM found (min $($script:LastSizing.Recommended.VcpuPerHost) vCPU, min $([Math]::Round($script:LastSizing.Recommended.RamGB_Provisioned,0)) GB RAM)."
+      return
+    }
+    if ($best.PSObject.Properties.Name -contains '_Error' -and $best._Error) {
+      Write-UiWarning $best._Message
+      return
+    }
 
     # Check if vCPU range was exceeded
     $rangeMsg = ''
@@ -1615,8 +1738,9 @@ $BtnPickVm.add_Click({
 
     $script:LastVmPick = $best
     $script:LastVmPrice = Get-AzVmHourlyRetailPrice -ArmRegionName $loc -ArmSkuName $best.Name -CurrencyCode $currency
+    $hidePricingVal2 = ($ChkHidePricing.IsChecked -eq $true)
     Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick -VmPrice $script:LastVmPrice `
-      -GridResults $GridResults -TxtNotes $TxtNotes
+      -GridResults $GridResults -TxtNotes $TxtNotes -HidePricing $hidePricingVal2
     $infoMsg = "Selected: $($best.Name) ($($best.NumberOfCores) vCPU, $([Math]::Round($best.MemoryInMB/1024,1)) GB)$rangeMsg"
     if ($rangeMsg) { Write-UiWarning $infoMsg } else { Write-UiInfo $infoMsg }
   } catch { Write-UiError "Failed: $($_.Exception.Message)" }
@@ -1678,13 +1802,15 @@ $BtnExportReport.add_Click({
     }
 
     # VM + pricing section
+    $hidePricing = ($ChkHidePricing.IsChecked -eq $true)
     $vmHtml = ''
     if ($script:LastVmPick) {
       $vmName = esc $script:LastVmPick.Name
       $vmCores = $script:LastVmPick.NumberOfCores
       $vmRam = [Math]::Round($script:LastVmPick.MemoryInMB/1024,1)
       $priceRows = ''
-      if ($script:LastVmPrice -and -not ($script:LastVmPrice.PSObject.Properties.Name -contains 'Error' -and $script:LastVmPrice.Error)) {
+      $priceNote = ''
+      if (-not $hidePricing -and $script:LastVmPrice -and -not ($script:LastVmPrice.PSObject.Properties.Name -contains 'Error' -and $script:LastVmPrice.Error)) {
         $monthly = [Math]::Round($script:LastVmPrice.RetailPricePerHour * 730, 2)
         $totalMonthly = [Math]::Round($monthly * $s.RecommendedHostsTotal, 2)
         $cur = esc $script:LastVmPrice.CurrencyCode
@@ -1693,6 +1819,7 @@ $BtnExportReport.add_Click({
           <tr><td>Est. Monthly/Host</td><td>$monthly $cur</td></tr>
           <tr class="highlight"><td>Est. Monthly Total</td><td><strong>$totalMonthly $cur</strong> ($($s.RecommendedHostsTotal) hosts)</td></tr>
 "@
+        $priceNote = '<p class="note">Retail list price. No discounts, Reserved Instances, Savings Plans, or Azure Hybrid Benefit applied.</p>'
       }
       $vmHtml = @"
       <section>
@@ -1705,7 +1832,7 @@ $BtnExportReport.add_Click({
             $priceRows
           </tbody>
         </table>
-        <p class="note">Retail list price. No discounts, Reserved Instances, Savings Plans, or Azure Hybrid Benefit applied.</p>
+        $priceNote
       </section>
 "@
     }
@@ -2028,6 +2155,7 @@ $BtnReset.add_Click({
 
   # Azure tab
   $CmbVmSeries.SelectedIndex = 0      # Any (auto)
+  $ChkHidePricing.IsChecked = $true    # Hide pricing by default
   $TxtTemplateOut.Text = ''
 
   # Results tab - clear
