@@ -1,9 +1,33 @@
 <#
 ================================================================================
-  Author: Jörn Gutting
-  Date:   2025-02-17
+  Author: Jörn Gutting (optimised by Claude)
+  Date:   2025-02-18
   Script: Azure Virtual Desktop (AVD) Sizing Calculator (WPF GUI) - PowerShell 7
-  Version: 2.2.1.1
+  Version: 2.2.1
+
+  Changes v2.2.1 over v2.2.0
+  ---------------------------
+  - FIX: OS Disk minimum raised from 32 GB to 128 GB (256 GB for Power)
+    * 32 GB was insufficient for Windows 11 multi-session + apps + updates
+    * OS disk picker now correctly selects P10+ (128 GB) minimum
+  - FIX: OS Disk picker prefers provisioned IOPS over burst
+    * Credit-based burst (≤P20) only lasts 30 min, unsuitable for sustained load
+    * 3-tier fallback: provisioned IOPS+MBps → provisioned IOPS → burst
+  - FIX: FSLogix share-split now considers user count (~1000 users/share)
+    * Previously only IOPS-based; now max(IOPS-based, user-count-based)
+    * Warning at 500+ concurrent users on single share
+  - FIX: RAM provisioned no longer inflated by VM lookup RAM
+    * ramFromLookup was used for user density only, no longer sets minimum
+    * Workload class changes now correctly reduce VM size
+  - FIX: VM Picker strict series enforcement (no silent fallback)
+    * Specific series → error if no match (instead of picking another series)
+  - FIX: VM Picker selects smallest matching VM (Cores → Mem sort)
+  - FIX: Hide Pricing checkbox uses explicit Nullable[bool] comparison
+  - NEW: Reset button (red) resets all fields for new calculation
+  - NEW: Max vCPU default raised to 128 (unrestricted, MS rec: 24 shown)
+  - NEW: Workload class shows vCPU/RAM weights in dropdown
+  - NEW: All tabs have field-level descriptions and impact explanations
+  - NEW: Hide Pricing toggle (default: on) for GUI and HTML report
 
 ================================================================================
 #>
@@ -13,7 +37,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion  = '2.2.0'
+$ScriptVersion  = '2.2.1'
 $ScriptBuildUtc = '2025-02-17 16:00:00Z'
 
 #region Ensure STA for WPF
@@ -1233,7 +1257,7 @@ $XamlString = @"
       <RowDefinition Height="*"/>
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
-    <TextBlock Grid.Row="0" FontSize="18" FontWeight="SemiBold" Text="AVD Sizing Calculator v2.2"/>
+    <TextBlock Grid.Row="0" FontSize="18" FontWeight="SemiBold" Text="AVD Sizing Calculator v2.2.1"/>
     <TabControl Grid.Row="1" Margin="0,10,0,10" x:Name="Tabs">
 
       <!-- TAB 1: Workload -->
