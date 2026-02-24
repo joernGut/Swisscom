@@ -1,12 +1,111 @@
 <#
 ================================================================================
   Author:  Jörn Gutting (optimised by Claude)
-  Script:  Azure Virtual Desktop (AVD) Sizing Calculator (WPF GUI) - PowerShell 7
-  Version: 2.3.1
+  Script:  BWS AVD Sizing - Swisscom Branded Edition (WPF GUI) - PowerShell 7
+  Version: 1.0.0
   Date:    2025-02-19
 
   CHANGELOG
   =========
+
+  v1.5.0 (2025-02-20)
+  --------------------
+  - FIX: English button translation "Pick VM from Azure" → "Suggest VM Template"
+    * EN strings in btn.pickvm, res.desc, cost.desc, XAML defaults all corrected
+  - MAJOR: BWS static pricing catalog (replaces Azure API for VM selection)
+    * 33 VM templates (D-series v5 + E-series v5) with CHF monthly prices
+    * 10 OS Storage SKUs (P6–P80) with CHF monthly prices
+    * 14 File Storage SKUs (P1–P80) with CHF monthly prices
+    * All prices from BWS_Pricing.xlsx
+  - MAJOR: "Suggest VM Template" now uses BWS catalog instead of Azure API
+    * Select-BwsVm: picks cheapest VM meeting vCPU+RAM, prefers requested series
+    * Select-BwsOsDisk: picks cheapest OS disk meeting size+IOPS requirements
+    * No Azure login required — fully offline VM selection
+    * Template output shows BWS pricing breakdown (VM + OS Disk + Add. Disks)
+  - NEW: Additional Disks section in VM Template tab
+    * ComboBox with all 14 File Storage SKUs (P1–P80) with prices
+    * "Add" button to add disks, "Remove" to delete selected
+    * DataGrid showing SKU, Size, IOPS, MB/s, CHF/month
+    * Additional disk costs included in template output and per-host total
+  - RESTRICT: VM Series limited to D and E (BWS catalog only)
+    * Removed F, NV, NC, B series from ComboBox
+
+  v1.4.0 (2025-02-19)
+  --------------------
+  - REPORT: Removed "incl. N+1 redundancy" from Session Hosts hero card and table
+  - REPORT+GUI: Removed Burst IOPS display from:
+    * OS Disk IOPS row (was "120 (burst: 3500)" → now "120")
+    * FSLogix Burst IOPS row removed entirely (Steady IOPS retained)
+    * Internal burst calculations kept for disk selection logic
+  - RENAME: "Pick VM from Azure" → "VM Template vorschlagen" (all languages)
+    * EN: "VM Template vorschlagen" (kept German as brand-consistent)
+    * DE: "VM Template vorschlagen"
+    * FR: "Proposer un modèle VM"
+    * IT: "Suggerisci template VM"
+    * Updated: btn.pickvm, res.desc, cost.desc strings + XAML defaults
+    * Updated: Warning message in cost calculation
+
+  v1.3.0 (2025-02-19)
+  --------------------
+  - DESIGN: Swisscom SDX Design System compliance overhaul
+    GUI:
+    * Body text: SDX dark grey (#333333) instead of navy — better readability
+    * Section titles: Interaction Blue (#086ADB) — SDX interactive heading standard
+    * Descriptions: Muted grey (#556688) — SDX secondary text hierarchy
+    * Hints: Light grey (#8899AA) — SDX tertiary text
+    * Info panels: Light surface (#F5F8FC) with soft borders (#D8DFE8)
+    * Tab selected: White bg with navy text, top border accent
+    * Buttons: SDX Interaction Blue (#086ADB) → hover (#0048CF) → pressed navy
+
+    HTML Report (complete SDX-style redesign):
+    * Font: Inter (closest web-safe match to TheSans semi-light)
+    * Header: Navy background + red/blue gradient stripe (Swisscom signature)
+    * Cards: Left blue accent bar (SDX card pattern), hover shadow
+    * Tables: SDX-style — uppercase grey headers, subtle row dividers, hover glow
+    * Badges: Squared corners (SDX), pastel backgrounds (GPU orange, DB purple)
+    * Warnings: Yellow-gold left border accent (SDX notification card pattern)
+    * Notes: Left border accent (SDX quote/note pattern)
+    * Footer: Clean 2px surface border, Interaction Blue links
+    * Typography: 15px body, 600 weight headings, -0.3px letter-spacing titles
+    * Spacing: SDX-standard 36px section margins, 16px card gaps
+
+  v1.2.0 (2025-02-19)
+  --------------------
+  - RESTRICT: BWS-specific defaults and constraints
+    * Azure region: "Switzerland North" fixed, read-only (grayed out)
+    * Host pool type: "Pooled" locked (ComboBox disabled)
+    * N+1 redundancy: default 0 (was 1)
+    * CPU target: default 1.0 / 100% (was 0.80)
+    * Memory target: default 1.0 / 100% (was 0.80)
+    * System Reserve: default 0.20 / 20% (was 0.15)
+    * vCPU range: 8-64 enforced (was 8-128), clamped in Calculate + Pick VM
+    * Reset handler updated with all new defaults
+
+  v1.1.0 (2025-02-19)
+  --------------------
+  - DESIGN: Complete light theme redesign (Swisscom SDX compliant)
+    * White (#FFFFFF) background with Navy (#001155) text — clean, professional
+    * Branded Navy header bar with white title and blue version badge
+    * Interaction Blue (#086ADB) buttons with white text, hover to darker blue
+    * Swisscom Red (#DD1122) for Reset button, section accents, and warning badges
+    * Green (#1B8712) for "Pick VM from Azure" action button
+    * Light gray-blue (#F5F8FC) info panels and card backgrounds
+    * Soft borders (#D8DFE8) throughout — no harsh contrasts
+    * Tab headers: light gray default → white selected with top border accent
+    * DataGrid: Navy column headers, white rows, alternating #F5F8FC stripes
+    * TextBox focus: subtle blue border + light blue tint background
+    * HTML report: matching light theme with Navy gradient header + Red border
+    * Diagnostics dialog: white background with Navy/Blue/Red buttons
+    * Hover states: soft blue tints instead of harsh color changes
+
+  v1.0.0 (2025-02-19)
+  --------------------
+  - INITIAL: Forked from AVD-SizingCalculator v2.3.1
+  - DESIGN: Swisscom corporate color theme (SDX Design System)
+    * Navy (#001155) background, Blue (#11AAFF) accents, Red (#DD1122) highlights
+    * White (#FFFFFF) primary text, Swisscom-branded HTML reports
+    * Section badges in Swisscom Red, header gradient in Navy
+  - BRANDING: Renamed to "BWS AVD Sizing" throughout GUI, dialogs, reports
 
   v2.3.1 (2025-02-19)
   --------------------
@@ -108,9 +207,9 @@
   --------------------
   - DESIGN: TabItem headers now fully themed with ControlTemplate override
     * Default WPF TabItem ignores Foreground for header text — fixed with custom template
-    * Inactive tabs: muted text (#a6adc8) on dark background (#1e1e2e)
-    * Hover: background lightens (#313244), text turns blue (#89b4fa)
-    * Selected: dark surface (#313244), blue top border (#89b4fa), bright text (#cdd6f4)
+    * Inactive tabs: muted text (#99BBEE) on dark background (#001155)
+    * Hover: background lightens (#001A66), text turns blue (#11AAFF)
+    * Selected: dark surface (#001A66), blue top border (#11AAFF), bright text (#FFFFFF)
     * Rounded top corners (6px) for modern look
 
   v2.2.2 (2025-02-19)
@@ -118,8 +217,8 @@
   - DESIGN: Dark theme (Catppuccin Mocha) with full WPF style triggers
     * MouseOver highlights on TextBox, ComboBox, CheckBox, Button, TabItem, DataGridRow
     * Focus state for TextBox (blue border + lighter background)
-    * ComboBoxItem hover (#89b4fa) and selection (#b4befe) with dark text
-    * DataGridRow/Cell selection visible (#585b70) with light foreground
+    * ComboBoxItem hover (#11AAFF) and selection (#b4befe) with dark text
+    * DataGridRow/Cell selection visible (#1A3D8F) with light foreground
     * DataGridColumnHeader styled (dark background, light text)
     * Button hover (brightens) and pressed (darkens) states
     * TextBox selection brush visible on dark background
@@ -181,8 +280,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion  = '2.3.1'
-$ScriptBuildUtc = '2025-02-19T18:00:00Z'
+$ScriptVersion  = '1.5.0'
+$ScriptBuildUtc = '2025-02-20T01:00:00Z'
 
 #region Ensure STA for WPF
 if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
@@ -199,15 +298,15 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 
 #region UI message helpers
 function Write-UiInfo {
-  param([Parameter(Mandatory)][string]$Message, [string]$Title = 'AVD Sizing Calculator')
+  param([Parameter(Mandatory)][string]$Message, [string]$Title = 'BWS AVD Sizing')
   [System.Windows.MessageBox]::Show($Message, $Title, 'OK', 'Information') | Out-Null
 }
 function Write-UiWarning {
-  param([Parameter(Mandatory)][string]$Message, [string]$Title = 'AVD Sizing Calculator')
+  param([Parameter(Mandatory)][string]$Message, [string]$Title = 'BWS AVD Sizing')
   [System.Windows.MessageBox]::Show($Message, $Title, 'OK', 'Warning') | Out-Null
 }
 function Write-UiError {
-  param([Parameter(Mandatory)][string]$Message, [string]$Title = 'AVD Sizing Calculator')
+  param([Parameter(Mandatory)][string]$Message, [string]$Title = 'BWS AVD Sizing')
   [System.Windows.MessageBox]::Show($Message, $Title, 'OK', 'Error') | Out-Null
 }
 #endregion
@@ -1314,7 +1413,7 @@ function Set-ResultsGrid {
     $d = $Sizing.Disks
     $rows.Add([pscustomobject]@{ Key='--- OS DISK ---'; Value='' })
     $rows.Add([pscustomobject]@{ Key='OS Disk SKU'; Value="$($d.SessionHostDisks.OsDisk.RecommendedType) ($($d.SessionHostDisks.OsDisk.SuggestedSizeGiB) GiB)" })
-    $rows.Add([pscustomobject]@{ Key='OS Disk IOPS'; Value="$($d.SessionHostDisks.OsDisk.ProvisionedIOPS) (burst: $($d.SessionHostDisks.OsDisk.BurstIOPS))" })
+    $rows.Add([pscustomobject]@{ Key='OS Disk IOPS'; Value="$($d.SessionHostDisks.OsDisk.ProvisionedIOPS)" })
 
     if ($d.SessionHostDisks.DataDisk -and $d.SessionHostDisks.DataDisk.Required) {
       $rows.Add([pscustomobject]@{ Key='--- DATA DISK ---'; Value='' })
@@ -1328,7 +1427,6 @@ function Set-ResultsGrid {
     $rows.Add([pscustomobject]@{ Key='Storage Tier'; Value=$d.FsLogixStorage.RecommendedTier })
     $pt = $d.FsLogixStorage.PerformanceTargets
     $rows.Add([pscustomobject]@{ Key='Steady IOPS'; Value="$($pt.SteadyStateIOPS) ($($pt.PerUserSteadyIOPS)/user)" })
-    $rows.Add([pscustomobject]@{ Key='Burst IOPS'; Value="$($pt.BurstIOPS) ($($pt.PerUserBurstIOPS)/user)" })
     $rows.Add([pscustomobject]@{ Key='Storage Risk'; Value=$d.FsLogixStorage.StorageRisk.Level })
   }
 
@@ -1386,6 +1484,101 @@ function Set-ResultsGrid {
   $notes.Add('MS SIZING REFERENCE: https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/session-host-virtual-machine-sizing-guidelines')
   $notes.Add('Reminder: Validate with pilot workloads and monitoring.')
   $TxtNotes.Text = ($notes -join [Environment]::NewLine)
+}
+#endregion
+
+#region BWS Pricing Catalog (static, from BWS_Pricing.xlsx)
+$script:BwsVmCatalog = @(
+  # D-series v5
+  [pscustomobject]@{ Name='D2s v5';          vCPU=2;   RamGB=8;    PriceCHF=155.99;  Series='D' }
+  [pscustomobject]@{ Name='D4s v5';          vCPU=4;   RamGB=16;   PriceCHF=250.70;  Series='D' }
+  [pscustomobject]@{ Name='D8s v5';          vCPU=8;   RamGB=32;   PriceCHF=440.11;  Series='D' }
+  [pscustomobject]@{ Name='D16s v5';         vCPU=16;  RamGB=64;   PriceCHF=819.87;  Series='D' }
+  [pscustomobject]@{ Name='D32s v5';         vCPU=32;  RamGB=128;  PriceCHF=1579.39; Series='D' }
+  [pscustomobject]@{ Name='D48s v5';         vCPU=48;  RamGB=192;  PriceCHF=2339.83; Series='D' }
+  [pscustomobject]@{ Name='D64s v5';         vCPU=64;  RamGB=256;  PriceCHF=3099.35; Series='D' }
+  [pscustomobject]@{ Name='D96s v5';         vCPU=96;  RamGB=384;  PriceCHF=4618.38; Series='D' }
+  # E-series v5
+  [pscustomobject]@{ Name='E2s v5';          vCPU=2;   RamGB=16;   PriceCHF=173.63;  Series='E' }
+  [pscustomobject]@{ Name='E2bs v5';         vCPU=2;   RamGB=16;   PriceCHF=173.63;  Series='E' }
+  [pscustomobject]@{ Name='E4s v5';          vCPU=4;   RamGB=32;   PriceCHF=286.91;  Series='E' }
+  [pscustomobject]@{ Name='E4bs v5';         vCPU=4;   RamGB=32;   PriceCHF=286.91;  Series='E' }
+  [pscustomobject]@{ Name='E4-2s v5';        vCPU=2;   RamGB=32;   PriceCHF=286.91;  Series='E' }
+  [pscustomobject]@{ Name='E8s v5';          vCPU=8;   RamGB=64;   PriceCHF=512.53;  Series='E' }
+  [pscustomobject]@{ Name='E8-2s v5';        vCPU=2;   RamGB=64;   PriceCHF=512.53;  Series='E' }
+  [pscustomobject]@{ Name='E8bs v5';         vCPU=8;   RamGB=64;   PriceCHF=512.53;  Series='E' }
+  [pscustomobject]@{ Name='E8-4s v5';        vCPU=4;   RamGB=64;   PriceCHF=512.53;  Series='E' }
+  [pscustomobject]@{ Name='E16s v5';         vCPU=16;  RamGB=128;  PriceCHF=964.72;  Series='E' }
+  [pscustomobject]@{ Name='E16-4s v5';       vCPU=4;   RamGB=128;  PriceCHF=964.72;  Series='E' }
+  [pscustomobject]@{ Name='E16bs v5';        vCPU=16;  RamGB=128;  PriceCHF=963.79;  Series='E' }
+  [pscustomobject]@{ Name='E16-8s v5';       vCPU=8;   RamGB=128;  PriceCHF=964.72;  Series='E' }
+  [pscustomobject]@{ Name='E20s v5';         vCPU=20;  RamGB=160;  PriceCHF=1240.48; Series='E' }
+  [pscustomobject]@{ Name='E32s v5';         vCPU=32;  RamGB=256;  PriceCHF=1868.15; Series='E' }
+  [pscustomobject]@{ Name='E32bs v5';        vCPU=32;  RamGB=256;  PriceCHF=1867.22; Series='E' }
+  [pscustomobject]@{ Name='E32-8s v5';       vCPU=8;   RamGB=256;  PriceCHF=1868.15; Series='E' }
+  [pscustomobject]@{ Name='E32-16s v5';      vCPU=16;  RamGB=256;  PriceCHF=1868.15; Series='E' }
+  [pscustomobject]@{ Name='E48s v5';         vCPU=48;  RamGB=384;  PriceCHF=2772.52; Series='E' }
+  [pscustomobject]@{ Name='E64s v5';         vCPU=64;  RamGB=512;  PriceCHF=3675.95; Series='E' }
+  [pscustomobject]@{ Name='E64-16s v5';      vCPU=16;  RamGB=512;  PriceCHF=3675.95; Series='E' }
+  [pscustomobject]@{ Name='E64-32s v5';      vCPU=32;  RamGB=512;  PriceCHF=3675.95; Series='E' }
+  [pscustomobject]@{ Name='E96s v5';         vCPU=96;  RamGB=672;  PriceCHF=5483.75; Series='E' }
+  [pscustomobject]@{ Name='E96-24s v5';      vCPU=24;  RamGB=672;  PriceCHF=5483.75; Series='E' }
+  [pscustomobject]@{ Name='E104i v5';        vCPU=104; RamGB=672;  PriceCHF=6199.63; Series='E' }
+)
+
+$script:BwsOsStorageCatalog = @(
+  [pscustomobject]@{ Sku='P6';  SizeGiB=64;    IOPS=240;   MBps=50;   PriceCHF=24.14  }
+  [pscustomobject]@{ Sku='P10'; SizeGiB=128;   IOPS=500;   MBps=100;  PriceCHF=44.57  }
+  [pscustomobject]@{ Sku='P15'; SizeGiB=256;   IOPS=1100;  MBps=125;  PriceCHF=85.42  }
+  [pscustomobject]@{ Sku='P20'; SizeGiB=512;   IOPS=2300;  MBps=150;  PriceCHF=129.06 }
+  [pscustomobject]@{ Sku='P30'; SizeGiB=1024;  IOPS=5000;  MBps=200;  PriceCHF=198.70 }
+  [pscustomobject]@{ Sku='P40'; SizeGiB=2048;  IOPS=7500;  MBps=250;  PriceCHF=337.98 }
+  [pscustomobject]@{ Sku='P50'; SizeGiB=4096;  IOPS=7500;  MBps=250;  PriceCHF=603.53 }
+  [pscustomobject]@{ Sku='P60'; SizeGiB=8192;  IOPS=16000; MBps=500;  PriceCHF=1109.56}
+  [pscustomobject]@{ Sku='P70'; SizeGiB=16384; IOPS=18000; MBps=750;  PriceCHF=2071.49}
+  [pscustomobject]@{ Sku='P80'; SizeGiB=32767; IOPS=20000; MBps=900;  PriceCHF=4095.64}
+)
+
+$script:BwsFileStorageCatalog = @(
+  [pscustomobject]@{ Sku='P1';  SizeGiB=4;     IOPS=120;   MBps=25;   PriceCHF=1.86   }
+  [pscustomobject]@{ Sku='P2';  SizeGiB=8;     IOPS=120;   MBps=25;   PriceCHF=3.71   }
+  [pscustomobject]@{ Sku='P3';  SizeGiB=16;    IOPS=120;   MBps=25;   PriceCHF=7.43   }
+  [pscustomobject]@{ Sku='P4';  SizeGiB=32;    IOPS=120;   MBps=25;   PriceCHF=13.00  }
+  [pscustomobject]@{ Sku='P6';  SizeGiB=64;    IOPS=240;   MBps=50;   PriceCHF=24.14  }
+  [pscustomobject]@{ Sku='P10'; SizeGiB=128;   IOPS=500;   MBps=100;  PriceCHF=44.57  }
+  [pscustomobject]@{ Sku='P15'; SizeGiB=256;   IOPS=1100;  MBps=125;  PriceCHF=85.42  }
+  [pscustomobject]@{ Sku='P20'; SizeGiB=512;   IOPS=2300;  MBps=150;  PriceCHF=129.06 }
+  [pscustomobject]@{ Sku='P30'; SizeGiB=1024;  IOPS=5000;  MBps=200;  PriceCHF=198.70 }
+  [pscustomobject]@{ Sku='P40'; SizeGiB=2048;  IOPS=7500;  MBps=250;  PriceCHF=337.98 }
+  [pscustomobject]@{ Sku='P50'; SizeGiB=4096;  IOPS=7500;  MBps=250;  PriceCHF=603.53 }
+  [pscustomobject]@{ Sku='P60'; SizeGiB=8192;  IOPS=16000; MBps=500;  PriceCHF=1109.56}
+  [pscustomobject]@{ Sku='P70'; SizeGiB=16384; IOPS=18000; MBps=750;  PriceCHF=2071.49}
+  [pscustomobject]@{ Sku='P80'; SizeGiB=32767; IOPS=20000; MBps=900;  PriceCHF=4095.64}
+)
+
+function Select-BwsVm {
+  param(
+    [int]$MinVcpu, [int]$MinRamGB, [int]$MaxVcpu = 64,
+    [string]$PreferredSeries = 'D'
+  )
+  $candidates = $script:BwsVmCatalog | Where-Object {
+    $_.vCPU -ge $MinVcpu -and $_.RamGB -ge $MinRamGB -and $_.vCPU -le $MaxVcpu
+  }
+  # Prefer requested series, then by price
+  $preferred = $candidates | Where-Object { $_.Series -eq $PreferredSeries } | Sort-Object PriceCHF
+  if ($preferred) { return $preferred[0] }
+  # Fallback to any series
+  $any = $candidates | Sort-Object PriceCHF
+  if ($any) { return $any[0] }
+  # Last resort: cheapest VM with enough RAM regardless of vCPU cap
+  return ($script:BwsVmCatalog | Where-Object { $_.RamGB -ge $MinRamGB } | Sort-Object PriceCHF | Select-Object -First 1)
+}
+
+function Select-BwsOsDisk {
+  param([int]$MinSizeGiB = 128, [int]$MinIOPS = 0)
+  $script:BwsOsStorageCatalog | Where-Object {
+    $_.SizeGiB -ge $MinSizeGiB -and $_.IOPS -ge $MinIOPS
+  } | Sort-Object PriceCHF | Select-Object -First 1
 }
 #endregion
 
@@ -1488,12 +1681,12 @@ Power (1 utente/vCPU, 8 GB RAM): CAD/3D, sviluppo software, carichi GPU, editing
 
   # --- Results Tab ---
   'res.title'       = @{ en='Sizing Results'; de='Sizing-Ergebnisse'; fr='Résultats du dimensionnement'; it='Risultati dimensionamento' }
-  'res.desc'        = @{ en='Click ''Calculate'' then ''Pick VM from Azure'' to find the best VM template with pricing.'; de='Klicken Sie ''Berechnen'' und dann ''VM von Azure wählen''.'; fr='Cliquez ''Calculer'' puis ''Choisir VM depuis Azure''.'; it='Clicca ''Calcola'' poi ''Scegli VM da Azure''.' }
+  'res.desc'        = @{ en='Click ''Calculate'' then ''Suggest VM Template'' to find the best VM template with pricing.'; de='Klicken Sie ''Berechnen'' und dann ''VM Template vorschlagen''.'; fr='Cliquez ''Calculer'' puis ''Proposer un modèle VM''.'; it='Clicca ''Calcola'' poi ''Suggerisci template VM''.' }
   'res.notes'       = @{ en='Notes, warnings and recommendations:'; de='Hinweise, Warnungen und Empfehlungen:'; fr='Notes, avertissements et recommandations:'; it='Note, avvisi e raccomandazioni:' }
 
   # --- Costs Tab ---
   'cost.title'      = @{ en='Cost Analysis'; de='Kostenanalyse'; fr='Analyse des coûts'; it='Analisi dei costi' }
-  'cost.desc'       = @{ en='Configure pricing, discounts and calculate per-user costs. Requires ''Pick VM from Azure'' on the Results tab first.'; de='Preise, Rabatte konfigurieren und Pro-Benutzer-Kosten berechnen. Zuerst ''VM von Azure wählen'' auf dem Ergebnis-Tab.'; fr='Configurer les prix, remises et calculer les coûts par utilisateur. ''Choisir VM depuis Azure'' d''abord.'; it='Configurare prezzi, sconti e calcolare i costi per utente. Prima ''Scegli VM da Azure''.' }
+  'cost.desc'       = @{ en='Configure pricing, discounts and calculate per-user costs. Requires ''Suggest VM Template'' on the Results tab first.'; de='Preise, Rabatte konfigurieren und Pro-Benutzer-Kosten berechnen. Zuerst ''VM Template vorschlagen'' auf dem Ergebnis-Tab.'; fr='Configurer les prix, remises et calculer les coûts par utilisateur. ''Proposer un modèle VM'' d''abord.'; it='Configurare prezzi, sconti e calcolare i costi per utente. Prima ''Suggerisci template VM''.' }
   'cost.pricing'    = @{ en='Pricing'; de='Preise'; fr='Tarification'; it='Prezzi' }
   'cost.currency'   = @{ en='Currency'; de='Währung'; fr='Devise'; it='Valuta' }
   'cost.currency.desc' = @{ en='Currency for Azure Retail Prices API.'; de='Währung für Azure Retail Prices API.'; fr='Devise pour l''API Azure Retail Prices.'; it='Valuta per l''API Azure Retail Prices.' }
@@ -1517,7 +1710,7 @@ Power (1 utente/vCPU, 8 GB RAM): CAD/3D, sviluppo software, carichi GPU, editing
 
   # --- Buttons ---
   'btn.calculate'   = @{ en='Calculate'; de='Berechnen'; fr='Calculer'; it='Calcola' }
-  'btn.pickvm'      = @{ en='Pick VM from Azure'; de='VM von Azure wählen'; fr='Choisir VM depuis Azure'; it='Scegli VM da Azure' }
+  'btn.pickvm'      = @{ en='Suggest VM Template'; de='VM Template vorschlagen'; fr='Proposer un modèle VM'; it='Suggerisci template VM' }
   'btn.exportjson'  = @{ en='Export JSON'; de='JSON exportieren'; fr='Exporter JSON'; it='Esporta JSON' }
   'btn.exportreport'= @{ en='Export HTML Report'; de='HTML-Bericht exportieren'; fr='Exporter rapport HTML'; it='Esporta report HTML' }
   'btn.close'       = @{ en='Close'; de='Schliessen'; fr='Fermer'; it='Chiudi' }
@@ -1688,114 +1881,115 @@ function Apply-Language {
 $XamlString = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="AVD Sizing Calculator" Height="1020" Width="1240"
+        Title="BWS AVD Sizing" Height="1020" Width="1240"
         WindowStartupLocation="CenterScreen"
-        Background="#1e1e2e" Foreground="#cdd6f4">
+        Background="#FFFFFF" Foreground="#001155">
   <Window.Resources>
     <Style TargetType="TextBlock">
-      <Setter Property="Foreground" Value="#cdd6f4"/>
+      <Setter Property="Foreground" Value="#333333"/>
     </Style>
 
-    <!-- TextBox: dark bg, light text, visible selection + focus -->
+    <!-- TextBox: clean white with navy border, blue focus ring -->
     <Style TargetType="TextBox">
-      <Setter Property="Background" Value="#313244"/>
-      <Setter Property="Foreground" Value="#cdd6f4"/>
-      <Setter Property="BorderBrush" Value="#585b70"/>
-      <Setter Property="SelectionBrush" Value="#585b70"/>
+      <Setter Property="Background" Value="#FFFFFF"/>
+      <Setter Property="Foreground" Value="#333333"/>
+      <Setter Property="BorderBrush" Value="#B8C4D8"/>
+      <Setter Property="SelectionBrush" Value="#11AAFF"/>
       <Setter Property="Padding" Value="6,4"/>
-      <Setter Property="CaretBrush" Value="#cdd6f4"/>
+      <Setter Property="CaretBrush" Value="#001155"/>
       <Style.Triggers>
         <Trigger Property="IsMouseOver" Value="True">
-          <Setter Property="BorderBrush" Value="#89b4fa"/>
+          <Setter Property="BorderBrush" Value="#11AAFF"/>
         </Trigger>
         <Trigger Property="IsFocused" Value="True">
-          <Setter Property="BorderBrush" Value="#89b4fa"/>
-          <Setter Property="Background" Value="#3b3d52"/>
+          <Setter Property="BorderBrush" Value="#086ADB"/>
+          <Setter Property="Background" Value="#F0F7FF"/>
         </Trigger>
       </Style.Triggers>
     </Style>
 
-    <!-- ComboBox: dark text on system dropdown, blue hover border -->
+    <!-- ComboBox: white bg, navy text, blue hover -->
     <Style TargetType="ComboBox">
-      <Setter Property="Background" Value="#313244"/>
-      <Setter Property="Foreground" Value="#1e1e2e"/>
-      <Setter Property="BorderBrush" Value="#585b70"/>
+      <Setter Property="Background" Value="#FFFFFF"/>
+      <Setter Property="Foreground" Value="#333333"/>
+      <Setter Property="BorderBrush" Value="#B8C4D8"/>
       <Setter Property="Padding" Value="6,4"/>
       <Style.Triggers>
         <Trigger Property="IsMouseOver" Value="True">
-          <Setter Property="BorderBrush" Value="#89b4fa"/>
+          <Setter Property="BorderBrush" Value="#11AAFF"/>
         </Trigger>
       </Style.Triggers>
     </Style>
     <Style TargetType="ComboBoxItem">
       <Setter Property="Background" Value="White"/>
-      <Setter Property="Foreground" Value="#1e1e2e"/>
+      <Setter Property="Foreground" Value="#333333"/>
       <Style.Triggers>
         <Trigger Property="IsHighlighted" Value="True">
-          <Setter Property="Background" Value="#89b4fa"/>
-          <Setter Property="Foreground" Value="#1e1e2e"/>
+          <Setter Property="Background" Value="#E5F4FF"/>
+          <Setter Property="Foreground" Value="#333333"/>
         </Trigger>
         <Trigger Property="IsSelected" Value="True">
-          <Setter Property="Background" Value="#b4befe"/>
-          <Setter Property="Foreground" Value="#1e1e2e"/>
+          <Setter Property="Background" Value="#CCE9FF"/>
+          <Setter Property="Foreground" Value="#333333"/>
         </Trigger>
       </Style.Triggers>
     </Style>
 
-    <!-- CheckBox: light text, blue highlight on hover -->
+    <!-- CheckBox: navy text, blue hover -->
     <Style TargetType="CheckBox">
-      <Setter Property="Foreground" Value="#cdd6f4"/>
+      <Setter Property="Foreground" Value="#333333"/>
       <Setter Property="Margin" Value="0,4,0,0"/>
       <Style.Triggers>
         <Trigger Property="IsMouseOver" Value="True">
-          <Setter Property="Foreground" Value="#89b4fa"/>
+          <Setter Property="Foreground" Value="#086ADB"/>
         </Trigger>
       </Style.Triggers>
     </Style>
 
-    <!-- Button: hover brightens, pressed darkens -->
+    <!-- Button: Swisscom Blue primary, Red for accents -->
     <Style TargetType="Button">
-      <Setter Property="Background" Value="#45475a"/>
-      <Setter Property="Foreground" Value="#cdd6f4"/>
-      <Setter Property="BorderBrush" Value="#585b70"/>
-      <Setter Property="Padding" Value="12,6"/>
+      <Setter Property="Background" Value="#086ADB"/>
+      <Setter Property="Foreground" Value="#FFFFFF"/>
+      <Setter Property="BorderBrush" Value="#086ADB"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="14,7"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Style.Triggers>
         <Trigger Property="IsMouseOver" Value="True">
-          <Setter Property="Background" Value="#585b70"/>
-          <Setter Property="BorderBrush" Value="#89b4fa"/>
+          <Setter Property="Background" Value="#0048CF"/>
+          <Setter Property="BorderBrush" Value="#0048CF"/>
         </Trigger>
         <Trigger Property="IsPressed" Value="True">
-          <Setter Property="Background" Value="#313244"/>
+          <Setter Property="Background" Value="#001155"/>
+          <Setter Property="BorderBrush" Value="#001155"/>
         </Trigger>
       </Style.Triggers>
     </Style>
 
-    <!-- TabItem -->
-    <!-- TabItem: full template override for dark theme headers -->
+    <!-- TabItem: elegant tabs with Swisscom Red accent on selected -->
     <Style TargetType="TabItem">
-      <Setter Property="Foreground" Value="#a6adc8"/>
-      <Setter Property="Background" Value="#1e1e2e"/>
-      <Setter Property="Padding" Value="14,6"/>
+      <Setter Property="Foreground" Value="#556688"/>
+      <Setter Property="Background" Value="#F5F7FA"/>
+      <Setter Property="Padding" Value="16,8"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="TabItem">
             <Border x:Name="TabBorder" Background="{TemplateBinding Background}"
-                    BorderBrush="#585b70" BorderThickness="1,1,1,0"
+                    BorderBrush="#D8DFE8" BorderThickness="1,1,1,0"
                     CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}" Margin="2,0,2,0">
               <ContentPresenter x:Name="TabText" ContentSource="Header"
                                 HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="TabBorder" Property="Background" Value="#313244"/>
-                <Setter Property="Foreground" Value="#89b4fa"/>
+                <Setter TargetName="TabBorder" Property="Background" Value="#E8F0FA"/>
+                <Setter Property="Foreground" Value="#086ADB"/>
               </Trigger>
               <Trigger Property="IsSelected" Value="True">
-                <Setter TargetName="TabBorder" Property="Background" Value="#313244"/>
-                <Setter TargetName="TabBorder" Property="BorderBrush" Value="#89b4fa"/>
-                <Setter TargetName="TabBorder" Property="BorderThickness" Value="1,2,1,0"/>
-                <Setter Property="Foreground" Value="#cdd6f4"/>
+                <Setter TargetName="TabBorder" Property="Background" Value="#FFFFFF"/>
+                <Setter TargetName="TabBorder" Property="BorderBrush" Value="#D8DFE8"/>
+                <Setter TargetName="TabBorder" Property="BorderThickness" Value="1,3,1,0"/>
+                <Setter Property="Foreground" Value="#333333"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -1803,47 +1997,47 @@ $XamlString = @"
       </Setter>
     </Style>
 
-    <!-- DataGrid: dark rows, readable headers + selection -->
+    <!-- DataGrid: clean light table with blue header stripe -->
     <Style TargetType="DataGrid">
-      <Setter Property="Background" Value="#313244"/>
-      <Setter Property="Foreground" Value="#cdd6f4"/>
-      <Setter Property="BorderBrush" Value="#585b70"/>
-      <Setter Property="RowBackground" Value="#313244"/>
-      <Setter Property="AlternatingRowBackground" Value="#3b3d52"/>
+      <Setter Property="Background" Value="#FFFFFF"/>
+      <Setter Property="Foreground" Value="#333333"/>
+      <Setter Property="BorderBrush" Value="#D8DFE8"/>
+      <Setter Property="RowBackground" Value="#FFFFFF"/>
+      <Setter Property="AlternatingRowBackground" Value="#F5F8FC"/>
       <Setter Property="GridLinesVisibility" Value="Horizontal"/>
-      <Setter Property="HorizontalGridLinesBrush" Value="#45475a"/>
+      <Setter Property="HorizontalGridLinesBrush" Value="#E8EDF2"/>
     </Style>
     <Style TargetType="DataGridColumnHeader">
-      <Setter Property="Background" Value="#45475a"/>
-      <Setter Property="Foreground" Value="#cdd6f4"/>
-      <Setter Property="Padding" Value="8,4"/>
-      <Setter Property="BorderBrush" Value="#585b70"/>
-      <Setter Property="BorderThickness" Value="0,0,1,1"/>
+      <Setter Property="Background" Value="#001155"/>
+      <Setter Property="Foreground" Value="#FFFFFF"/>
+      <Setter Property="Padding" Value="10,6"/>
+      <Setter Property="BorderBrush" Value="#001A66"/>
+      <Setter Property="BorderThickness" Value="0,0,1,0"/>
     </Style>
     <Style TargetType="DataGridRow">
       <Style.Triggers>
         <Trigger Property="IsSelected" Value="True">
-          <Setter Property="Background" Value="#585b70"/>
-          <Setter Property="Foreground" Value="#cdd6f4"/>
+          <Setter Property="Background" Value="#E0F0FF"/>
+          <Setter Property="Foreground" Value="#333333"/>
         </Trigger>
         <Trigger Property="IsMouseOver" Value="True">
-          <Setter Property="Background" Value="#45475a"/>
+          <Setter Property="Background" Value="#EEF4FA"/>
         </Trigger>
       </Style.Triggers>
     </Style>
     <Style TargetType="DataGridCell">
       <Setter Property="BorderBrush" Value="Transparent"/>
-      <Setter Property="Foreground" Value="#cdd6f4"/>
+      <Setter Property="Foreground" Value="#333333"/>
       <Style.Triggers>
         <Trigger Property="IsSelected" Value="True">
-          <Setter Property="Background" Value="#585b70"/>
-          <Setter Property="Foreground" Value="#cdd6f4"/>
+          <Setter Property="Background" Value="#E0F0FF"/>
+          <Setter Property="Foreground" Value="#333333"/>
         </Trigger>
       </Style.Triggers>
     </Style>
 
     <Style TargetType="Separator">
-      <Setter Property="Background" Value="#45475a"/>
+      <Setter Property="Background" Value="#E0E6EE"/>
       <Setter Property="Margin" Value="0,8,0,8"/>
     </Style>
   </Window.Resources>
@@ -1855,21 +2049,23 @@ $XamlString = @"
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
 
-    <!-- Header -->
-    <DockPanel Grid.Row="0" Margin="0,0,0,4" LastChildFill="False">
+    <!-- Header: Swisscom Navy branded bar -->
+    <Border Grid.Row="0" Background="#001155" CornerRadius="8" Padding="16,10" Margin="0,0,0,8">
+    <DockPanel LastChildFill="False">
       <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
-        <TextBlock FontSize="20" FontWeight="Bold" Foreground="#89b4fa" Text="AVD Sizing Calculator"/>
-        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#6c7086" Text="v2.3.1"/>
+        <TextBlock FontSize="20" FontWeight="Bold" Foreground="#FFFFFF" Text="BWS AVD Sizing"/>
+        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v1.5.0"/>
       </StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-        <TextBlock Foreground="#6c7086" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0" Text="Language:"/>
-        <ComboBox x:Name="CmbLanguage" Width="110" SelectedIndex="0">
+        <TextBlock Foreground="#88AACC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0" Text="Language:"/>
+        <ComboBox x:Name="CmbLanguage" Width="110" SelectedIndex="0" Background="#FFFFFF" Foreground="#001155" BorderBrush="#336699">
           <ComboBoxItem Content="English"/><ComboBoxItem Content="Deutsch"/><ComboBoxItem Content="Français"/><ComboBoxItem Content="Italiano"/>
         </ComboBox>
       </StackPanel>
     </DockPanel>
+    </Border>
 
-    <TabControl Grid.Row="1" Margin="0,8,0,8" x:Name="Tabs" Background="#1e1e2e" BorderBrush="#585b70">
+    <TabControl Grid.Row="1" Margin="0,0,0,8" x:Name="Tabs" Background="#FFFFFF" BorderBrush="#D8DFE8">
 
       <!-- TAB 1: Workload -->
       <TabItem Header="Workload">
@@ -1879,83 +2075,83 @@ $XamlString = @"
           <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Padding="0,0,12,0">
           <StackPanel>
             <TextBlock x:Name="LblHostPoolType" FontWeight="Bold" Text="Host pool type"/>
-            <TextBlock x:Name="LblHostPoolTypeDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Text="Pooled: shared VMs (cost-efficient). Personal: 1:1 mapping (isolated)."/>
-            <ComboBox x:Name="CmbHostPoolType" Margin="0,3,0,8" SelectedIndex="0">
+            <TextBlock x:Name="LblHostPoolTypeDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Pooled: shared VMs (cost-efficient). Personal: 1:1 mapping (isolated)."/>
+            <ComboBox x:Name="CmbHostPoolType" Margin="0,3,0,8" SelectedIndex="0" IsEnabled="False">
               <ComboBoxItem Content="Pooled (multi-session)"/><ComboBoxItem Content="Personal (single-session)"/>
             </ComboBox>
 
             <TextBlock x:Name="LblWorkloadClass" FontWeight="Bold" Text="Workload class"/>
-            <TextBlock x:Name="LblWorkloadClassDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Text="Users/vCPU density and RAM/user based on MS sizing guidelines."/>
+            <TextBlock x:Name="LblWorkloadClassDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Users/vCPU density and RAM/user based on MS sizing guidelines."/>
             <ComboBox x:Name="CmbWorkload" Margin="0,3,0,2" SelectedIndex="1">
               <ComboBoxItem Content="Light &#x2014; 6 users/vCPU, 2 GB RAM/user"/>
               <ComboBoxItem Content="Medium &#x2014; 4 users/vCPU, 4 GB RAM/user"/>
               <ComboBoxItem Content="Heavy &#x2014; 2 users/vCPU, 6 GB RAM/user"/>
               <ComboBoxItem Content="Power &#x2014; 1 user/vCPU, 8 GB RAM/user"/>
             </ComboBox>
-            <TextBlock x:Name="LblWorkloadHint" Foreground="#6c7086" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,8" Text="Light (6 users/vCPU, 2 GB RAM): Basic office apps, web browsing, data entry. Minimal CPU/RAM per user.&#x0a;Medium (4 users/vCPU, 4 GB RAM): Office 365, Teams, Outlook, line-of-business apps. Most common enterprise profile.&#x0a;Heavy (2 users/vCPU, 6 GB RAM): Multi-app workflows, analytics tools, BI reporting, large Excel models.&#x0a;Power (1 user/vCPU, 8 GB RAM): CAD/3D, software development, GPU workloads, video editing. Often paired with Personal pools."/>
+            <TextBlock x:Name="LblWorkloadHint" Foreground="#8899AA" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,8" Text="Light (6 users/vCPU, 2 GB RAM): Basic office apps, web browsing, data entry. Minimal CPU/RAM per user.&#x0a;Medium (4 users/vCPU, 4 GB RAM): Office 365, Teams, Outlook, line-of-business apps. Most common enterprise profile.&#x0a;Heavy (2 users/vCPU, 6 GB RAM): Multi-app workflows, analytics tools, BI reporting, large Excel models.&#x0a;Power (1 user/vCPU, 8 GB RAM): CAD/3D, software development, GPU workloads, video editing. Often paired with Personal pools."/>
 
             <TextBlock x:Name="LblTotalUsers" FontWeight="Bold" Text="Total users (named)"/>
-            <TextBlock x:Name="LblTotalUsersDesc" Foreground="#a6adc8" FontSize="11" Text="Total named users who will use AVD."/>
+            <TextBlock x:Name="LblTotalUsersDesc" Foreground="#556688" FontSize="11" Text="Total named users who will use AVD."/>
             <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtTotalUsers" Width="120" Text="100"/></StackPanel>
 
             <TextBlock x:Name="LblConcurrency" FontWeight="Bold" Text="Concurrency"/>
-            <TextBlock x:Name="LblConcurrencyDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Text="Percent or absolute number of concurrent users."/>
+            <TextBlock x:Name="LblConcurrencyDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Percent or absolute number of concurrent users."/>
             <StackPanel Orientation="Horizontal" Margin="0,3,0,8">
               <ComboBox x:Name="CmbConcurrencyMode" Width="120" SelectedIndex="0"><ComboBoxItem Content="Percent"/><ComboBoxItem Content="User"/></ComboBox>
               <TextBox x:Name="TxtConcurrencyValue" Width="80" Margin="8,0,0,0" Text="60"/>
-              <TextBlock x:Name="LblConcurrencyHint" Margin="8,4,0,0" Foreground="#6c7086" Text="% or #"/>
+              <TextBlock x:Name="LblConcurrencyHint" Margin="8,4,0,0" Foreground="#8899AA" Text="% or #"/>
             </StackPanel>
 
             <TextBlock x:Name="LblPeakFactor" FontWeight="Bold" Text="Peak factor"/>
-            <TextBlock x:Name="LblPeakFactorDesc" Foreground="#a6adc8" FontSize="11" Text="Spike multiplier. 1.0 = none, 1.2 = 20% extra."/>
+            <TextBlock x:Name="LblPeakFactorDesc" Foreground="#556688" FontSize="11" Text="Spike multiplier. 1.0 = none, 1.2 = 20% extra."/>
             <StackPanel Orientation="Horizontal" Margin="0,3,0,8">
-              <TextBox x:Name="TxtPeakFactor" Width="120" Text="1.0"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="1.0 = no spike buffer"/>
+              <TextBox x:Name="TxtPeakFactor" Width="120" Text="1.0"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="1.0 = no spike buffer"/>
             </StackPanel>
 
             <Separator Margin="0,4,0,4"/>
             <TextBlock x:Name="LblNPlus1" FontWeight="Bold" Text="N+1 redundancy"/>
-            <TextBlock x:Name="LblNPlus1Desc" Foreground="#a6adc8" FontSize="11" Text="Extra failover hosts. 1 = one standby, 0 = off."/>
-            <StackPanel Orientation="Horizontal" Margin="0,3,0,6"><TextBox x:Name="TxtNPlusOne" Width="120" Text="1"/></StackPanel>
+            <TextBlock x:Name="LblNPlus1Desc" Foreground="#556688" FontSize="11" Text="Extra failover hosts. 1 = one standby, 0 = off."/>
+            <StackPanel Orientation="Horizontal" Margin="0,3,0,6"><TextBox x:Name="TxtNPlusOne" Width="120" Text="0"/></StackPanel>
 
             <TextBlock x:Name="LblHeadroom" FontWeight="Bold" Text="Extra headroom"/>
-            <TextBlock x:Name="LblHeadroomDesc" Foreground="#a6adc8" FontSize="11" Text="Growth buffer added to peak concurrent users."/>
-            <StackPanel Orientation="Horizontal" Margin="0,3,0,6"><TextBox x:Name="TxtExtraHeadroomPct" Width="120" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="%"/></StackPanel>
+            <TextBlock x:Name="LblHeadroomDesc" Foreground="#556688" FontSize="11" Text="Growth buffer added to peak concurrent users."/>
+            <StackPanel Orientation="Horizontal" Margin="0,3,0,6"><TextBox x:Name="TxtExtraHeadroomPct" Width="120" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="%"/></StackPanel>
 
             <Separator Margin="0,4,0,4"/>
             <TextBlock x:Name="LblLoadBal" FontWeight="Bold" Text="Load Balancing (pooled only)"/>
-            <TextBlock x:Name="LblLoadBalDesc" Foreground="#a6adc8" FontSize="11" Text="Breadth-first: even spread. Depth-first: fill sequentially."/>
+            <TextBlock x:Name="LblLoadBalDesc" Foreground="#556688" FontSize="11" Text="Breadth-first: even spread. Depth-first: fill sequentially."/>
             <ComboBox x:Name="CmbLoadBalancing" Margin="0,3,0,6" SelectedIndex="0">
               <ComboBoxItem Content="Breadth-first (best UX)"/><ComboBoxItem Content="Depth-first (cost optimised)"/>
             </ComboBox>
             <TextBlock x:Name="LblMaxSession" FontWeight="Bold" Text="Max session limit per host"/>
-            <TextBlock x:Name="LblMaxSessionDesc" Foreground="#a6adc8" FontSize="11" Text="0 = auto from users/host. Set explicitly for Depth-first."/>
-            <StackPanel Orientation="Horizontal" Margin="0,3,0,4"><TextBox x:Name="TxtMaxSessionLimit" Width="120" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="0 = auto"/></StackPanel>
+            <TextBlock x:Name="LblMaxSessionDesc" Foreground="#556688" FontSize="11" Text="0 = auto from users/host. Set explicitly for Depth-first."/>
+            <StackPanel Orientation="Horizontal" Margin="0,3,0,4"><TextBox x:Name="TxtMaxSessionLimit" Width="120" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="0 = auto"/></StackPanel>
           </StackPanel>
           </ScrollViewer>
 
           <!-- RIGHT: Tuning Parameters -->
-          <Border Grid.Column="1" Padding="14" BorderBrush="#585b70" BorderThickness="1" CornerRadius="8" Background="#313244">
+          <Border Grid.Column="1" Padding="14" BorderBrush="#D8DFE8" BorderThickness="1" CornerRadius="8" Background="#F5F8FC">
             <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel>
-              <TextBlock x:Name="LblTuneTitle" FontSize="14" FontWeight="Bold" Foreground="#89b4fa" Text="Tuning Parameters"/>
-              <TextBlock x:Name="LblTuneDesc" Foreground="#a6adc8" FontSize="11" Margin="0,4,0,6" Text="Advanced settings. Defaults follow Microsoft best practice."/>
+              <TextBlock x:Name="LblTuneTitle" FontSize="14" FontWeight="Bold" Foreground="#086ADB" Text="Tuning Parameters"/>
+              <TextBlock x:Name="LblTuneDesc" Foreground="#556688" FontSize="11" Margin="0,4,0,6" Text="Advanced settings. Defaults follow Microsoft best practice."/>
               <Separator/>
               <TextBlock x:Name="LblFsLogix" FontWeight="Bold" Text="FSLogix profile storage"/>
-              <TextBlock x:Name="LblFsLogixDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Text="Profile container size per user. MS default max: 30 GB."/>
-              <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtProfileGB" Width="100" Text="30"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="GB/user"/></StackPanel>
-              <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><TextBox x:Name="TxtProfileGrowthPct" Width="100" Text="20"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="growth %"/></StackPanel>
-              <StackPanel Orientation="Horizontal" Margin="0,0,0,8"><TextBox x:Name="TxtProfileOverheadPct" Width="100" Text="10"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="overhead %"/></StackPanel>
+              <TextBlock x:Name="LblFsLogixDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Profile container size per user. MS default max: 30 GB."/>
+              <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtProfileGB" Width="100" Text="30"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="GB/user"/></StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><TextBox x:Name="TxtProfileGrowthPct" Width="100" Text="20"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="growth %"/></StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,8"><TextBox x:Name="TxtProfileOverheadPct" Width="100" Text="10"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="overhead %"/></StackPanel>
               <Separator/>
               <TextBlock x:Name="LblCpuRam" FontWeight="Bold" Text="CPU / RAM / System Reserve"/>
-              <TextBlock x:Name="LblCpuRamDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Text="Target utilisation and virtualisation overhead (MS: 15-20%)."/>
-              <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtCpuUtil" Width="100" Text="0.80"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="CPU target (0.80 = 80%)"/></StackPanel>
-              <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><TextBox x:Name="TxtMemUtil" Width="100" Text="0.80"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="Memory target"/></StackPanel>
-              <StackPanel Orientation="Horizontal" Margin="0,0,0,8"><TextBox x:Name="TxtVirtOverhead" Width="100" Text="0.15"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="System Reserve (0.15-0.20)"/></StackPanel>
+              <TextBlock x:Name="LblCpuRamDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Target utilisation and virtualisation overhead (MS: 15-20%)."/>
+              <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtCpuUtil" Width="100" Text="1.0"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="CPU target (0.80 = 80%)"/></StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><TextBox x:Name="TxtMemUtil" Width="100" Text="1.0"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="Memory target"/></StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,8"><TextBox x:Name="TxtVirtOverhead" Width="100" Text="0.20"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="System Reserve (0.15-0.20)"/></StackPanel>
               <Separator/>
               <TextBlock x:Name="LblVcpuRange" FontWeight="Bold" Text="vCPU range per host (pooled)"/>
-              <TextBlock x:Name="LblVcpuRangeDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Text="MS recommends max 24 for multi-session. 128 = unrestricted."/>
-              <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtMinVcpuHost" Width="100" Text="8"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="min vCPU/host"/></StackPanel>
-              <StackPanel Orientation="Horizontal"><TextBox x:Name="TxtMaxVcpuHost" Width="100" Text="128"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="max vCPU/host (MS rec: 24)"/></StackPanel>
+              <TextBlock x:Name="LblVcpuRangeDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="MS recommends max 24 for multi-session. 128 = unrestricted."/>
+              <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtMinVcpuHost" Width="100" Text="8"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="min vCPU/host"/></StackPanel>
+              <StackPanel Orientation="Horizontal"><TextBox x:Name="TxtMaxVcpuHost" Width="100" Text="64"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="max vCPU/host (8-64)"/></StackPanel>
             </StackPanel>
             </ScrollViewer>
           </Border>
@@ -1969,8 +2165,8 @@ $XamlString = @"
 
           <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Padding="0,0,8,0">
           <StackPanel>
-            <TextBlock x:Name="LblClientApps" FontSize="13" FontWeight="Bold" Foreground="#89b4fa" Text="Client Applications" Margin="0,0,0,4"/>
-            <TextBlock x:Name="LblClientAppsDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Each adds CPU + RAM overhead per concurrent user on the session host."/>
+            <TextBlock x:Name="LblClientApps" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="Client Applications" Margin="0,0,0,4"/>
+            <TextBlock x:Name="LblClientAppsDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Each adds CPU + RAM overhead per concurrent user on the session host."/>
             <CheckBox x:Name="ChkOffice" Content="Microsoft 365 (Word/Excel/PPT)"/>
             <CheckBox x:Name="ChkTeams" Content="Microsoft Teams"/>
             <CheckBox x:Name="ChkBrowser" Content="Web Browser (Edge/Chrome)"/>
@@ -1979,8 +2175,8 @@ $XamlString = @"
             <CheckBox x:Name="ChkErp" Content="ERP Client (SAP GUI / Dynamics)"/>
             <CheckBox x:Name="ChkPowerBi" Content="Power BI Desktop"/>
 
-            <TextBlock x:Name="LblDevTools" FontSize="13" FontWeight="Bold" Foreground="#89b4fa" Text="Development Tools" Margin="0,18,0,4"/>
-            <TextBlock Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Dev tools increase CPU/RAM. Docker requires Personal pool."/>
+            <TextBlock x:Name="LblDevTools" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="Development Tools" Margin="0,18,0,4"/>
+            <TextBlock Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Dev tools increase CPU/RAM. Docker requires Personal pool."/>
             <CheckBox x:Name="ChkVS" Content="Visual Studio"/>
             <CheckBox x:Name="ChkVSCode" Content="VS Code"/>
             <CheckBox x:Name="ChkDocker" Content="Docker Desktop"/>
@@ -1990,16 +2186,16 @@ $XamlString = @"
 
           <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" Padding="0,0,8,0">
           <StackPanel>
-            <TextBlock x:Name="LblDbEngines" FontSize="13" FontWeight="Bold" Foreground="#89b4fa" Text="Database Engines" Margin="0,0,0,4"/>
-            <TextBlock x:Name="LblDbEnginesDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Switches to E-series (8 GB/vCPU). Consider Azure SQL for production."/>
+            <TextBlock x:Name="LblDbEngines" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="Database Engines" Margin="0,0,0,4"/>
+            <TextBlock x:Name="LblDbEnginesDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Switches to E-series (8 GB/vCPU). Consider Azure SQL for production."/>
             <CheckBox x:Name="ChkSqlExpress" Content="SQL Server Express/Developer"/>
             <CheckBox x:Name="ChkSqlStd" Content="SQL Server Standard/Enterprise"/>
             <CheckBox x:Name="ChkPostgres" Content="PostgreSQL"/>
             <CheckBox x:Name="ChkMySql" Content="MySQL / MariaDB"/>
             <CheckBox x:Name="ChkSqlite" Content="SQLite / MS Access (local DB)"/>
 
-            <TextBlock x:Name="LblGpuApps" FontSize="13" FontWeight="Bold" Foreground="#89b4fa" Text="CAD / GPU Applications" Margin="0,18,0,4"/>
-            <TextBlock x:Name="LblGpuAppsDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Requires NV-series VMs (NVIDIA GPU). Significantly higher cost."/>
+            <TextBlock x:Name="LblGpuApps" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="CAD / GPU Applications" Margin="0,18,0,4"/>
+            <TextBlock x:Name="LblGpuAppsDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Requires NV-series VMs (NVIDIA GPU). Significantly higher cost."/>
             <CheckBox x:Name="ChkAutoCAD" Content="AutoCAD / AutoCAD LT"/>
             <CheckBox x:Name="ChkRevit" Content="Revit / 3ds Max"/>
             <CheckBox x:Name="ChkSolidWorks" Content="SolidWorks / CATIA"/>
@@ -2007,22 +2203,22 @@ $XamlString = @"
 
             <Separator Margin="0,16,0,8"/>
             <TextBlock x:Name="LblDbVolume" FontWeight="Bold" Text="Database data volume per host"/>
-            <TextBlock x:Name="LblDbVolumeDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="Dedicated data disk size when a database engine is selected."/>
-            <StackPanel Orientation="Horizontal"><TextBox x:Name="TxtDbDataGB" Width="120" Text="50"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="GB"/></StackPanel>
+            <TextBlock x:Name="LblDbVolumeDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="Dedicated data disk size when a database engine is selected."/>
+            <StackPanel Orientation="Horizontal"><TextBox x:Name="TxtDbDataGB" Width="120" Text="50"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="GB"/></StackPanel>
           </StackPanel>
           </ScrollViewer>
 
-          <Border Grid.Column="2" Padding="14" BorderBrush="#585b70" BorderThickness="1" CornerRadius="8" Background="#313244">
+          <Border Grid.Column="2" Padding="14" BorderBrush="#D8DFE8" BorderThickness="1" CornerRadius="8" Background="#F5F8FC">
             <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel>
-              <TextBlock x:Name="LblHowAffects" FontSize="14" FontWeight="Bold" Foreground="#89b4fa" Text="How Apps Affect Sizing"/>
+              <TextBlock x:Name="LblHowAffects" FontSize="14" FontWeight="Bold" Foreground="#086ADB" Text="How Apps Affect Sizing"/>
               <Separator/>
               <TextBlock x:Name="LblInfoVmAuto" FontWeight="SemiBold" Text="VM Series Auto-Selection"/>
-              <TextBlock x:Name="LblInfoVmAutoDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#a6adc8" Text="No special apps: D-series. Database: E-series. GPU/CAD: NV-series. GPU always takes priority."/>
+              <TextBlock x:Name="LblInfoVmAutoDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#556688" Text="No special apps: D-series. Database: E-series. GPU/CAD: NV-series. GPU always takes priority."/>
               <TextBlock x:Name="LblInfoDbEngines" FontWeight="SemiBold" Text="Database Engines"/>
-              <TextBlock x:Name="LblInfoDbEnginesDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#a6adc8" Text="E-series, Premium SSD v2 data disk. Personal pool strongly recommended."/>
+              <TextBlock x:Name="LblInfoDbEnginesDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#556688" Text="E-series, Premium SSD v2 data disk. Personal pool strongly recommended."/>
               <TextBlock x:Name="LblInfoCadGpu" FontWeight="SemiBold" Text="CAD / GPU"/>
-              <TextBlock x:Name="LblInfoCadGpuDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#a6adc8" Text="NV-series (NVIDIA A10). 2-4 users/host typical. Personal pool recommended for heavy 3D."/>
+              <TextBlock x:Name="LblInfoCadGpuDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#556688" Text="NV-series (NVIDIA A10). 2-4 users/host typical. Personal pool recommended for heavy 3D."/>
             </StackPanel>
             </ScrollViewer>
           </Border>
@@ -2036,55 +2232,73 @@ $XamlString = @"
           <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Padding="0,0,12,0">
           <StackPanel>
             <TextBlock x:Name="LblRegion" FontWeight="Bold" Text="Azure region"/>
-            <TextBlock x:Name="LblRegionDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Text="Region where session hosts will be deployed. Affects VM availability and pricing."/>
-            <TextBox x:Name="TxtLocation" Margin="0,4,0,12" Text="Switzerland North"/>
+            <TextBlock x:Name="LblRegionDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Region where session hosts will be deployed. Affects VM availability and pricing."/>
+            <TextBox x:Name="TxtLocation" Margin="0,4,0,12" Text="Switzerland North" IsReadOnly="True" Background="#F0F2F5" Foreground="#556688"/>
 
             <TextBlock x:Name="LblVmSeries" FontWeight="Bold" Text="VM series preference"/>
-            <TextBlock x:Name="LblVmSeriesDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Text="Specific series is strictly enforced &#x2014; no silent fallback to other series."/>
+            <TextBlock x:Name="LblVmSeriesDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Specific series is strictly enforced &#x2014; no silent fallback to other series."/>
             <ComboBox x:Name="CmbVmSeries" Margin="0,4,0,12" SelectedIndex="0">
               <ComboBoxItem Content="Any (auto)"/><ComboBoxItem Content="D (general purpose, 4 GB/vCPU)"/>
-              <ComboBoxItem Content="E (memory, 8 GB/vCPU)"/><ComboBoxItem Content="F (compute, 2 GB/vCPU)"/>
-              <ComboBoxItem Content="NV (GPU visualisation)"/><ComboBoxItem Content="NC (GPU compute)"/>
-              <ComboBoxItem Content="B (burstable)"/>
+              <ComboBoxItem Content="E (memory, 8 GB/vCPU)"/>
             </ComboBox>
 
             <Separator/>
             <TextBlock x:Name="LblImage" FontWeight="Bold" Text="Marketplace image"/>
-            <TextBlock x:Name="LblImageDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="Windows image for session hosts. Azure Login + Load SKUs available in Expert mode."/>
-            <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtPublisher" Width="240" Text="MicrosoftWindowsDesktop"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="publisher"/></StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><TextBox x:Name="TxtOffer" Width="240" Text="office-365"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="offer"/></StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><ComboBox x:Name="CmbSku" Width="320"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="SKU"/></StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,10"><TextBox x:Name="TxtVersion" Width="240" Text="latest"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="version"/></StackPanel>
+            <TextBlock x:Name="LblImageDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="Windows image for session hosts. Azure Login + Load SKUs available in Expert mode."/>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtPublisher" Width="240" Text="MicrosoftWindowsDesktop"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="publisher"/></StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><TextBox x:Name="TxtOffer" Width="240" Text="office-365"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="offer"/></StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><ComboBox x:Name="CmbSku" Width="320"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="SKU"/></StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,10"><TextBox x:Name="TxtVersion" Width="240" Text="latest"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="version"/></StackPanel>
             <StackPanel x:Name="PnlAzureActions" Orientation="Horizontal" Visibility="Collapsed">
-              <Button x:Name="BtnAzLogin" Content="Azure Login" Width="140" Margin="0,0,10,0" Background="#45475a" Foreground="#89b4fa"/>
-              <Button x:Name="BtnDiscoverSkus" Content="Load SKUs" Width="140" Background="#45475a" Foreground="#89b4fa"/>
+              <Button x:Name="BtnAzLogin" Content="Azure Login" Width="140" Margin="0,0,10,0" Background="#002E99" Foreground="#086ADB"/>
+              <Button x:Name="BtnDiscoverSkus" Content="Load SKUs" Width="140" Background="#002E99" Foreground="#086ADB"/>
             </StackPanel>
+
+            <!-- Additional Disks -->
+            <Separator Margin="0,12,0,8"/>
+            <TextBlock FontWeight="Bold" Foreground="#086ADB" Text="Additional Disks"/>
+            <TextBlock Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="Add extra data disks per session host. Select disk SKU and click 'Add'."/>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+              <ComboBox x:Name="CmbAddDiskSku" Width="320"/>
+              <Button x:Name="BtnAddDisk" Content="Add" Width="60" Margin="8,0,0,0" Background="#086ADB" Foreground="#FFFFFF"/>
+              <Button x:Name="BtnRemoveDisk" Content="Remove" Width="70" Margin="8,0,0,0" Background="#DD1122" Foreground="#FFFFFF"/>
+            </StackPanel>
+            <DataGrid x:Name="GridAddDisks" Height="100" Margin="0,4,0,6" AutoGenerateColumns="False"
+                      IsReadOnly="True" HeadersVisibility="Column" CanUserAddRows="False">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="SKU" Binding="{Binding Sku}" Width="60"/>
+                <DataGridTextColumn Header="Size (GiB)" Binding="{Binding SizeGiB}" Width="80"/>
+                <DataGridTextColumn Header="IOPS" Binding="{Binding IOPS}" Width="70"/>
+                <DataGridTextColumn Header="MB/s" Binding="{Binding MBps}" Width="60"/>
+                <DataGridTextColumn Header="CHF/month" Binding="{Binding PriceCHF}" Width="90"/>
+              </DataGrid.Columns>
+            </DataGrid>
 
             <StackPanel x:Name="PnlTemplateJson" Visibility="Collapsed">
             <Separator Margin="0,12,0,8"/>
             <TextBlock FontWeight="Bold" Text="Template JSON"/>
-            <TextBlock Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="ARM template JSON for the selected VM. Copy into your IaC deployment."/>
+            <TextBlock Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="ARM template JSON for the selected VM. Copy into your IaC deployment."/>
             <TextBox x:Name="TxtTemplateOut" Height="160" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
             </StackPanel>
           </StackPanel>
           </ScrollViewer>
 
-          <Border Grid.Column="1" Padding="14" BorderBrush="#585b70" BorderThickness="1" CornerRadius="8" Background="#313244">
+          <Border Grid.Column="1" Padding="14" BorderBrush="#D8DFE8" BorderThickness="1" CornerRadius="8" Background="#F5F8FC">
             <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel>
-              <TextBlock x:Name="LblVmLogic" FontSize="14" FontWeight="Bold" Foreground="#89b4fa" Text="VM Selection Logic"/>
+              <TextBlock x:Name="LblVmLogic" FontSize="14" FontWeight="Bold" Foreground="#086ADB" Text="VM Selection Logic"/>
               <Separator/>
               <TextBlock x:Name="LblInfoSeriesAuto" FontWeight="SemiBold" Text="Series Auto-Selection"/>
-              <TextBlock x:Name="LblInfoSeriesAutoDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#a6adc8" Text="Standard: D-series. Database: E-series. GPU/CAD: NV-series. GPU takes priority."/>
+              <TextBlock x:Name="LblInfoSeriesAutoDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#556688" Text="Standard: D-series. Database: E-series. GPU/CAD: NV-series. GPU takes priority."/>
               <TextBlock x:Name="LblInfoStrictSeries" FontWeight="SemiBold" Text="Strict Series Mode"/>
-              <TextBlock x:Name="LblInfoStrictSeriesDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#a6adc8" Text="Specific series selected: only VMs of that series. No silent fallback."/>
+              <TextBlock x:Name="LblInfoStrictSeriesDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#556688" Text="Specific series selected: only VMs of that series. No silent fallback."/>
               <TextBlock x:Name="LblInfoSmallestVm" FontWeight="SemiBold" Text="Smallest Matching VM"/>
-              <TextBlock x:Name="LblInfoSmallestVmDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#a6adc8" Text="Picks smallest VM meeting calculated vCPU + RAM. Prefers v5/v6 with Premium Storage."/>
+              <TextBlock x:Name="LblInfoSmallestVmDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#556688" Text="Picks smallest VM meeting calculated vCPU + RAM. Prefers v5/v6 with Premium Storage."/>
               <TextBlock x:Name="LblInfoAvdCompat" FontWeight="SemiBold" Text="AVD-Compatible Only"/>
-              <TextBlock x:Name="LblInfoAvdCompatDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#a6adc8" Text="D, E, F, NV, NC, B, M series. Excluded: A, H, ND, L, DC/EC, ARM."/>
+              <TextBlock x:Name="LblInfoAvdCompatDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#556688" Text="D, E, F, NV, NC, B, M series. Excluded: A, H, ND, L, DC/EC, ARM."/>
               <Separator/>
               <TextBlock x:Name="LblInfoRamPerSeries" FontWeight="SemiBold" Text="RAM per VM Series" Margin="0,0,0,4"/>
-              <TextBlock FontFamily="Consolas" FontSize="11" Foreground="#a6adc8" xml:space="preserve" Text="D  = 4 GB/vCPU   E  = 8 GB/vCPU&#x0a;F  = 2 GB/vCPU   NV = 7 GB/vCPU&#x0a;NC = 8 GB/vCPU   B  = 4 GB/vCPU&#x0a;M  = 28 GB/vCPU"/>
+              <TextBlock FontFamily="Consolas" FontSize="11" Foreground="#556688" xml:space="preserve" Text="D  = 4 GB/vCPU   E  = 8 GB/vCPU&#x0a;F  = 2 GB/vCPU   NV = 7 GB/vCPU&#x0a;NC = 8 GB/vCPU   B  = 4 GB/vCPU&#x0a;M  = 28 GB/vCPU"/>
             </StackPanel>
             </ScrollViewer>
           </Border>
@@ -2096,11 +2310,11 @@ $XamlString = @"
         <Grid Margin="10">
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Margin="0,0,0,6">
-            <TextBlock x:Name="LblResTitle" FontSize="14" FontWeight="Bold" Foreground="#89b4fa" Text="Sizing Results"/>
-            <TextBlock x:Name="LblResDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Text="Click 'Calculate' then 'Pick VM from Azure' to find the best VM template with pricing."/>
+            <TextBlock x:Name="LblResTitle" FontSize="14" FontWeight="Bold" Foreground="#086ADB" Text="Sizing Results"/>
+            <TextBlock x:Name="LblResDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Click 'Calculate' then 'Suggest VM Template' to find the best VM template with pricing."/>
           </StackPanel>
           <DataGrid Grid.Row="1" x:Name="GridResults" AutoGenerateColumns="True" IsReadOnly="True" Margin="0,4,0,8"/>
-          <TextBlock x:Name="LblResNotes" Grid.Row="2" Foreground="#6c7086" FontSize="11" Text="Notes, warnings and recommendations:" Margin="0,0,0,2"/>
+          <TextBlock x:Name="LblResNotes" Grid.Row="2" Foreground="#8899AA" FontSize="11" Text="Notes, warnings and recommendations:" Margin="0,0,0,2"/>
           <TextBox Grid.Row="3" x:Name="TxtNotes" Height="170" TextWrapping="Wrap" AcceptsReturn="True"
                    VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11" IsReadOnly="True"/>
         </Grid>
@@ -2111,8 +2325,8 @@ $XamlString = @"
         <Grid Margin="10">
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Margin="0,0,0,8">
-            <TextBlock x:Name="LblCostTitle" FontSize="14" FontWeight="Bold" Foreground="#89b4fa" Text="Cost Analysis"/>
-            <TextBlock x:Name="LblCostDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Text="Configure pricing, discounts and calculate per-user costs. Requires 'Pick VM from Azure' on the Results tab first."/>
+            <TextBlock x:Name="LblCostTitle" FontSize="14" FontWeight="Bold" Foreground="#086ADB" Text="Cost Analysis"/>
+            <TextBlock x:Name="LblCostDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Configure pricing, discounts and calculate per-user costs. Requires 'Suggest VM Template' on the Results tab first."/>
           </StackPanel>
           <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
           <Grid>
@@ -2120,59 +2334,59 @@ $XamlString = @"
 
             <StackPanel Grid.Column="0" Margin="0,0,16,0">
               <!-- Currency -->
-              <TextBlock x:Name="LblPricing" FontSize="13" FontWeight="Bold" Foreground="#89b4fa" Text="Pricing" Margin="0,0,0,4"/>
+              <TextBlock x:Name="LblPricing" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="Pricing" Margin="0,0,0,4"/>
               <TextBlock x:Name="LblCurrency" FontWeight="Bold" Text="Currency"/>
-              <TextBlock x:Name="LblCurrencyDesc" Foreground="#a6adc8" FontSize="11" Text="Currency for Azure Retail Prices API."/>
+              <TextBlock x:Name="LblCurrencyDesc" Foreground="#556688" FontSize="11" Text="Currency for Azure Retail Prices API."/>
               <ComboBox x:Name="CmbCurrency" Margin="0,3,0,8" SelectedIndex="2">
                 <ComboBoxItem Content="USD"/><ComboBoxItem Content="EUR"/><ComboBoxItem Content="CHF"/>
               </ComboBox>
 
               <TextBlock x:Name="LblAhb" FontWeight="Bold" Text="Azure Hybrid Benefit"/>
-              <TextBlock x:Name="LblAhbDesc" Foreground="#a6adc8" FontSize="11" Text="M365 E3/E5 or Win E3/E5 licenses cover Windows cost."/>
+              <TextBlock x:Name="LblAhbDesc" Foreground="#556688" FontSize="11" Text="M365 E3/E5 or Win E3/E5 licenses cover Windows cost."/>
               <CheckBox x:Name="ChkAhb" Content="Azure Hybrid Benefit active" IsChecked="True" Margin="0,3,0,8"/>
 
               <Separator Margin="0,4,0,4"/>
 
               <!-- Operating Schedule -->
-              <TextBlock x:Name="LblSchedule" FontSize="13" FontWeight="Bold" Foreground="#89b4fa" Text="Operating Schedule" Margin="0,0,0,4"/>
+              <TextBlock x:Name="LblSchedule" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="Operating Schedule" Margin="0,0,0,4"/>
               <TextBlock x:Name="LblHours" FontWeight="Bold" Text="Operating hours per day"/>
-              <TextBlock x:Name="LblHoursDesc" Foreground="#a6adc8" FontSize="11" Text="24 = always on, 10 = business hours only."/>
-              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtOperatingHours" Width="100" Text="10"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="hrs/day (1-24)"/></StackPanel>
+              <TextBlock x:Name="LblHoursDesc" Foreground="#556688" FontSize="11" Text="24 = always on, 10 = business hours only."/>
+              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtOperatingHours" Width="100" Text="10"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="hrs/day (1-24)"/></StackPanel>
 
               <TextBlock x:Name="LblDays" FontWeight="Bold" Text="Operating days per month"/>
-              <TextBlock x:Name="LblDaysDesc" Foreground="#a6adc8" FontSize="11" Text="22 = work month, 30 = daily use."/>
-              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtOperatingDays" Width="100" Text="22"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="days/month (1-31)"/></StackPanel>
+              <TextBlock x:Name="LblDaysDesc" Foreground="#556688" FontSize="11" Text="22 = work month, 30 = daily use."/>
+              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtOperatingDays" Width="100" Text="22"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="days/month (1-31)"/></StackPanel>
 
               <Separator Margin="0,4,0,4"/>
 
               <!-- Discounts -->
-              <TextBlock x:Name="LblDiscounts" FontSize="13" FontWeight="Bold" Foreground="#fab387" Text="Discounts" Margin="0,0,0,4"/>
-              <TextBlock x:Name="LblDiscDesc" Foreground="#a6adc8" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,6" Text="Applied cumulatively to the Azure retail list price."/>
+              <TextBlock x:Name="LblDiscounts" FontSize="13" FontWeight="Bold" Foreground="#DD1122" Text="Discounts" Margin="0,0,0,4"/>
+              <TextBlock x:Name="LblDiscDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,6" Text="Applied cumulatively to the Azure retail list price."/>
 
               <TextBlock x:Name="LblCsp" FontWeight="Bold" Text="CSP / EA / Partner discount"/>
-              <TextBlock x:Name="LblCspDesc" Foreground="#a6adc8" FontSize="11" Text="Negotiated discount (CSP margin, EA, MPA)."/>
-              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtCspDiscount" Width="100" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="% (e.g. 15)"/></StackPanel>
+              <TextBlock x:Name="LblCspDesc" Foreground="#556688" FontSize="11" Text="Negotiated discount (CSP margin, EA, MPA)."/>
+              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtCspDiscount" Width="100" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="% (e.g. 15)"/></StackPanel>
 
               <TextBlock x:Name="LblRi" FontWeight="Bold" Text="Reserved Instance discount"/>
-              <TextBlock x:Name="LblRiDesc" Foreground="#a6adc8" FontSize="11" Text="1yr ~35%, 3yr ~55%."/>
-              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtRiDiscount" Width="100" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="% (e.g. 35)"/></StackPanel>
+              <TextBlock x:Name="LblRiDesc" Foreground="#556688" FontSize="11" Text="1yr ~35%, 3yr ~55%."/>
+              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtRiDiscount" Width="100" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="% (e.g. 35)"/></StackPanel>
 
               <TextBlock x:Name="LblAdditional" FontWeight="Bold" Text="Additional discount"/>
-              <TextBlock x:Name="LblAdditionalDesc" Foreground="#a6adc8" FontSize="11" Text="Savings Plans, promos, custom agreements."/>
-              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtAdditionalDiscount" Width="100" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#6c7086" Text="%"/></StackPanel>
+              <TextBlock x:Name="LblAdditionalDesc" Foreground="#556688" FontSize="11" Text="Savings Plans, promos, custom agreements."/>
+              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtAdditionalDiscount" Width="100" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="%"/></StackPanel>
 
               <Separator Margin="0,4,0,4"/>
               <Button x:Name="BtnCalcUserCosts" Content="Calculate Costs" Width="200" HorizontalAlignment="Left" FontWeight="Bold"
-                      Background="#89b4fa" Foreground="#1e1e2e"/>
+                      Background="#086ADB" Foreground="#FFFFFF"/>
             </StackPanel>
 
-            <Border Grid.Column="1" Padding="14" BorderBrush="#585b70" BorderThickness="1" CornerRadius="8" Background="#313244">
+            <Border Grid.Column="1" Padding="14" BorderBrush="#D8DFE8" BorderThickness="1" CornerRadius="8" Background="#F5F8FC">
               <StackPanel>
-                <TextBlock x:Name="LblBreakdown" FontSize="13" FontWeight="Bold" Foreground="#89b4fa" Text="Cost Breakdown" Margin="0,0,0,8"/>
+                <TextBlock x:Name="LblBreakdown" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="Cost Breakdown" Margin="0,0,0,8"/>
                 <DataGrid x:Name="GridUserCosts" AutoGenerateColumns="True" IsReadOnly="True" Margin="0,0,0,8"/>
                 <TextBox x:Name="TxtUserCostNotes" Height="140" TextWrapping="Wrap" AcceptsReturn="True"
                          VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11" IsReadOnly="True"
-                         Background="#1e1e2e" Foreground="#a6adc8" BorderBrush="#585b70"/>
+                         Background="#001155" Foreground="#556688" BorderBrush="#D8DFE8"/>
               </StackPanel>
             </Border>
           </Grid>
@@ -2184,12 +2398,12 @@ $XamlString = @"
     <!-- Bottom button bar -->
     <DockPanel Grid.Row="2" LastChildFill="False" Margin="0,4,0,0">
       <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
-        <Button x:Name="BtnReset" Content="Reset" Width="80" Background="#f38ba8" Foreground="#1e1e2e" FontWeight="Bold"/>
-        <Button x:Name="BtnDiagnostics" Content="Diagnostics" Width="110" Margin="10,0,0,0" Visibility="Collapsed" Background="#45475a" Foreground="#fab387"/>
+        <Button x:Name="BtnReset" Content="Reset" Width="80" Background="#DD1122" Foreground="#FFFFFF" FontWeight="Bold"/>
+        <Button x:Name="BtnDiagnostics" Content="Diagnostics" Width="110" Margin="10,0,0,0" Visibility="Collapsed" Background="#002E99" Foreground="#DD1122"/>
       </StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-        <Button x:Name="BtnCalculate" Content="Calculate" Width="120" FontWeight="Bold" Background="#89b4fa" Foreground="#1e1e2e"/>
-        <Button x:Name="BtnPickVm" Content="Pick VM from Azure" Width="170" Margin="10,0,0,0" Background="#a6e3a1" Foreground="#1e1e2e" FontWeight="Bold"/>
+        <Button x:Name="BtnCalculate" Content="Calculate" Width="120" FontWeight="Bold" Background="#086ADB" Foreground="#FFFFFF"/>
+        <Button x:Name="BtnPickVm" Content="VM Template vorschlagen" Width="200" Margin="10,0,0,0" Background="#1B8712" Foreground="#FFFFFF" FontWeight="Bold"/>
         <Button x:Name="BtnExportJson" Content="Export JSON" Width="110" Margin="10,0,0,0"/>
         <Button x:Name="BtnExportReport" Content="Export HTML Report" Width="150" Margin="10,0,0,0"/>
         <Button x:Name="BtnClose" Content="Close" Width="80" Margin="10,0,0,0"/>
@@ -2205,7 +2419,7 @@ $XamlString = $XamlString -replace '&(?!amp;|lt;|gt;|quot;|apos;|#x)', '&amp;'
 $xmlReader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($XamlString))
 $Window = [Windows.Markup.XamlReader]::Load($xmlReader)
 $script:Window = $Window
-$Window.Title = "AVD Sizing Calculator v$ScriptVersion"
+$Window.Title = "BWS AVD Sizing v$ScriptVersion"
 
 # Workload tab
 $CmbHostPoolType = $Window.FindName('CmbHostPoolType'); $CmbWorkload = $Window.FindName('CmbWorkload')
@@ -2237,6 +2451,40 @@ $TxtPublisher = $Window.FindName('TxtPublisher'); $TxtOffer = $Window.FindName('
 $CmbSku = $Window.FindName('CmbSku'); $TxtVersion = $Window.FindName('TxtVersion')
 $BtnAzLogin = $Window.FindName('BtnAzLogin'); $BtnDiscoverSkus = $Window.FindName('BtnDiscoverSkus')
 $TxtTemplateOut = $Window.FindName('TxtTemplateOut')
+
+# Additional Disks
+$CmbAddDiskSku = $Window.FindName('CmbAddDiskSku')
+$BtnAddDisk = $Window.FindName('BtnAddDisk')
+$BtnRemoveDisk = $Window.FindName('BtnRemoveDisk')
+$GridAddDisks = $Window.FindName('GridAddDisks')
+$script:BwsAdditionalDisks = [System.Collections.ObjectModel.ObservableCollection[pscustomobject]]::new()
+$GridAddDisks.ItemsSource = $script:BwsAdditionalDisks
+
+# Populate disk ComboBox from File Storage catalog (also suitable as data disks)
+foreach ($d in $script:BwsFileStorageCatalog) {
+  $item = [System.Windows.Controls.ComboBoxItem]::new()
+  $item.Content = "$($d.Sku): $($d.SizeGiB) GiB, $($d.IOPS) IOPS, $($d.MBps) MB/s — CHF $($d.PriceCHF)/mo"
+  $item.Tag = $d
+  $CmbAddDiskSku.Items.Add($item)
+}
+if ($CmbAddDiskSku.Items.Count -gt 0) { $CmbAddDiskSku.SelectedIndex = 4 }
+
+$BtnAddDisk.add_Click({
+  $sel = $CmbAddDiskSku.SelectedItem
+  if ($sel -and $sel.Tag) {
+    $d = $sel.Tag
+    $script:BwsAdditionalDisks.Add([pscustomobject]@{
+      Sku=$d.Sku; SizeGiB=$d.SizeGiB; IOPS=$d.IOPS; MBps=$d.MBps; PriceCHF=$d.PriceCHF
+    })
+  }
+})
+
+$BtnRemoveDisk.add_Click({
+  $idx = $GridAddDisks.SelectedIndex
+  if ($idx -ge 0 -and $idx -lt $script:BwsAdditionalDisks.Count) {
+    $script:BwsAdditionalDisks.RemoveAt($idx)
+  }
+})
 
 # Results
 $GridResults = $Window.FindName('GridResults'); $TxtNotes = $Window.FindName('TxtNotes')
@@ -2346,11 +2594,11 @@ $BtnCalculate.add_Click({
       -ConcurrencyValue (ConvertTo-DoubleSafe -Text $TxtConcurrencyValue.Text -Default 60) `
       -PeakFactor (ConvertTo-DoubleSafe -Text $TxtPeakFactor.Text -Default 1.0) `
       -CpuTargetUtil (ConvertTo-DoubleSafe -Text $TxtCpuUtil.Text -Default 0.80) `
-      -MemTargetUtil (ConvertTo-DoubleSafe -Text $TxtMemUtil.Text -Default 0.80) `
-      -SystemResourceReserve (ConvertTo-DoubleSafe -Text $TxtVirtOverhead.Text -Default 0.15) `
-      -MinVcpuPerHost (ConvertTo-IntSafe -Text $TxtMinVcpuHost.Text -Default 8) `
-      -MaxVcpuPerHost (ConvertTo-IntSafe -Text $TxtMaxVcpuHost.Text -Default 128) `
-      -NPlusOneHosts (ConvertTo-IntSafe -Text $TxtNPlusOne.Text -Default 1) `
+      -MemTargetUtil (ConvertTo-DoubleSafe -Text $TxtMemUtil.Text -Default 1.0) `
+      -SystemResourceReserve (ConvertTo-DoubleSafe -Text $TxtVirtOverhead.Text -Default 0.20) `
+      -MinVcpuPerHost ([Math]::Max(8, (ConvertTo-IntSafe -Text $TxtMinVcpuHost.Text -Default 8))) `
+      -MaxVcpuPerHost ([Math]::Min(64, [Math]::Max(8, (ConvertTo-IntSafe -Text $TxtMaxVcpuHost.Text -Default 64)))) `
+      -NPlusOneHosts (ConvertTo-IntSafe -Text $TxtNPlusOne.Text -Default 0) `
       -ExtraHeadroomPercent (ConvertTo-DoubleSafe -Text $TxtExtraHeadroomPct.Text -Default 0) `
       -ProfileContainerGB (ConvertTo-DoubleSafe -Text $TxtProfileGB.Text -Default 30) `
       -ProfileGrowthPercent (ConvertTo-DoubleSafe -Text $TxtProfileGrowthPct.Text -Default 20) `
@@ -2381,55 +2629,75 @@ $BtnCalculate.add_Click({
 $BtnPickVm.add_Click({
   try {
     if (-not $script:LastSizing) { Write-UiWarning 'Calculate first.'; return }
-    if (-not (Test-AzAvailable)) { Write-AzModuleInstallHint; return }
-    if (-not (Connect-AzIfNeeded)) { return }
-    $loc = ConvertTo-ArmRegionName -LocationText $TxtLocation.Text
-    $currency = Get-CurrencyCode -Combo $CmbCurrency
-    $seriesRaw = Get-ComboText -Combo $CmbVmSeries
-    $series = switch -Wildcard ($seriesRaw) { 'D*' {'D'} 'E*' {'E'} 'F*' {'F'} 'NV*' {'NV'} 'NC*' {'NC'} 'B*' {'B'} default {'Any'} }
 
-    # Use PreferredSeries from sizing if user chose 'Any'
-    $hasDb = $script:LastSizing.AppOverhead -and $script:LastSizing.AppOverhead.HasDatabaseEngine
-    $needsGpu = $script:LastSizing.AppOverhead -and $script:LastSizing.AppOverhead.RequiresGPU
-    if ($series -eq 'Any' -and $script:LastSizing.PreferredSeries) {
+    # Determine preferred series from sizing
+    $seriesRaw = Get-ComboText -Combo $CmbVmSeries
+    $series = switch -Wildcard ($seriesRaw) { 'D*' {'D'} 'E*' {'E'} default {'D'} }
+    if ($series -eq 'D' -and $script:LastSizing.PreferredSeries) {
       $series = $script:LastSizing.PreferredSeries
     }
 
-    $sizes = Get-AzVmSizesInLocation $loc
-    if (-not $sizes -or $sizes.Count -lt 1) {
-      Write-UiWarning "No VM sizes returned for region '$loc'.`n`nPlease check:`n- Is the region name correct? (e.g. 'Switzerland North')`n- Are you signed in? Click 'Azure Login' first.`n- Does your subscription have access to this region?"
+    $maxVcpuRange = [Math]::Min(64, [Math]::Max(8, (ConvertTo-IntSafe -Text $TxtMaxVcpuHost.Text -Default 64)))
+    $minVcpu = $script:LastSizing.Recommended.VcpuPerHost
+    $minRamGB = $script:LastSizing.Recommended.RamGB_Provisioned
+
+    # Select best VM from BWS catalog
+    $bwsVm = Select-BwsVm -MinVcpu $minVcpu -MinRamGB $minRamGB -MaxVcpu $maxVcpuRange -PreferredSeries $series
+    if (-not $bwsVm) {
+      Write-UiWarning "No BWS VM template found (min $minVcpu vCPU, min $([Math]::Round($minRamGB,0)) GB RAM, max $maxVcpuRange vCPU)."
       return
     }
 
-    # Pass the user's vCPU max range to Get-BestVmSize
-    $maxVcpuRange = ConvertTo-IntSafe -Text $TxtMaxVcpuHost.Text -Default 128
-    $best = Get-BestVmSize -Sizes $sizes -MinVcpu $script:LastSizing.Recommended.VcpuPerHost `
-      -MinRamGB $script:LastSizing.Recommended.RamGB_Provisioned -MaxVcpu $maxVcpuRange `
-      -Series $series -Workload $script:LastSizing.Workload -HasDatabase $hasDb -RequiresGPU $needsGpu
+    # Select OS Disk from BWS catalog
+    $bwsOsDisk = Select-BwsOsDisk -MinSizeGiB 128
+    if (-not $bwsOsDisk) { $bwsOsDisk = $script:BwsOsStorageCatalog[0] }
 
-    # Handle strict error (no VM found in requested series)
-    if (-not $best) {
-      Write-UiWarning "No AVD-compatible VM found (min $($script:LastSizing.Recommended.VcpuPerHost) vCPU, min $([Math]::Round($script:LastSizing.Recommended.RamGB_Provisioned,0)) GB RAM)."
-      return
+    # Collect additional disks
+    $additionalDisks = @()
+    if ($script:BwsAdditionalDisks -and $script:BwsAdditionalDisks.Count -gt 0) {
+      $additionalDisks = $script:BwsAdditionalDisks
     }
-    if ($best.PSObject.Properties.Name -contains '_Error' -and $best._Error) {
-      Write-UiWarning $best._Message
-      return
+    $additionalDiskCost = ($additionalDisks | Measure-Object -Property PriceCHF -Sum).Sum
+    if (-not $additionalDiskCost) { $additionalDiskCost = 0 }
+
+    # Build a VM pick object compatible with existing code
+    $script:LastVmPick = [pscustomobject]@{
+      Name            = "Standard_$($bwsVm.Name -replace ' ','_')"
+      NumberOfCores   = $bwsVm.vCPU
+      MemoryInMB      = $bwsVm.RamGB * 1024
+      BwsName         = $bwsVm.Name
+      BwsPriceCHF     = $bwsVm.PriceCHF
+      BwsSeries       = $bwsVm.Series
+      BwsOsDisk       = $bwsOsDisk
+      BwsAddDisks     = $additionalDisks
+      BwsAddDiskCost  = $additionalDiskCost
+    }
+    $script:LastVmPrice = [pscustomobject]@{
+      retailPrice = 0; currencyCode = 'CHF'; unitOfMeasure = 'BWS Monthly'
+      bwsVmMonthly     = $bwsVm.PriceCHF
+      bwsOsDiskMonthly = $bwsOsDisk.PriceCHF
+      bwsAddDiskMonthly = $additionalDiskCost
+      bwsTotalPerHost  = $bwsVm.PriceCHF + $bwsOsDisk.PriceCHF + $additionalDiskCost
     }
 
-    # Check if vCPU range was exceeded
-    $rangeMsg = ''
-    if ($best.PSObject.Properties.Name -contains 'RangeExceededNote' -and $best.RangeExceededNote) {
-      $rangeMsg = "`n`nWARNING: $($best.RangeExceededNote)"
-    }
-
-    $script:LastVmPick = $best
-    $script:LastVmPrice = Get-AzVmHourlyRetailPrice -ArmRegionName $loc -ArmSkuName $best.Name -CurrencyCode $currency
     $hidePricingVal2 = (-not $Expert)
     Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick -VmPrice $script:LastVmPrice `
       -GridResults $GridResults -TxtNotes $TxtNotes -HidePricing $hidePricingVal2
-    $infoMsg = "Selected: $($best.Name) ($($best.NumberOfCores) vCPU, $([Math]::Round($best.MemoryInMB/1024,1)) GB)$rangeMsg"
-    if ($rangeMsg) { Write-UiWarning $infoMsg } else { Write-UiInfo $infoMsg }
+
+    # Update template output with BWS info
+    $addDiskInfo = if ($additionalDisks.Count -gt 0) {
+      "`n  Additional Disks: " + (($additionalDisks | ForEach-Object { "$($_.Sku) ($($_.SizeGiB) GiB) CHF $($_.PriceCHF)/mo" }) -join ', ')
+    } else { '' }
+    $TxtTemplateOut.Text = @"
+BWS VM Template: $($bwsVm.Name)
+  vCPU: $($bwsVm.vCPU), RAM: $($bwsVm.RamGB) GB, Series: $($bwsVm.Series)
+  VM Cost: CHF $($bwsVm.PriceCHF)/month
+  OS Disk: $($bwsOsDisk.Sku) ($($bwsOsDisk.SizeGiB) GiB, $($bwsOsDisk.IOPS) IOPS) CHF $($bwsOsDisk.PriceCHF)/month$addDiskInfo
+  Total per Host: CHF $([Math]::Round($bwsVm.PriceCHF + $bwsOsDisk.PriceCHF + $additionalDiskCost, 2))/month
+  Hosts Required: $($script:LastSizing.RecommendedHostsTotal)
+  Fleet Total: CHF $([Math]::Round(($bwsVm.PriceCHF + $bwsOsDisk.PriceCHF + $additionalDiskCost) * $script:LastSizing.RecommendedHostsTotal, 2))/month
+"@
+    Write-UiInfo "Selected: $($bwsVm.Name) ($($bwsVm.vCPU) vCPU, $($bwsVm.RamGB) GB) — CHF $($bwsVm.PriceCHF)/mo"
   } catch { Write-UiError "Failed: $($_.Exception.Message)" }
 })
 
@@ -2653,7 +2921,7 @@ $BtnExportReport.add_Click({
               <tbody>
                 <tr><td>SKU</td><td><strong>$($d.SessionHostDisks.OsDisk.RecommendedType)</strong></td></tr>
                 <tr><td>Size</td><td>$($d.SessionHostDisks.OsDisk.SuggestedSizeGiB) GiB</td></tr>
-                <tr><td>IOPS</td><td>$($d.SessionHostDisks.OsDisk.ProvisionedIOPS) (burst: $($d.SessionHostDisks.OsDisk.BurstIOPS))</td></tr>
+                <tr><td>IOPS</td><td>$($d.SessionHostDisks.OsDisk.ProvisionedIOPS)</td></tr>
               </tbody>
             </table>
             $dataDiskHtml
@@ -2664,7 +2932,6 @@ $BtnExportReport.add_Click({
               <tbody>
                 <tr><td>Tier</td><td><strong>$($d.FsLogixStorage.RecommendedTier)</strong></td></tr>
                 <tr><td>Steady IOPS</td><td>$($d.FsLogixStorage.PerformanceTargets.SteadyStateIOPS)</td></tr>
-                <tr><td>Burst IOPS</td><td>$($d.FsLogixStorage.PerformanceTargets.BurstIOPS)</td></tr>
                 <tr><td>Per User</td><td>$($s.FsLogix.PlannedPerUserGB) GB</td></tr>
                 <tr><td>Total at Peak</td><td>$($s.FsLogix.PlannedTotalGB_AtPeak) GB</td></tr>
                 <tr><td>Risk Level</td><td>$($d.FsLogixStorage.StorageRisk.Level)</td></tr>
@@ -2717,71 +2984,75 @@ $BtnExportReport.add_Click({
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AVD Sizing Report &mdash; $(esc $generated)</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
   :root {
-    --bg: #0f1117; --surface: #1a1d27; --surface2: #242835;
-    --border: #2e3345; --text: #e1e4ed; --text2: #8b90a5;
-    --accent: #3b82f6; --accent2: #60a5fa; --accent-glow: rgba(59,130,246,0.15);
-    --green: #34d399; --amber: #fbbf24; --red: #f87171;
+    --navy: #001155; --blue: #11AAFF; --red: #DD1122;
+    --int-blue: #086ADB; --int-blue-hover: #0048CF;
+    --bg: #FFFFFF; --surface: #F7F9FC; --surface2: #EFF3F8;
+    --border: #DDE3EB; --border-strong: #C5CDD8;
+    --text: #333333; --text2: #666666; --text3: #999999;
+    --accent-glow: rgba(0,17,85,0.04);
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; padding: 0; }
-  .container { max-width: 960px; margin: 0 auto; padding: 48px 32px; }
+  body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.65; font-size: 15px; font-weight: 400; -webkit-font-smoothing: antialiased; }
+  .container { max-width: 960px; margin: 0 auto; padding: 40px 32px; }
 
-  /* Header */
-  header { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-bottom: 1px solid var(--border); padding: 48px 0; }
-  header .container { display: flex; justify-content: space-between; align-items: flex-end; padding-top: 0; padding-bottom: 0; }
-  header h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; }
-  header h1 span { color: var(--accent2); }
-  .meta { text-align: right; color: var(--text2); font-size: 13px; }
-  .meta strong { color: var(--text); font-weight: 500; }
+  /* === SWISSCOM HEADER === */
+  header { background: var(--navy); padding: 0; }
+  header .container { display: flex; justify-content: space-between; align-items: center; padding-top: 32px; padding-bottom: 32px; }
+  header::after { content: ''; display: block; height: 4px; background: linear-gradient(90deg, var(--red) 0%, var(--red) 40%, var(--blue) 60%, var(--blue) 100%); }
+  header h1 { font-size: 26px; font-weight: 600; color: #FFFFFF; letter-spacing: -0.3px; line-height: 1.3; }
+  header h1 span { color: var(--blue); font-weight: 700; }
+  .meta { text-align: right; color: rgba(255,255,255,0.6); font-size: 13px; line-height: 1.7; }
+  .meta strong { color: #FFFFFF; font-weight: 500; }
 
-  /* Hero summary cards */
+  /* === SUMMARY CARDS === */
   .hero { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 32px 0; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; position: relative; overflow: hidden; }
-  .card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--accent); }
-  .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--text2); font-weight: 500; margin-bottom: 8px; }
-  .card .value { font-size: 28px; font-weight: 700; font-family: 'JetBrains Mono', monospace; color: var(--accent2); }
+  .card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 20px 22px; position: relative; overflow: hidden; transition: box-shadow 0.15s; }
+  .card:hover { box-shadow: 0 2px 12px rgba(0,17,85,0.06); }
+  .card::before { content: ''; position: absolute; top: 0; left: 0; width: 4px; height: 100%; background: var(--int-blue); border-radius: 8px 0 0 8px; }
+  .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--text3); font-weight: 600; margin-bottom: 8px; }
+  .card .value { font-size: 26px; font-weight: 700; font-family: 'JetBrains Mono', monospace; color: var(--navy); }
   .card .sub { font-size: 12px; color: var(--text2); margin-top: 4px; }
 
-  /* Sections */
-  section { margin: 40px 0; }
-  h2 { font-size: 20px; font-weight: 700; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
-  h2 .num { background: var(--accent); color: white; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; flex-shrink: 0; }
-  h3 { font-size: 15px; font-weight: 600; color: var(--text2); margin: 16px 0 10px; text-transform: uppercase; letter-spacing: 0.8px; }
+  /* === SECTIONS === */
+  section { margin: 36px 0; }
+  h2 { font-size: 18px; font-weight: 600; color: var(--navy); margin-bottom: 18px; padding-bottom: 12px; border-bottom: 2px solid var(--surface2); display: flex; align-items: center; gap: 12px; }
+  h2 .num { background: var(--red); color: white; width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex-shrink: 0; }
+  h3 { font-size: 13px; font-weight: 600; color: var(--text2); margin: 18px 0 10px; text-transform: uppercase; letter-spacing: 1px; }
 
-  /* Tables */
+  /* === TABLES (SDX-style) === */
   table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; }
-  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text2); padding: 10px 14px; border-bottom: 2px solid var(--border); font-weight: 600; }
-  td { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text3); padding: 10px 16px; border-bottom: 2px solid var(--border-strong); font-weight: 600; }
+  td { padding: 11px 16px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--text); }
   tr:hover td { background: var(--accent-glow); }
-  tr.highlight td { background: var(--surface2); font-weight: 500; }
+  tr.highlight td { background: var(--surface); font-weight: 500; }
   tbody tr:last-child td { border-bottom: none; }
-  tfoot td { border-top: 2px solid var(--border); border-bottom: none; }
+  tfoot td { border-top: 2px solid var(--border-strong); border-bottom: none; font-weight: 600; }
 
-  /* Badges */
-  .badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; margin: 4px 4px 12px 0; }
-  .badge.gpu { background: rgba(249,115,22,0.15); color: #fb923c; border: 1px solid rgba(249,115,22,0.3); }
-  .badge.db { background: rgba(168,85,247,0.15); color: #c084fc; border: 1px solid rgba(168,85,247,0.3); }
-  .badge.series { background: var(--accent-glow); color: var(--accent2); border: 1px solid rgba(59,130,246,0.3); }
+  /* === BADGES === */
+  .badge { display: inline-block; padding: 3px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; margin: 4px 4px 12px 0; }
+  .badge.gpu { background: #FFF0E6; color: #CC5500; border: 1px solid #FFCC99; }
+  .badge.db { background: #F0E6FF; color: #7733CC; border: 1px solid #CC99FF; }
+  .badge.series { background: #E6F3FF; color: var(--navy); border: 1px solid #99CCFF; }
 
-  /* Grid */
-  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-  .grid-2 > div { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  /* === GRID PANELS === */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid-2 > div { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
 
-  /* Notes */
-  .note { color: var(--text2); font-size: 13px; font-style: italic; margin: 8px 0; }
-  .warnings { background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); border-radius: 10px; padding: 16px 20px; margin: 16px 0; }
-  .warnings h3 { color: var(--amber); margin-top: 0; }
+  /* === NOTES & WARNINGS === */
+  .note { color: var(--text2); font-size: 13px; font-style: italic; margin: 8px 0; padding-left: 12px; border-left: 3px solid var(--border); }
+  .warnings { background: #FFFBF0; border: 1px solid #F5DFA0; border-left: 4px solid #E6A800; border-radius: 6px; padding: 16px 20px; margin: 16px 0; }
+  .warnings h3 { color: #B38600; margin-top: 0; text-transform: none; letter-spacing: 0; font-size: 14px; }
   .warnings ul { padding-left: 20px; }
-  .warnings li { font-size: 13px; color: var(--amber); margin: 4px 0; }
+  .warnings li { font-size: 13px; color: #8B6914; margin: 4px 0; }
 
-  /* Footer */
-  footer { margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text2); font-size: 12px; }
-  footer a { color: var(--accent2); text-decoration: none; }
-  footer a:hover { text-decoration: underline; }
+  /* === FOOTER === */
+  footer { margin-top: 48px; padding-top: 20px; border-top: 2px solid var(--surface2); color: var(--text3); font-size: 12px; }
+  footer a { color: var(--int-blue); text-decoration: none; }
+  footer a:hover { text-decoration: underline; color: var(--int-blue-hover); }
 
-  @media print { body { background: white; color: #1a1a1a; } .card { border: 1px solid #ccc; } .card::before { background: #333; } table { font-size: 12px; } }
+  @media print { body { background: white; } .card { border: 1px solid #ddd; box-shadow: none; } .card::before { background: var(--navy); } header::after { background: var(--red); } }
   @media (max-width: 768px) { .hero { grid-template-columns: 1fr 1fr; } .grid-2 { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -2793,7 +3064,7 @@ $BtnExportReport.add_Click({
     </div>
     <div class="meta">
       <strong>$generated</strong><br>
-      Calculator v$ScriptVersion<br>
+      BWS AVD Sizing v$ScriptVersion<br>
       Region: $region
     </div>
   </div>
@@ -2810,7 +3081,7 @@ $BtnExportReport.add_Click({
     <div class="card">
       <div class="label">Session Hosts</div>
       <div class="value">$($s.RecommendedHostsTotal)</div>
-      <div class="sub">incl. N+1 redundancy</div>
+      <div class="sub">Session Hosts</div>
     </div>
     <div class="card">
       <div class="label">Per Host</div>
@@ -2837,7 +3108,7 @@ $BtnExportReport.add_Click({
         <tr><td>Users per Host</td><td>$($r.UsersPerHost)</td></tr>
         <tr><td>vCPU per Host</td><td>$($r.VcpuPerHost)</td></tr>
         <tr><td>RAM per Host</td><td>$($r.RamGB_Provisioned) GB (provisioned)</td></tr>
-        <tr class="highlight"><td>Session Hosts Total</td><td><strong>$($s.RecommendedHostsTotal)</strong> (incl. N+1)</td></tr>
+        <tr class="highlight"><td>Session Hosts Total</td><td><strong>$($s.RecommendedHostsTotal)</strong></td></tr>
         <tr><td>Guideline Examples</td><td>$($s.Examples)</td></tr>
       </tbody>
     </table>
@@ -2893,7 +3164,7 @@ $BtnExportReport.add_Click({
   </section>
 
   <footer>
-    $(Get-Str 'rpt.generated') AVD Sizing Calculator v$ScriptVersion &bull; All recommendations should be validated with <a href="https://learn.microsoft.com/en-us/azure/virtual-desktop/insights">AVD Insights</a> monitoring and pilot deployments.
+    $(Get-Str 'rpt.generated') BWS AVD Sizing v$ScriptVersion &bull; All recommendations should be validated with <a href="https://learn.microsoft.com/en-us/azure/virtual-desktop/insights">AVD Insights</a> monitoring and pilot deployments.
   </footer>
 </div>
 </body>
@@ -2910,7 +3181,7 @@ $BtnExportReport.add_Click({
 $BtnCalcUserCosts.add_Click({
   try {
     if (-not $script:LastSizing) { Write-UiWarning 'Calculate sizing first.'; return }
-    if (-not $script:LastVmPick) { Write-UiWarning "Click 'Pick VM from Azure' first to get pricing data."; return }
+    if (-not $script:LastVmPick) { Write-UiWarning "Click 'Suggest VM Template' first to get pricing data."; return }
     if (-not $script:LastVmPrice -or ($script:LastVmPrice.PSObject.Properties.Name -contains 'Error' -and $script:LastVmPrice.Error)) {
       Write-UiWarning 'VM pricing not available. Check Azure login and try Pick VM again.'; return
     }
@@ -3129,7 +3400,7 @@ $BtnDiagnostics.add_Click({
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Diagnostics" Height="520" Width="620" WindowStartupLocation="CenterOwner"
-        Background="#1e1e2e" Foreground="#cdd6f4" ResizeMode="NoResize">
+        Background="#FFFFFF" Foreground="#001155" ResizeMode="NoResize">
   <Grid Margin="16">
     <Grid.RowDefinitions>
       <RowDefinition Height="*"/>
@@ -3138,20 +3409,20 @@ $BtnDiagnostics.add_Click({
     </Grid.RowDefinitions>
     <TextBox Grid.Row="0" x:Name="TxtDiagInfo" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
              VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11"
-             Background="#313244" Foreground="#cdd6f4" BorderBrush="#585b70" Padding="8"/>
+             Background="#F5F8FC" Foreground="#001155" BorderBrush="#D8DFE8" Padding="8"/>
     <StackPanel Grid.Row="1" Margin="0,12,0,0">
-      <TextBlock FontWeight="Bold" Foreground="#fab387" Text="Azure Account Actions" Margin="0,0,0,6"/>
-      <TextBlock x:Name="TxtConnStatus" Foreground="#a6adc8" FontSize="11" Margin="0,0,0,8"/>
+      <TextBlock FontWeight="Bold" Foreground="#DD1122" Text="Azure Account Actions" Margin="0,0,0,6"/>
+      <TextBlock x:Name="TxtConnStatus" Foreground="#556688" FontSize="11" Margin="0,0,0,8"/>
       <StackPanel Orientation="Horizontal">
         <Button x:Name="BtnDiagLogin" Content="Login with different account" Width="220" Padding="10,6"
-                Background="#89b4fa" Foreground="#1e1e2e" FontWeight="Bold" Cursor="Hand" Margin="0,0,10,0"/>
+                Background="#086ADB" Foreground="#FFFFFF" FontWeight="Bold" Cursor="Hand" Margin="0,0,10,0"/>
         <Button x:Name="BtnDiagDisconnect" Content="Disconnect account" Width="180" Padding="10,6"
-                Background="#f38ba8" Foreground="#1e1e2e" FontWeight="Bold" Cursor="Hand"/>
+                Background="#DD1122" Foreground="#FFFFFF" FontWeight="Bold" Cursor="Hand"/>
       </StackPanel>
     </StackPanel>
     <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
       <Button x:Name="BtnDiagClose" Content="Close" Width="100" Padding="10,6"
-              Background="#45475a" Foreground="#cdd6f4" Cursor="Hand"/>
+              Background="#001155" Foreground="#FFFFFF" Cursor="Hand"/>
     </StackPanel>
   </Grid>
 </Window>
@@ -3190,12 +3461,12 @@ $BtnDiagnostics.add_Click({
         Disconnect-AzAccount -ErrorAction SilentlyContinue | Out-Null
         Clear-AzContext -Force -ErrorAction SilentlyContinue | Out-Null
         $txtConnStatus.Text = "Disconnected. All Azure sessions cleared."
-        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#a6e3a1')
+        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#44DD44')
         $btnDiagLogin.Content = "Login to Azure"
         Write-UiInfo "Azure account disconnected."
       } catch {
         $txtConnStatus.Text = "Disconnect failed: $($_.Exception.Message)"
-        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#f38ba8')
+        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#FF4455')
         $btnDiagDisconnect.IsEnabled = $true
       }
     }.GetNewClosure())
@@ -3204,23 +3475,23 @@ $BtnDiagnostics.add_Click({
     $btnDiagLogin.add_Click({
       try {
         $txtConnStatus.Text = "Opening Azure login prompt..."
-        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#fab387')
+        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#DD1122')
         # Force new login (ignores cached token)
         $newCtx = Connect-AzAccount -Force -ErrorAction Stop
         if ($newCtx -and $newCtx.Context -and $newCtx.Context.Account) {
           $newAcct = $newCtx.Context.Account.Id
           $newSub  = $newCtx.Context.Subscription.Name
           $txtConnStatus.Text = "Logged in as: $newAcct ($newSub)"
-          $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#a6e3a1')
+          $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#44DD44')
           $btnDiagDisconnect.IsEnabled = $true
           Write-UiInfo "Azure login successful: $newAcct"
         } else {
           $txtConnStatus.Text = "Login cancelled or failed."
-          $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#f38ba8')
+          $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#FF4455')
         }
       } catch {
         $txtConnStatus.Text = "Login failed: $($_.Exception.Message)"
-        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#f38ba8')
+        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#FF4455')
       }
     }.GetNewClosure())
 
@@ -3243,7 +3514,7 @@ $BtnReset.add_Click({
   $CmbConcurrencyMode.SelectedIndex = 0
   $TxtConcurrencyValue.Text = '60'
   $TxtPeakFactor.Text = '1.0'
-  $TxtNPlusOne.Text = '1'
+  $TxtNPlusOne.Text = '0'
   $TxtExtraHeadroomPct.Text = '0'
   $CmbLoadBalancing.SelectedIndex = 0  # Breadth-first
   $TxtMaxSessionLimit.Text = '0'
@@ -3252,11 +3523,11 @@ $BtnReset.add_Click({
   $TxtProfileGB.Text = '30'
   $TxtProfileGrowthPct.Text = '20'
   $TxtProfileOverheadPct.Text = '10'
-  $TxtCpuUtil.Text = '0.80'
-  $TxtMemUtil.Text = '0.80'
-  $TxtVirtOverhead.Text = '0.15'
+  $TxtCpuUtil.Text = '1.0'
+  $TxtMemUtil.Text = '1.0'
+  $TxtVirtOverhead.Text = '0.20'
   $TxtMinVcpuHost.Text = '8'
-  $TxtMaxVcpuHost.Text = '128'
+  $TxtMaxVcpuHost.Text = '64'
 
   # Applications tab - uncheck all
   foreach ($kv in $script:AppCheckboxMap.GetEnumerator()) {
@@ -3267,6 +3538,7 @@ $BtnReset.add_Click({
   # Azure tab
   $CmbVmSeries.SelectedIndex = 0      # Any (auto)
   $TxtTemplateOut.Text = ''
+  $script:BwsAdditionalDisks.Clear()
 
   # Results tab - clear
   $GridResults.ItemsSource = $null
