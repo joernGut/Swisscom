@@ -1,6 +1,6 @@
 <#
 ================================================================================
-  Author:  Jörn Gutting (optimised by Claude)
+  Author:  Jörn Gutting 
   Script:  BWS AVD Sizing - Swisscom Branded Edition (WPF GUI) - PowerShell 7
   Version: 2.0.0
   Date:    2025-02-20
