@@ -298,8 +298,8 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion  = '2.0.2'
-$ScriptBuildUtc = '2025-02-20T12:00:00Z'
+$ScriptVersion  = '2.0.3'
+$ScriptBuildUtc = '2025-02-20T13:00:00Z'
 
 #region Ensure STA for WPF
 if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
@@ -1896,11 +1896,6 @@ function Apply-Language {
   # Costs tab
   Set-LblText 'LblCostTitle'      'cost.title'
   Set-LblText 'LblCostDesc'       'cost.desc'
-  Set-LblText 'LblSchedule'       'cost.schedule'
-  Set-LblText 'LblHours'          'cost.hours'
-  Set-LblText 'LblHoursDesc'      'cost.hours.desc'
-  Set-LblText 'LblDays'           'cost.days'
-  Set-LblText 'LblDaysDesc'       'cost.days.desc'
   Set-LblText 'LblDiscDesc'       'cost.disc.desc'
   Set-LblText 'LblBreakdown'      'cost.breakdown'
 
@@ -2084,7 +2079,7 @@ $XamlString = @"
     <DockPanel LastChildFill="False">
       <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
         <TextBlock FontSize="20" FontWeight="Bold" Foreground="#FFFFFF" Text="BWS AVD Sizing"/>
-        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v2.0.2"/>
+        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v2.0.3"/>
       </StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
         <TextBlock Foreground="#88AACC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0" Text="Language:"/>
@@ -2346,26 +2341,15 @@ $XamlString = @"
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Margin="0,0,0,8">
             <TextBlock x:Name="LblCostTitle" FontSize="14" FontWeight="Bold" Foreground="#086ADB" Text="Cost Analysis"/>
-            <TextBlock x:Name="LblCostDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Configure operating schedule and calculate per-user costs. Requires 'Suggest VM Template' on the Results tab first."/>
+            <TextBlock x:Name="LblCostDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Calculate per-user costs. Requires 'Suggest VM Template' on the Results tab first."/>
           </StackPanel>
           <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
           <Grid>
             <Grid.ColumnDefinitions><ColumnDefinition Width="400"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
 
             <StackPanel Grid.Column="0" Margin="0,0,16,0">
-              <!-- Operating Schedule -->
-              <TextBlock x:Name="LblSchedule" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="Operating Schedule" Margin="0,0,0,4"/>
-              <TextBlock x:Name="LblHours" FontWeight="Bold" Text="Operating hours per day"/>
-              <TextBlock x:Name="LblHoursDesc" Foreground="#556688" FontSize="11" Text="24 = always on, 10 = business hours only."/>
-              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtOperatingHours" Width="100" Text="10"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="hrs/day (1-24)"/></StackPanel>
-
-              <TextBlock x:Name="LblDays" FontWeight="Bold" Text="Operating days per month"/>
-              <TextBlock x:Name="LblDaysDesc" Foreground="#556688" FontSize="11" Text="22 = work month, 30 = daily use."/>
-              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtOperatingDays" Width="100" Text="22"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="days/month (1-31)"/></StackPanel>
-
-              <Separator Margin="0,4,0,4"/>
               <Button x:Name="BtnCalcUserCosts" Content="Calculate Costs" Width="200" HorizontalAlignment="Left" FontWeight="Bold"
-                      Background="#086ADB" Foreground="#FFFFFF"/>
+                      Background="#086ADB" Foreground="#FFFFFF" Margin="0,4,0,0"/>
             </StackPanel>
 
             <Border Grid.Column="1" Padding="14" BorderBrush="#D8DFE8" BorderThickness="1" CornerRadius="8" Background="#F5F8FC">
@@ -2486,8 +2470,6 @@ $CmbLanguage.add_SelectionChanged({
 
 # Costs tab (visible with -Expert)
 $TabUserCosts = $Window.FindName('TabUserCosts')
-$TxtOperatingHours = $Window.FindName('TxtOperatingHours')
-$TxtOperatingDays = $Window.FindName('TxtOperatingDays')
 $BtnCalcUserCosts = $Window.FindName('BtnCalcUserCosts')
 $GridUserCosts = $Window.FindName('GridUserCosts')
 $TxtUserCostNotes = $Window.FindName('TxtUserCostNotes')
@@ -2752,8 +2734,8 @@ $BtnExportReport.add_Click({
     $userCostsHtml = ''
     $isBwsPrice = $script:LastVmPrice -and ($script:LastVmPrice.PSObject.Properties.Name -contains 'bwsTotalPerHost')
     if ($script:LastVmPrice -and ($isBwsPrice -or ($script:LastVmPrice.PSObject.Properties.Name -contains 'RetailPricePerHour'))) {
-      $ucHoursPerDay  = [Math]::Max(1, [Math]::Min(24, (ConvertTo-IntSafe -Text $TxtOperatingHours.Text -Default 10)))
-      $ucDaysPerMonth = [Math]::Max(1, [Math]::Min(31, (ConvertTo-IntSafe -Text $TxtOperatingDays.Text -Default 22)))
+      $ucHoursPerDay  = 24
+      $ucDaysPerMonth = 30
       $ucMonthlyHrs = $ucHoursPerDay * $ucDaysPerMonth
 
       if ($isBwsPrice) {
@@ -2801,14 +2783,6 @@ $BtnExportReport.add_Click({
       $userCostsHtml = @"
       <section>
         <h2><span class="num">$sectionNum</span> $(Get-Str 'rpt.usercosts')</h2>
-        <h3>Operating Schedule</h3>
-        <table>
-          <tbody>
-            <tr><td>Hours/Day</td><td>$ucHoursPerDay</td></tr>
-            <tr><td>Days/Month</td><td>$ucDaysPerMonth</td></tr>
-            <tr><td>Monthly Hours/Host</td><td>$ucMonthlyHrs</td></tr>
-          </tbody>
-        </table>
         $costBreakdownHtml
         <h3>Fleet Costs</h3>
         <table>
@@ -3131,8 +3105,8 @@ $BtnCalcUserCosts.add_Click({
     if (-not $script:LastVmPrice) { Write-UiWarning 'VM pricing not available.'; return }
 
     $s = $script:LastSizing; $r = $s.Recommended; $p = $script:LastVmPrice
-    $hoursPerDay  = [Math]::Max(1, [Math]::Min(24, (ConvertTo-IntSafe -Text $TxtOperatingHours.Text -Default 10)))
-    $daysPerMonth = [Math]::Max(1, [Math]::Min(31, (ConvertTo-IntSafe -Text $TxtOperatingDays.Text -Default 22)))
+    $hoursPerDay  = 24
+    $daysPerMonth = 30
 
     $isBwsP = $p.PSObject.Properties.Name -contains 'bwsTotalPerHost'
     if ($isBwsP) {
@@ -3164,8 +3138,6 @@ $BtnCalcUserCosts.add_Click({
     } else {
       $rows.Add([pscustomobject]@{ Key='VM Size'; Value=$script:LastVmPick.Name })
     }
-    $rows.Add([pscustomobject]@{ Key='Operating hours/day'; Value=$hoursPerDay })
-    $rows.Add([pscustomobject]@{ Key='Operating days/month'; Value=$daysPerMonth })
 
     $rows.Add([pscustomobject]@{ Key='--- COST BREAKDOWN PER HOST ---'; Value='' })
     if ($isBwsP) {
@@ -3214,8 +3186,6 @@ $BtnCalcUserCosts.add_Click({
     } else {
       [void]$notes.AppendLine("VM: $($script:LastVmPick.Name) | $hostsTotal hosts")
     }
-    [void]$notes.AppendLine("")
-    [void]$notes.AppendLine("Schedule: ${hoursPerDay}h/day x ${daysPerMonth} days")
     [void]$notes.AppendLine("")
     [void]$notes.AppendLine("FLEET + PER USER:")
     [void]$notes.AppendLine("  Monthly total:   $monthlyAllHosts $currency ($hostsTotal hosts)")
@@ -3269,8 +3239,6 @@ $BtnReset.add_Click({
   $TxtNotes.Text = ''
 
   # Costs tab - clear
-  $TxtOperatingHours.Text = '10'
-  $TxtOperatingDays.Text = '22'
   $GridUserCosts.ItemsSource = $null
   $TxtUserCostNotes.Text = ''
 
