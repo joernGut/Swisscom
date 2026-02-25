@@ -2,26 +2,31 @@
 ================================================================================
   Author:  Jörn Gutting (optimised by Claude)
   Script:  BWS AVD Sizing - Swisscom Branded Edition (WPF GUI) - PowerShell 7
-  Version: 1.0.0
-  Date:    2025-02-19
+  Version: 2.0.0
+  Date:    2025-02-20
 
   CHANGELOG
   =========
 
-  v1.7.0 (2025-02-20)
+  v2.0.0 (2025-02-20)
   --------------------
-  - FIX: MB/s added to all disk displays (OS Disk in ResultsGrid, Template output, HTML report)
-  - FIX: OS Disk selection in "Suggest VM Template" now uses calculated requirements
-    from sizing (MinSizeGiB, ProvisionedIOPS) instead of hardcoded 128 GiB,
-    ensuring OS Disk matches between Calculate results and VM Template suggestion
-  - REMOVED: -Expert parameter entirely — all features now always visible:
-    * Costs tab: always visible (was Expert-only)
-    * Template JSON panel: always visible
-    * Azure Login / Load SKUs buttons: always visible
-    * Export JSON button: always visible
-    * Diagnostics button: always visible
-    * Pricing in results grid: always shown
-    * Pricing in HTML report: always shown
+  - NEW: Disclaimer dialog shown on script startup (placeholder for future content)
+  - SIMPLIFIED: Per-user costs unified — removed "named user" vs "concurrent user"
+    distinction, now shows only "Monthly / User" and "Yearly / User"
+  - REMOVED: Template JSON panel (title, ARM description, TextBox) from VM Template tab
+  - REMOVED: Azure Login + Load SKUs buttons (PnlAzureActions)
+  - REMOVED: Diagnostics button + full WPF diagnostics dialog (~180 lines)
+  - REMOVED: JSON Export button + handler
+  - REMOVED: Discounts (CSP/EA, Reserved Instance, Additional) from GUI + Report
+  - REMOVED: Azure Hybrid Benefit checkbox from GUI + Report
+  - REMOVED: Currency selector — CHF hardcoded as fixed currency
+  - REMOVED: -Expert parameter — all features always visible
+  - FIX: Report crash "variable '$ucMonthlyHrs' cannot be retrieved" — now set before
+    BWS/Azure branch
+  - FIX: Parser error from orphaned old cost handler code block
+  - FIX: MB/s added to all disk displays (OS Disk in ResultsGrid, Template output, Report)
+  - FIX: OS Disk selection in "Suggest VM Template" uses calculated sizing requirements
+  - FIX: Set-ResultsGrid handles BWS pricing objects (bwsTotalPerHost vs RetailPricePerHour)
 
   v1.5.0 (2025-02-20)
   --------------------
@@ -293,8 +298,8 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion  = '1.9.0'
-$ScriptBuildUtc = '2025-02-20T07:00:00Z'
+$ScriptVersion  = '2.0.0'
+$ScriptBuildUtc = '2025-02-20T10:00:00Z'
 
 #region Ensure STA for WPF
 if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
@@ -2070,7 +2075,7 @@ $XamlString = @"
     <DockPanel LastChildFill="False">
       <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
         <TextBlock FontSize="20" FontWeight="Bold" Foreground="#FFFFFF" Text="BWS AVD Sizing"/>
-        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v1.9.0"/>
+        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v2.0.0"/>
       </StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
         <TextBlock Foreground="#88AACC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0" Text="Language:"/>
@@ -2286,12 +2291,6 @@ $XamlString = @"
               </DataGrid.Columns>
             </DataGrid>
 
-            <StackPanel x:Name="PnlTemplateJson">
-            <Separator Margin="0,12,0,8"/>
-            <TextBlock FontWeight="Bold" Text="Template JSON"/>
-            <TextBlock Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="ARM template JSON for the selected VM. Copy into your IaC deployment."/>
-            <TextBox x:Name="TxtTemplateOut" Height="160" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
-            </StackPanel>
           </StackPanel>
           </ScrollViewer>
 
@@ -2427,7 +2426,6 @@ $TxtDbDataGB = $Window.FindName('TxtDbDataGB')
 $TxtLocation = $Window.FindName('TxtLocation'); $CmbVmSeries = $Window.FindName('CmbVmSeries')
 $TxtPublisher = $Window.FindName('TxtPublisher'); $TxtOffer = $Window.FindName('TxtOffer')
 $CmbSku = $Window.FindName('CmbSku'); $TxtVersion = $Window.FindName('TxtVersion')
-$TxtTemplateOut = $Window.FindName('TxtTemplateOut')
 
 # Additional Disks
 $CmbAddDiskSku = $Window.FindName('CmbAddDiskSku')
@@ -2487,7 +2485,6 @@ $TxtUserCostNotes = $Window.FindName('TxtUserCostNotes')
 $TabUserCosts.Visibility = 'Visible'
 
 # All panels visible (Expert mode removed)
-$PnlTemplateJson = $Window.FindName('PnlTemplateJson')
 
 $script:LastSizing = $null; $script:LastVmPick = $null; $script:LastVmPrice = $null
 
@@ -2556,17 +2553,6 @@ $BtnCalculate.add_Click({
       -AppOverhead $appOverhead
 
     if ($script:LastSizing -is [System.Array]) { $script:LastSizing = $script:LastSizing | Select-Object -First 1 }
-
-    $TxtTemplateOut.Text = ([ordered]@{
-      sizing=[ordered]@{ hostPoolType=$script:LastSizing.HostPoolType; workload=$script:LastSizing.Workload
-        peakUsers=$script:LastSizing.PeakConcurrentUsers; hostsTotal=$script:LastSizing.RecommendedHostsTotal
-        vcpu=$script:LastSizing.Recommended.VcpuPerHost; ramGB=$script:LastSizing.Recommended.RamGB_Provisioned }
-      osDisk=[ordered]@{ sku=$script:LastSizing.Disks.SessionHostDisks.OsDisk.RecommendedType
-        sizeGiB=$script:LastSizing.Disks.SessionHostDisks.OsDisk.SuggestedSizeGiB }
-      fsLogix=[ordered]@{ tier=$script:LastSizing.Disks.FsLogixStorage.RecommendedTier
-        riskLevel=$script:LastSizing.Disks.FsLogixStorage.StorageRisk.Level }
-      apps = $selectedApps
-    } | ConvertTo-Json -Depth 10)
 
     $hidePricingVal = $false
     Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick -VmPrice $script:LastVmPrice `
@@ -2642,19 +2628,6 @@ $BtnPickVm.add_Click({
     Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick -VmPrice $script:LastVmPrice `
       -GridResults $GridResults -TxtNotes $TxtNotes -HidePricing $hidePricingVal2
 
-    # Update template output with BWS info
-    $addDiskInfo = if ($additionalDisks.Count -gt 0) {
-      "`n  Additional Disks: " + (($additionalDisks | ForEach-Object { "$($_.Sku) ($($_.SizeGiB) GiB) CHF $($_.PriceCHF)/mo" }) -join ', ')
-    } else { '' }
-    $TxtTemplateOut.Text = @"
-BWS VM Template: $($bwsVm.Name)
-  vCPU: $($bwsVm.vCPU), RAM: $($bwsVm.RamGB) GB, Series: $($bwsVm.Series)
-  VM Cost: CHF $($bwsVm.PriceCHF)/month
-  OS Disk: $($bwsOsDisk.Sku) ($($bwsOsDisk.SizeGiB) GiB, $($bwsOsDisk.IOPS) IOPS, $($bwsOsDisk.MBps) MB/s) CHF $($bwsOsDisk.PriceCHF)/month$addDiskInfo
-  Total per Host: CHF $([Math]::Round($bwsVm.PriceCHF + $bwsOsDisk.PriceCHF + $additionalDiskCost, 2))/month
-  Hosts Required: $($script:LastSizing.RecommendedHostsTotal)
-  Fleet Total: CHF $([Math]::Round(($bwsVm.PriceCHF + $bwsOsDisk.PriceCHF + $additionalDiskCost) * $script:LastSizing.RecommendedHostsTotal, 2))/month
-"@
     Write-UiInfo "Selected: $($bwsVm.Name) ($($bwsVm.vCPU) vCPU, $($bwsVm.RamGB) GB) — CHF $($bwsVm.PriceCHF)/mo"
   } catch { Write-UiError "Failed: $($_.Exception.Message)" }
 })
@@ -2783,13 +2756,10 @@ $BtnExportReport.add_Click({
 
       $ucHostsTotal = [int]$s.RecommendedHostsTotal
       $ucTotalUsers = [int]$s.TotalUsers
-      $ucPeakUsers  = [int]$s.PeakConcurrentUsers
 
       $ucMonthlyAll     = [Math]::Round($ucMonthlyPerHost * $ucHostsTotal, 2)
-      $ucPerNamed       = if ($ucTotalUsers -gt 0) { [Math]::Round($ucMonthlyAll / $ucTotalUsers, 2) } else { 0 }
-      $ucPerConcurrent  = if ($ucPeakUsers -gt 0) { [Math]::Round($ucMonthlyAll / $ucPeakUsers, 2) } else { 0 }
-      $ucPerDay         = if ($ucTotalUsers -gt 0 -and $ucDaysPerMonth -gt 0) { [Math]::Round($ucPerNamed / $ucDaysPerMonth, 2) } else { 0 }
-      $ucYearlyPerUser  = [Math]::Round($ucPerNamed * 12, 2)
+      $ucPerUser        = if ($ucTotalUsers -gt 0) { [Math]::Round($ucMonthlyAll / $ucTotalUsers, 2) } else { 0 }
+      $ucYearlyPerUser  = [Math]::Round($ucPerUser * 12, 2)
       $ucYearlyTotal    = [Math]::Round($ucMonthlyAll * 12, 2)
 
       $userCostsHtml = @"
@@ -2812,15 +2782,12 @@ $BtnExportReport.add_Click({
             <tr><td>Yearly All Hosts</td><td>$ucYearlyTotal $ucCur</td></tr>
           </tbody>
         </table>
-        <h3>Per-User Costs</h3>
+        <h3>Costs per User</h3>
         <table>
           <tbody>
-            <tr><td>Total Named Users</td><td>$ucTotalUsers</td></tr>
-            <tr><td>Peak Concurrent Users</td><td>$ucPeakUsers</td></tr>
-            <tr class="highlight"><td>Monthly / Named User</td><td><strong>$ucPerNamed $ucCur</strong></td></tr>
-            <tr><td>Monthly / Concurrent User</td><td>$ucPerConcurrent $ucCur</td></tr>
-            <tr><td>Daily / Named User</td><td>$ucPerDay $ucCur</td></tr>
-            <tr class="highlight"><td>Yearly / Named User</td><td><strong>$ucYearlyPerUser $ucCur</strong></td></tr>
+            <tr><td>Total Users</td><td>$ucTotalUsers</td></tr>
+            <tr class="highlight"><td>Monthly / User</td><td><strong>$ucPerUser $ucCur</strong></td></tr>
+            <tr class="highlight"><td>Yearly / User</td><td><strong>$ucYearlyPerUser $ucCur</strong></td></tr>
           </tbody>
         </table>
         <p class="note">BWS managed pricing. Includes VM, OS Disk and additional disks per host.</p>
@@ -3147,10 +3114,8 @@ $BtnCalcUserCosts.add_Click({
     $totalUsers = [int]$s.TotalUsers
 
     $monthlyAllHosts = [Math]::Round($monthlyPerHost * $hostsTotal, 2)
-    $costPerConcurrentUser = if ($peakUsers -gt 0) { [Math]::Round($monthlyAllHosts / $peakUsers, 2) } else { 0 }
-    $costPerNamedUser = if ($totalUsers -gt 0) { [Math]::Round($monthlyAllHosts / $totalUsers, 2) } else { 0 }
-    $costPerUserPerDay = if ($totalUsers -gt 0 -and $daysPerMonth -gt 0) { [Math]::Round($costPerNamedUser / $daysPerMonth, 2) } else { 0 }
-    $yearlyPerNamedUser = [Math]::Round($costPerNamedUser * 12, 2)
+    $costPerUser = if ($totalUsers -gt 0) { [Math]::Round($monthlyAllHosts / $totalUsers, 2) } else { 0 }
+    $yearlyPerUser = [Math]::Round($costPerUser * 12, 2)
     $yearlyTotal = [Math]::Round($monthlyAllHosts * 12, 2)
 
     # Build results grid
@@ -3171,14 +3136,10 @@ $BtnCalcUserCosts.add_Click({
     $rows.Add([pscustomobject]@{ Key='Monthly/Host'; Value="$monthlyPerHost $currency" })
     $rows.Add([pscustomobject]@{ Key='Monthly all Hosts'; Value="$monthlyAllHosts $currency" })
     $rows.Add([pscustomobject]@{ Key='Yearly all Hosts'; Value="$yearlyTotal $currency" })
-    $rows.Add([pscustomobject]@{ Key='--- PER USER COSTS ---'; Value='' })
-    $rows.Add([pscustomobject]@{ Key='Total named users'; Value=$totalUsers })
-    $rows.Add([pscustomobject]@{ Key='Peak concurrent users'; Value=$peakUsers })
-    $rows.Add([pscustomobject]@{ Key='Users/Host'; Value=$usersPerHost })
-    $rows.Add([pscustomobject]@{ Key='Monthly/named user'; Value="$costPerNamedUser $currency" })
-    $rows.Add([pscustomobject]@{ Key='Monthly/concurrent user'; Value="$costPerConcurrentUser $currency" })
-    $rows.Add([pscustomobject]@{ Key='Daily/named user'; Value="$costPerUserPerDay $currency" })
-    $rows.Add([pscustomobject]@{ Key='Yearly/named user'; Value="$yearlyPerNamedUser $currency" })
+    $rows.Add([pscustomobject]@{ Key='--- COSTS PER USER ---'; Value='' })
+    $rows.Add([pscustomobject]@{ Key='Total Users'; Value=$totalUsers })
+    $rows.Add([pscustomobject]@{ Key='Monthly / User'; Value="$costPerUser $currency" })
+    $rows.Add([pscustomobject]@{ Key='Yearly / User'; Value="$yearlyPerUser $currency" })
 
     $GridUserCosts.ItemsSource = $rows
 
@@ -3196,11 +3157,11 @@ $BtnCalcUserCosts.add_Click({
     [void]$notes.AppendLine("")
     [void]$notes.AppendLine("BWS MANAGED PRICING (VM + OS Disk + Additional Disks):")
     [void]$notes.AppendLine("  Monthly total: $monthlyAllHosts $currency")
-    [void]$notes.AppendLine("  Per named user/month: $costPerNamedUser $currency")
-    [void]$notes.AppendLine("  Per named user/year: $yearlyPerNamedUser $currency")
+    [void]$notes.AppendLine("  Per user/month: $costPerUser $currency")
+    [void]$notes.AppendLine("  Per user/year: $yearlyPerUser $currency")
 
     $TxtUserCostNotes.Text = $notes.ToString()
-    Write-UiInfo "User costs calculated: $costPerNamedUser $currency/user/month ($yearlyPerNamedUser $currency/user/year)"
+    Write-UiInfo "User costs calculated: $costPerUser $currency/user/month ($yearlyPerUser $currency/user/year)"
   } catch { Write-UiError "User cost calculation failed: $($_.Exception.Message)" }
 })
 
@@ -3239,7 +3200,6 @@ $BtnReset.add_Click({
 
   # Azure tab
   $CmbVmSeries.SelectedIndex = 0      # Any (auto)
-  $TxtTemplateOut.Text = ''
   $script:BwsAdditionalDisks.Clear()
 
   # Results tab - clear
@@ -3259,6 +3219,47 @@ $BtnClose.add_Click({ $Window.Close() })
 
 $CmbSku.Items.Clear(); @('win11-24h2-avd-m365','win11-23h2-avd-m365','win11-24h2-avd','win11-23h2-avd') | ForEach-Object { [void]$CmbSku.Items.Add($_) }
 $CmbSku.SelectedIndex = 0
+#endregion
+
+#region Disclaimer Dialog
+$disclaimerXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="BWS AVD Sizing — Disclaimer" Width="560" Height="400"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Background="#FFFFFF">
+  <Grid Margin="24">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <!-- Header -->
+    <StackPanel Grid.Row="0" Margin="0,0,0,16">
+      <TextBlock Text="Disclaimer" FontSize="20" FontWeight="Bold" Foreground="#001155"/>
+      <Rectangle Height="3" Fill="#DD1122" HorizontalAlignment="Left" Width="60" Margin="0,6,0,0"/>
+    </StackPanel>
+
+    <!-- Disclaimer Content -->
+    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,0,0,16">
+      <TextBlock x:Name="TxtDisclaimer" TextWrapping="Wrap" Foreground="#333333" FontSize="13" LineHeight="22"
+                 Text="Disclaimer text will be added here."/>
+    </ScrollViewer>
+
+    <!-- Accept Button -->
+    <Button x:Name="BtnAcceptDisclaimer" Grid.Row="2" Content="Accept" Width="160" Height="36"
+            HorizontalAlignment="Center" FontWeight="Bold" FontSize="14"
+            Background="#086ADB" Foreground="#FFFFFF" BorderThickness="0"
+            Cursor="Hand"/>
+  </Grid>
+</Window>
+"@
+$disclaimerReader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($disclaimerXaml))
+$disclaimerWindow = [System.Windows.Markup.XamlReader]::Load($disclaimerReader)
+$disclaimerWindow.FindName('BtnAcceptDisclaimer').add_Click({ $disclaimerWindow.DialogResult = $true; $disclaimerWindow.Close() })
+$accepted = $disclaimerWindow.ShowDialog()
+if ($accepted -ne $true) { exit 0 }
 #endregion
 
 [void]$Window.ShowDialog()
