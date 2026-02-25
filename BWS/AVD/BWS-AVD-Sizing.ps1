@@ -2,11 +2,31 @@
 ================================================================================
   Author:  Jörn Gutting (optimised by Claude)
   Script:  BWS AVD Sizing - Swisscom Branded Edition (WPF GUI) - PowerShell 7
-  Version: 1.0.0
-  Date:    2025-02-19
+  Version: 2.0.0
+  Date:    2025-02-20
 
   CHANGELOG
   =========
+
+  v2.0.0 (2025-02-20)
+  --------------------
+  - NEW: Disclaimer dialog shown on script startup (placeholder for future content)
+  - SIMPLIFIED: Per-user costs unified — removed "named user" vs "concurrent user"
+    distinction, now shows only "Monthly / User" and "Yearly / User"
+  - REMOVED: Template JSON panel (title, ARM description, TextBox) from VM Template tab
+  - REMOVED: Azure Login + Load SKUs buttons (PnlAzureActions)
+  - REMOVED: Diagnostics button + full WPF diagnostics dialog (~180 lines)
+  - REMOVED: JSON Export button + handler
+  - REMOVED: Discounts (CSP/EA, Reserved Instance, Additional) from GUI + Report
+  - REMOVED: Azure Hybrid Benefit checkbox from GUI + Report
+  - REMOVED: Currency selector — CHF hardcoded as fixed currency
+  - REMOVED: -Expert parameter — all features always visible
+  - FIX: Report crash "variable '$ucMonthlyHrs' cannot be retrieved" — now set before
+    BWS/Azure branch
+  - FIX: Parser error from orphaned old cost handler code block
+  - FIX: MB/s added to all disk displays (OS Disk in ResultsGrid, Template output, Report)
+  - FIX: OS Disk selection in "Suggest VM Template" uses calculated sizing requirements
+  - FIX: Set-ResultsGrid handles BWS pricing objects (bwsTotalPerHost vs RetailPricePerHour)
 
   v1.5.0 (2025-02-20)
   --------------------
@@ -273,20 +293,17 @@
 
 #requires -Version 7.0
 
-param(
-  [switch]$Expert
-)
+param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion  = '1.5.0'
-$ScriptBuildUtc = '2025-02-20T01:00:00Z'
+$ScriptVersion  = '2.0.2'
+$ScriptBuildUtc = '2025-02-20T12:00:00Z'
 
 #region Ensure STA for WPF
 if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
   $staArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
-  if ($Expert) { $staArgs += '-Expert' }
   $proc = Start-Process -FilePath 'pwsh' -ArgumentList $staArgs -PassThru -Wait
   exit $proc.ExitCode
 }
@@ -1431,17 +1448,47 @@ function Set-ResultsGrid {
   }
 
   if ($VmPick) {
-    $rows.Add([pscustomobject]@{ Key='--- AZURE VM ---'; Value='' })
-    $rows.Add([pscustomobject]@{ Key='VM Size'; Value=$VmPick.Name })
-    $rows.Add([pscustomobject]@{ Key='VM vCPU'; Value=$VmPick.NumberOfCores })
-    $rows.Add([pscustomobject]@{ Key='VM RAM (GB)'; Value=[Math]::Round($VmPick.MemoryInMB/1024,2) })
+    $rows.Add([pscustomobject]@{ Key='--- VM TEMPLATE ---'; Value='' })
+    if ($VmPick.PSObject.Properties.Name -contains 'BwsName') {
+      $rows.Add([pscustomobject]@{ Key='VM Template'; Value=$VmPick.BwsName })
+      $rows.Add([pscustomobject]@{ Key='VM vCPU'; Value=$VmPick.NumberOfCores })
+      $rows.Add([pscustomobject]@{ Key='VM RAM (GB)'; Value=[Math]::Round($VmPick.MemoryInMB/1024,2) })
+      $rows.Add([pscustomobject]@{ Key='VM Series'; Value="$($VmPick.BwsSeries)-series" })
+      $rows.Add([pscustomobject]@{ Key='VM Cost'; Value="CHF $($VmPick.BwsPriceCHF)/month" })
+      if ($VmPick.BwsOsDisk) {
+        $rows.Add([pscustomobject]@{ Key='OS Disk'; Value="$($VmPick.BwsOsDisk.Sku) ($($VmPick.BwsOsDisk.SizeGiB) GiB, $($VmPick.BwsOsDisk.IOPS) IOPS, $($VmPick.BwsOsDisk.MBps) MB/s)" })
+        $rows.Add([pscustomobject]@{ Key='OS Disk Cost'; Value="CHF $($VmPick.BwsOsDisk.PriceCHF)/month" })
+      }
+      if ($VmPick.BwsAddDisks -and @($VmPick.BwsAddDisks).Count -gt 0) {
+        foreach ($ad in @($VmPick.BwsAddDisks)) {
+          $rows.Add([pscustomobject]@{ Key="Additional Disk ($($ad.Sku))"; Value="$($ad.SizeGiB) GiB, $($ad.IOPS) IOPS, $($ad.MBps) MB/s — CHF $($ad.PriceCHF)/mo" })
+        }
+        $rows.Add([pscustomobject]@{ Key='Additional Disks Total'; Value="CHF $($VmPick.BwsAddDiskCost)/month" })
+      }
+    } else {
+      $rows.Add([pscustomobject]@{ Key='VM Size'; Value=$VmPick.Name })
+      $rows.Add([pscustomobject]@{ Key='VM vCPU'; Value=$VmPick.NumberOfCores })
+      $rows.Add([pscustomobject]@{ Key='VM RAM (GB)'; Value=[Math]::Round($VmPick.MemoryInMB/1024,2) })
+    }
   }
-  if ($VmPrice -and -not $HidePricing -and -not ($VmPrice.PSObject.Properties.Name -contains 'Error' -and $VmPrice.Error)) {
+  if ($VmPrice -and -not $HidePricing) {
     $rows.Add([pscustomobject]@{ Key='--- PRICING ---'; Value='' })
-    $rows.Add([pscustomobject]@{ Key='Price/Hour'; Value="$($VmPrice.RetailPricePerHour) $($VmPrice.CurrencyCode)" })
-    $monthly = [Math]::Round($VmPrice.RetailPricePerHour * 730, 2)
-    $rows.Add([pscustomobject]@{ Key='Est. Monthly/Host'; Value="$monthly $($VmPrice.CurrencyCode)" })
-    $rows.Add([pscustomobject]@{ Key='Est. Monthly Total'; Value="$([Math]::Round($monthly * $Sizing.RecommendedHostsTotal, 2)) $($VmPrice.CurrencyCode) ($($Sizing.RecommendedHostsTotal) hosts)" })
+    if ($VmPrice.PSObject.Properties.Name -contains 'bwsTotalPerHost') {
+      $rows.Add([pscustomobject]@{ Key='VM Cost'; Value="CHF $($VmPrice.bwsVmMonthly)/month" })
+      $rows.Add([pscustomobject]@{ Key='OS Disk Cost'; Value="CHF $($VmPrice.bwsOsDiskMonthly)/month" })
+      if ($VmPrice.bwsAddDiskMonthly -gt 0) {
+        $rows.Add([pscustomobject]@{ Key='Additional Disks Cost'; Value="CHF $($VmPrice.bwsAddDiskMonthly)/month" })
+      }
+      $perHost = [Math]::Round($VmPrice.bwsTotalPerHost, 2)
+      $rows.Add([pscustomobject]@{ Key='Total/Host/Month'; Value="CHF $perHost" })
+      $fleetTotal = [Math]::Round($perHost * $Sizing.RecommendedHostsTotal, 2)
+      $rows.Add([pscustomobject]@{ Key='Fleet Total/Month'; Value="CHF $fleetTotal ($($Sizing.RecommendedHostsTotal) hosts)" })
+    } elseif (-not ($VmPrice.PSObject.Properties.Name -contains 'Error' -and $VmPrice.Error)) {
+      $rows.Add([pscustomobject]@{ Key='Price/Hour'; Value="$($VmPrice.RetailPricePerHour) $($VmPrice.CurrencyCode)" })
+      $monthly = [Math]::Round($VmPrice.RetailPricePerHour * 730, 2)
+      $rows.Add([pscustomobject]@{ Key='Est. Monthly/Host'; Value="$monthly $($VmPrice.CurrencyCode)" })
+      $rows.Add([pscustomobject]@{ Key='Est. Monthly Total'; Value="$([Math]::Round($monthly * $Sizing.RecommendedHostsTotal, 2)) $($VmPrice.CurrencyCode) ($($Sizing.RecommendedHostsTotal) hosts)" })
+    }
   }
 
   $GridResults.ItemsSource = $rows
@@ -1575,9 +1622,9 @@ function Select-BwsVm {
 }
 
 function Select-BwsOsDisk {
-  param([int]$MinSizeGiB = 128, [int]$MinIOPS = 0)
+  param([int]$MinSizeGiB = 128, [int]$MinIOPS = 0, [int]$MinMBps = 0)
   $script:BwsOsStorageCatalog | Where-Object {
-    $_.SizeGiB -ge $MinSizeGiB -and $_.IOPS -ge $MinIOPS
+    $_.SizeGiB -ge $MinSizeGiB -and $_.IOPS -ge $MinIOPS -and $_.MBps -ge $MinMBps
   } | Sort-Object PriceCHF | Select-Object -First 1
 }
 #endregion
@@ -1759,14 +1806,10 @@ function Apply-Language {
   # Buttons
   $b = $w.FindName('BtnCalculate');    if ($b) { $b.Content = Get-Str 'btn.calculate' }
   $b = $w.FindName('BtnPickVm');       if ($b) { $b.Content = Get-Str 'btn.pickvm' }
-  $b = $w.FindName('BtnExportJson');   if ($b) { $b.Content = Get-Str 'btn.exportjson' }
   $b = $w.FindName('BtnExportReport'); if ($b) { $b.Content = Get-Str 'btn.exportreport' }
   $b = $w.FindName('BtnClose');        if ($b) { $b.Content = Get-Str 'btn.close' }
   $b = $w.FindName('BtnReset');        if ($b) { $b.Content = Get-Str 'btn.reset' }
-  $b = $w.FindName('BtnDiagnostics');  if ($b) { $b.Content = Get-Str 'btn.diagnostics' }
   $b = $w.FindName('BtnCalcUserCosts');if ($b) { $b.Content = Get-Str 'btn.calccosts' }
-  $b = $w.FindName('BtnAzLogin');      if ($b) { $b.Content = Get-Str 'btn.azlogin' }
-  $b = $w.FindName('BtnDiscoverSkus'); if ($b) { $b.Content = Get-Str 'btn.loadskus' }
 
   # Helper: safe set text
   function Set-LblText([string]$Name, [string]$Key) {
@@ -1853,28 +1896,15 @@ function Apply-Language {
   # Costs tab
   Set-LblText 'LblCostTitle'      'cost.title'
   Set-LblText 'LblCostDesc'       'cost.desc'
-  Set-LblText 'LblPricing'        'cost.pricing'
-  Set-LblText 'LblCurrency'       'cost.currency'
-  Set-LblText 'LblCurrencyDesc'   'cost.currency.desc'
-  Set-LblText 'LblAhb'            'cost.ahb'
-  Set-LblText 'LblAhbDesc'        'cost.ahb.desc'
   Set-LblText 'LblSchedule'       'cost.schedule'
   Set-LblText 'LblHours'          'cost.hours'
   Set-LblText 'LblHoursDesc'      'cost.hours.desc'
   Set-LblText 'LblDays'           'cost.days'
   Set-LblText 'LblDaysDesc'       'cost.days.desc'
-  Set-LblText 'LblDiscounts'      'cost.discounts'
   Set-LblText 'LblDiscDesc'       'cost.disc.desc'
-  Set-LblText 'LblCsp'            'cost.csp'
-  Set-LblText 'LblCspDesc'        'cost.csp.desc'
-  Set-LblText 'LblRi'             'cost.ri'
-  Set-LblText 'LblRiDesc'         'cost.ri.desc'
-  Set-LblText 'LblAdditional'     'cost.additional'
-  Set-LblText 'LblAdditionalDesc' 'cost.additional.desc'
   Set-LblText 'LblBreakdown'      'cost.breakdown'
 
   # CheckBox content
-  $chk = $w.FindName('ChkAhb'); if ($chk) { $chk.Content = Get-Str 'cost.ahb.check' }
 }
 #endregion
 #region XAML
@@ -2054,7 +2084,7 @@ $XamlString = @"
     <DockPanel LastChildFill="False">
       <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
         <TextBlock FontSize="20" FontWeight="Bold" Foreground="#FFFFFF" Text="BWS AVD Sizing"/>
-        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v1.5.0"/>
+        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v2.0.2"/>
       </StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
         <TextBlock Foreground="#88AACC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0" Text="Language:"/>
@@ -2249,10 +2279,6 @@ $XamlString = @"
             <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><TextBox x:Name="TxtOffer" Width="240" Text="office-365"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="offer"/></StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,4"><ComboBox x:Name="CmbSku" Width="320"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="SKU"/></StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,10"><TextBox x:Name="TxtVersion" Width="240" Text="latest"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="version"/></StackPanel>
-            <StackPanel x:Name="PnlAzureActions" Orientation="Horizontal" Visibility="Collapsed">
-              <Button x:Name="BtnAzLogin" Content="Azure Login" Width="140" Margin="0,0,10,0" Background="#002E99" Foreground="#086ADB"/>
-              <Button x:Name="BtnDiscoverSkus" Content="Load SKUs" Width="140" Background="#002E99" Foreground="#086ADB"/>
-            </StackPanel>
 
             <!-- Additional Disks -->
             <Separator Margin="0,12,0,8"/>
@@ -2274,12 +2300,6 @@ $XamlString = @"
               </DataGrid.Columns>
             </DataGrid>
 
-            <StackPanel x:Name="PnlTemplateJson" Visibility="Collapsed">
-            <Separator Margin="0,12,0,8"/>
-            <TextBlock FontWeight="Bold" Text="Template JSON"/>
-            <TextBlock Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,6" Text="ARM template JSON for the selected VM. Copy into your IaC deployment."/>
-            <TextBox x:Name="TxtTemplateOut" Height="160" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
-            </StackPanel>
           </StackPanel>
           </ScrollViewer>
 
@@ -2320,33 +2340,19 @@ $XamlString = @"
         </Grid>
       </TabItem>
 
-      <!-- TAB 5: Costs (visible with -Expert) -->
-      <TabItem Header="Costs" x:Name="TabUserCosts" Visibility="Collapsed">
+      <!-- TAB 5: Costs -->
+      <TabItem Header="Costs" x:Name="TabUserCosts">
         <Grid Margin="10">
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Margin="0,0,0,8">
             <TextBlock x:Name="LblCostTitle" FontSize="14" FontWeight="Bold" Foreground="#086ADB" Text="Cost Analysis"/>
-            <TextBlock x:Name="LblCostDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Configure pricing, discounts and calculate per-user costs. Requires 'Suggest VM Template' on the Results tab first."/>
+            <TextBlock x:Name="LblCostDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Configure operating schedule and calculate per-user costs. Requires 'Suggest VM Template' on the Results tab first."/>
           </StackPanel>
           <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
           <Grid>
             <Grid.ColumnDefinitions><ColumnDefinition Width="400"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
 
             <StackPanel Grid.Column="0" Margin="0,0,16,0">
-              <!-- Currency -->
-              <TextBlock x:Name="LblPricing" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="Pricing" Margin="0,0,0,4"/>
-              <TextBlock x:Name="LblCurrency" FontWeight="Bold" Text="Currency"/>
-              <TextBlock x:Name="LblCurrencyDesc" Foreground="#556688" FontSize="11" Text="Currency for Azure Retail Prices API."/>
-              <ComboBox x:Name="CmbCurrency" Margin="0,3,0,8" SelectedIndex="2">
-                <ComboBoxItem Content="USD"/><ComboBoxItem Content="EUR"/><ComboBoxItem Content="CHF"/>
-              </ComboBox>
-
-              <TextBlock x:Name="LblAhb" FontWeight="Bold" Text="Azure Hybrid Benefit"/>
-              <TextBlock x:Name="LblAhbDesc" Foreground="#556688" FontSize="11" Text="M365 E3/E5 or Win E3/E5 licenses cover Windows cost."/>
-              <CheckBox x:Name="ChkAhb" Content="Azure Hybrid Benefit active" IsChecked="True" Margin="0,3,0,8"/>
-
-              <Separator Margin="0,4,0,4"/>
-
               <!-- Operating Schedule -->
               <TextBlock x:Name="LblSchedule" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="Operating Schedule" Margin="0,0,0,4"/>
               <TextBlock x:Name="LblHours" FontWeight="Bold" Text="Operating hours per day"/>
@@ -2356,24 +2362,6 @@ $XamlString = @"
               <TextBlock x:Name="LblDays" FontWeight="Bold" Text="Operating days per month"/>
               <TextBlock x:Name="LblDaysDesc" Foreground="#556688" FontSize="11" Text="22 = work month, 30 = daily use."/>
               <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtOperatingDays" Width="100" Text="22"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="days/month (1-31)"/></StackPanel>
-
-              <Separator Margin="0,4,0,4"/>
-
-              <!-- Discounts -->
-              <TextBlock x:Name="LblDiscounts" FontSize="13" FontWeight="Bold" Foreground="#DD1122" Text="Discounts" Margin="0,0,0,4"/>
-              <TextBlock x:Name="LblDiscDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,6" Text="Applied cumulatively to the Azure retail list price."/>
-
-              <TextBlock x:Name="LblCsp" FontWeight="Bold" Text="CSP / EA / Partner discount"/>
-              <TextBlock x:Name="LblCspDesc" Foreground="#556688" FontSize="11" Text="Negotiated discount (CSP margin, EA, MPA)."/>
-              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtCspDiscount" Width="100" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="% (e.g. 15)"/></StackPanel>
-
-              <TextBlock x:Name="LblRi" FontWeight="Bold" Text="Reserved Instance discount"/>
-              <TextBlock x:Name="LblRiDesc" Foreground="#556688" FontSize="11" Text="1yr ~35%, 3yr ~55%."/>
-              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtRiDiscount" Width="100" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="% (e.g. 35)"/></StackPanel>
-
-              <TextBlock x:Name="LblAdditional" FontWeight="Bold" Text="Additional discount"/>
-              <TextBlock x:Name="LblAdditionalDesc" Foreground="#556688" FontSize="11" Text="Savings Plans, promos, custom agreements."/>
-              <StackPanel Orientation="Horizontal" Margin="0,3,0,8"><TextBox x:Name="TxtAdditionalDiscount" Width="100" Text="0"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="%"/></StackPanel>
 
               <Separator Margin="0,4,0,4"/>
               <Button x:Name="BtnCalcUserCosts" Content="Calculate Costs" Width="200" HorizontalAlignment="Left" FontWeight="Bold"
@@ -2399,12 +2387,10 @@ $XamlString = @"
     <DockPanel Grid.Row="2" LastChildFill="False" Margin="0,4,0,0">
       <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
         <Button x:Name="BtnReset" Content="Reset" Width="80" Background="#DD1122" Foreground="#FFFFFF" FontWeight="Bold"/>
-        <Button x:Name="BtnDiagnostics" Content="Diagnostics" Width="110" Margin="10,0,0,0" Visibility="Collapsed" Background="#002E99" Foreground="#DD1122"/>
       </StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
         <Button x:Name="BtnCalculate" Content="Calculate" Width="120" FontWeight="Bold" Background="#086ADB" Foreground="#FFFFFF"/>
-        <Button x:Name="BtnPickVm" Content="VM Template vorschlagen" Width="200" Margin="10,0,0,0" Background="#1B8712" Foreground="#FFFFFF" FontWeight="Bold"/>
-        <Button x:Name="BtnExportJson" Content="Export JSON" Width="110" Margin="10,0,0,0"/>
+        <Button x:Name="BtnPickVm" Content="Suggest VM Template" Width="200" Margin="10,0,0,0" Background="#1B8712" Foreground="#FFFFFF" FontWeight="Bold"/>
         <Button x:Name="BtnExportReport" Content="Export HTML Report" Width="150" Margin="10,0,0,0"/>
         <Button x:Name="BtnClose" Content="Close" Width="80" Margin="10,0,0,0"/>
       </StackPanel>
@@ -2449,8 +2435,6 @@ $TxtDbDataGB = $Window.FindName('TxtDbDataGB')
 $TxtLocation = $Window.FindName('TxtLocation'); $CmbVmSeries = $Window.FindName('CmbVmSeries')
 $TxtPublisher = $Window.FindName('TxtPublisher'); $TxtOffer = $Window.FindName('TxtOffer')
 $CmbSku = $Window.FindName('CmbSku'); $TxtVersion = $Window.FindName('TxtVersion')
-$BtnAzLogin = $Window.FindName('BtnAzLogin'); $BtnDiscoverSkus = $Window.FindName('BtnDiscoverSkus')
-$TxtTemplateOut = $Window.FindName('TxtTemplateOut')
 
 # Additional Disks
 $CmbAddDiskSku = $Window.FindName('CmbAddDiskSku')
@@ -2489,7 +2473,7 @@ $BtnRemoveDisk.add_Click({
 # Results
 $GridResults = $Window.FindName('GridResults'); $TxtNotes = $Window.FindName('TxtNotes')
 $BtnCalculate = $Window.FindName('BtnCalculate'); $BtnPickVm = $Window.FindName('BtnPickVm')
-$BtnExportJson = $Window.FindName('BtnExportJson'); $BtnExportReport = $Window.FindName('BtnExportReport')
+$BtnExportReport = $Window.FindName('BtnExportReport')
 $BtnReset = $Window.FindName('BtnReset'); $BtnClose = $Window.FindName('BtnClose')
 
 # Language selector
@@ -2502,33 +2486,14 @@ $CmbLanguage.add_SelectionChanged({
 
 # Costs tab (visible with -Expert)
 $TabUserCosts = $Window.FindName('TabUserCosts')
-$CmbCurrency = $Window.FindName('CmbCurrency')
-$ChkAhb = $Window.FindName('ChkAhb')
 $TxtOperatingHours = $Window.FindName('TxtOperatingHours')
 $TxtOperatingDays = $Window.FindName('TxtOperatingDays')
-$TxtCspDiscount = $Window.FindName('TxtCspDiscount')
-$TxtRiDiscount = $Window.FindName('TxtRiDiscount')
-$TxtAdditionalDiscount = $Window.FindName('TxtAdditionalDiscount')
 $BtnCalcUserCosts = $Window.FindName('BtnCalcUserCosts')
 $GridUserCosts = $Window.FindName('GridUserCosts')
 $TxtUserCostNotes = $Window.FindName('TxtUserCostNotes')
-if ($Expert) { $TabUserCosts.Visibility = 'Visible' }
+$TabUserCosts.Visibility = 'Visible'
 
-# Expert mode: show Template JSON, Export JSON, Azure Login/SKUs, Diagnostics
-$PnlTemplateJson = $Window.FindName('PnlTemplateJson')
-$PnlAzureActions = $Window.FindName('PnlAzureActions')
-$BtnDiagnostics = $Window.FindName('BtnDiagnostics')
-if ($Expert) {
-  $PnlTemplateJson.Visibility = 'Visible'
-  $PnlAzureActions.Visibility = 'Visible'
-  $BtnExportJson.Visibility = 'Visible'
-  $BtnDiagnostics.Visibility = 'Visible'
-} else {
-  $PnlTemplateJson.Visibility = 'Collapsed'
-  $PnlAzureActions.Visibility = 'Collapsed'
-  $BtnExportJson.Visibility = 'Collapsed'
-  $BtnDiagnostics.Visibility = 'Collapsed'
-}
+# All panels visible (Expert mode removed)
 
 $script:LastSizing = $null; $script:LastVmPick = $null; $script:LastVmPrice = $null
 
@@ -2557,16 +2522,6 @@ function Get-SelectedApps {
 
 #region Events
 $CmbConcurrencyMode.add_SelectionChanged({ $LblConcurrencyHint.Text = if ((Get-ComboText -Combo $CmbConcurrencyMode) -eq 'Percent') { '% (e.g. 60)' } else { '# (e.g. 25)' } })
-$BtnAzLogin.add_Click({ if (-not (Test-AzAvailable)) { Write-AzModuleInstallHint; return }; [void](Connect-AzIfNeeded) })
-$BtnDiscoverSkus.add_Click({
-  try { if (-not (Test-AzAvailable)) { Write-AzModuleInstallHint; return }; if (-not (Connect-AzIfNeeded)) { return }
-    $loc = ConvertTo-ArmRegionName -LocationText $TxtLocation.Text
-    $skus = Get-AzVMImageSku -Location $loc -PublisherName $TxtPublisher.Text.Trim() -Offer $TxtOffer.Text.Trim()
-    $CmbSku.Items.Clear(); foreach ($s in $skus) { [void]$CmbSku.Items.Add($s.Skus) }
-    if ($CmbSku.Items.Count -gt 0) { $CmbSku.SelectedIndex = 0 }; Write-UiInfo "Loaded: $($CmbSku.Items.Count) SKUs"
-  } catch { Write-UiError "Failed: $($_.Exception.Message)" }
-})
-
 $BtnCalculate.add_Click({
   try {
     $hostPoolType = if ((Get-ComboText -Combo $CmbHostPoolType) -like 'Personal*') { 'Personal' } else { 'Pooled' }
@@ -2608,18 +2563,7 @@ $BtnCalculate.add_Click({
 
     if ($script:LastSizing -is [System.Array]) { $script:LastSizing = $script:LastSizing | Select-Object -First 1 }
 
-    $TxtTemplateOut.Text = ([ordered]@{
-      sizing=[ordered]@{ hostPoolType=$script:LastSizing.HostPoolType; workload=$script:LastSizing.Workload
-        peakUsers=$script:LastSizing.PeakConcurrentUsers; hostsTotal=$script:LastSizing.RecommendedHostsTotal
-        vcpu=$script:LastSizing.Recommended.VcpuPerHost; ramGB=$script:LastSizing.Recommended.RamGB_Provisioned }
-      osDisk=[ordered]@{ sku=$script:LastSizing.Disks.SessionHostDisks.OsDisk.RecommendedType
-        sizeGiB=$script:LastSizing.Disks.SessionHostDisks.OsDisk.SuggestedSizeGiB }
-      fsLogix=[ordered]@{ tier=$script:LastSizing.Disks.FsLogixStorage.RecommendedTier
-        riskLevel=$script:LastSizing.Disks.FsLogixStorage.StorageRisk.Level }
-      apps = $selectedApps
-    } | ConvertTo-Json -Depth 10)
-
-    $hidePricingVal = (-not $Expert)
+    $hidePricingVal = $false
     Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick -VmPrice $script:LastVmPrice `
       -GridResults $GridResults -TxtNotes $TxtNotes -HidePricing $hidePricingVal
     $Window.FindName('Tabs').SelectedIndex = 3
@@ -2648,17 +2592,28 @@ $BtnPickVm.add_Click({
       return
     }
 
-    # Select OS Disk from BWS catalog
-    $bwsOsDisk = Select-BwsOsDisk -MinSizeGiB 128
-    if (-not $bwsOsDisk) { $bwsOsDisk = $script:BwsOsStorageCatalog[0] }
+    # Select OS Disk from BWS catalog — use sizing requirements
+    $osDiskMinGiB = if ($script:LastSizing.Recommended.MinOsDiskGB) { [int]$script:LastSizing.Recommended.MinOsDiskGB } else { 128 }
+    $osDiskMinIOPS = 0; $osDiskMinMBps = 0
+    if ($script:LastSizing.Disks -and $script:LastSizing.Disks.SessionHostDisks.OsDisk) {
+      $calcOsDisk = $script:LastSizing.Disks.SessionHostDisks.OsDisk
+      if ($calcOsDisk.ProvisionedIOPS) { $osDiskMinIOPS = [int]$calcOsDisk.ProvisionedIOPS }
+      if ($calcOsDisk.SuggestedSizeGiB) { $osDiskMinGiB = [Math]::Max($osDiskMinGiB, [int]$calcOsDisk.SuggestedSizeGiB) }
+    }
+    $bwsOsDisk = Select-BwsOsDisk -MinSizeGiB $osDiskMinGiB -MinIOPS $osDiskMinIOPS -MinMBps $osDiskMinMBps
+    if (-not $bwsOsDisk) { $bwsOsDisk = $script:BwsOsStorageCatalog[-1] }
 
-    # Collect additional disks
+    # Collect additional disks — snapshot (copy) to avoid reference to live ObservableCollection
     $additionalDisks = @()
     if ($script:BwsAdditionalDisks -and $script:BwsAdditionalDisks.Count -gt 0) {
-      $additionalDisks = $script:BwsAdditionalDisks
+      $additionalDisks = @($script:BwsAdditionalDisks | ForEach-Object {
+        [pscustomobject]@{ Sku=$_.Sku; SizeGiB=$_.SizeGiB; IOPS=$_.IOPS; MBps=$_.MBps; PriceCHF=[double]$_.PriceCHF }
+      })
     }
-    $additionalDiskCost = ($additionalDisks | Measure-Object -Property PriceCHF -Sum).Sum
-    if (-not $additionalDiskCost) { $additionalDiskCost = 0 }
+    $additionalDiskCost = 0
+    if ($additionalDisks.Count -gt 0) {
+      $additionalDiskCost = ($additionalDisks | ForEach-Object { [double]$_.PriceCHF } | Measure-Object -Sum).Sum
+    }
 
     # Build a VM pick object compatible with existing code
     $script:LastVmPick = [pscustomobject]@{
@@ -2680,35 +2635,12 @@ $BtnPickVm.add_Click({
       bwsTotalPerHost  = $bwsVm.PriceCHF + $bwsOsDisk.PriceCHF + $additionalDiskCost
     }
 
-    $hidePricingVal2 = (-not $Expert)
+    $hidePricingVal2 = $false
     Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick -VmPrice $script:LastVmPrice `
       -GridResults $GridResults -TxtNotes $TxtNotes -HidePricing $hidePricingVal2
 
-    # Update template output with BWS info
-    $addDiskInfo = if ($additionalDisks.Count -gt 0) {
-      "`n  Additional Disks: " + (($additionalDisks | ForEach-Object { "$($_.Sku) ($($_.SizeGiB) GiB) CHF $($_.PriceCHF)/mo" }) -join ', ')
-    } else { '' }
-    $TxtTemplateOut.Text = @"
-BWS VM Template: $($bwsVm.Name)
-  vCPU: $($bwsVm.vCPU), RAM: $($bwsVm.RamGB) GB, Series: $($bwsVm.Series)
-  VM Cost: CHF $($bwsVm.PriceCHF)/month
-  OS Disk: $($bwsOsDisk.Sku) ($($bwsOsDisk.SizeGiB) GiB, $($bwsOsDisk.IOPS) IOPS) CHF $($bwsOsDisk.PriceCHF)/month$addDiskInfo
-  Total per Host: CHF $([Math]::Round($bwsVm.PriceCHF + $bwsOsDisk.PriceCHF + $additionalDiskCost, 2))/month
-  Hosts Required: $($script:LastSizing.RecommendedHostsTotal)
-  Fleet Total: CHF $([Math]::Round(($bwsVm.PriceCHF + $bwsOsDisk.PriceCHF + $additionalDiskCost) * $script:LastSizing.RecommendedHostsTotal, 2))/month
-"@
     Write-UiInfo "Selected: $($bwsVm.Name) ($($bwsVm.vCPU) vCPU, $($bwsVm.RamGB) GB) — CHF $($bwsVm.PriceCHF)/mo"
   } catch { Write-UiError "Failed: $($_.Exception.Message)" }
-})
-
-$BtnExportJson.add_Click({
-  try { if (-not $script:LastSizing) { Write-UiWarning 'Calculate first.'; return }
-    $data = [ordered]@{ sizing=$script:LastSizing; vm=$script:LastVmPick; price=$script:LastVmPrice; template=$TxtTemplateOut.Text
-      exportedAt=(Get-Date).ToString('o'); version=$ScriptVersion }
-    $dlg = [Microsoft.Win32.SaveFileDialog]::new(); $dlg.Filter='JSON|*.json'; $dlg.FileName='avd-sizing.json'
-    if ($dlg.ShowDialog()) { [IO.File]::WriteAllText($dlg.FileName, ($data | ConvertTo-Json -Depth 18), [Text.Encoding]::UTF8)
-      Write-UiInfo "Exported: $($dlg.FileName)" }
-  } catch { Write-UiError "Export failed: $($_.Exception.Message)" }
 })
 
 $BtnExportReport.add_Click({
@@ -2757,7 +2689,7 @@ $BtnExportReport.add_Click({
     }
 
     # VM + pricing section (Expert only shows pricing)
-    $hidePricing = (-not $Expert)
+    $hidePricing = $false
     $vmHtml = ''
     $sectionNum = 6
     if ($script:LastVmPick) {
@@ -2766,7 +2698,29 @@ $BtnExportReport.add_Click({
       $vmRam = [Math]::Round($script:LastVmPick.MemoryInMB/1024,1)
       $priceRows = ''
       $priceNote = ''
-      if (-not $hidePricing -and $script:LastVmPrice -and -not ($script:LastVmPrice.PSObject.Properties.Name -contains 'Error' -and $script:LastVmPrice.Error)) {
+      $isBws = $script:LastVmPick.PSObject.Properties.Name -contains 'BwsName'
+      if ($isBws) {
+        $bwsVmP = $script:LastVmPick.BwsPriceCHF
+        $bwsOsP = if ($script:LastVmPick.BwsOsDisk) { $script:LastVmPick.BwsOsDisk.PriceCHF } else { 0 }
+        $bwsAddP = if ($script:LastVmPick.BwsAddDiskCost) { $script:LastVmPick.BwsAddDiskCost } else { 0 }
+        $bwsPerHost = [Math]::Round($bwsVmP + $bwsOsP + $bwsAddP, 2)
+        $bwsTotal = [Math]::Round($bwsPerHost * $s.RecommendedHostsTotal, 2)
+        $vmName = esc $script:LastVmPick.BwsName
+        $addDiskRows = ''
+        if ($script:LastVmPick.BwsAddDisks -and @($script:LastVmPick.BwsAddDisks).Count -gt 0) {
+          foreach ($ad in @($script:LastVmPick.BwsAddDisks)) {
+            $addDiskRows += "          <tr><td>Additional Disk</td><td>$($ad.Sku) ($($ad.SizeGiB) GiB, $($ad.IOPS) IOPS, $($ad.MBps) MB/s) CHF $($ad.PriceCHF)/mo</td></tr>`n"
+          }
+        }
+        $priceRows = @"
+          <tr><td>VM Cost</td><td>CHF $bwsVmP/month</td></tr>
+          <tr><td>OS Disk</td><td>$(if($script:LastVmPick.BwsOsDisk){"$($script:LastVmPick.BwsOsDisk.Sku) ($($script:LastVmPick.BwsOsDisk.SizeGiB) GiB, $($script:LastVmPick.BwsOsDisk.IOPS) IOPS, $($script:LastVmPick.BwsOsDisk.MBps) MB/s) CHF $bwsOsP/mo"}else{'—'})</td></tr>
+          $addDiskRows
+          <tr class="highlight"><td>Total per Host</td><td><strong>CHF $bwsPerHost/month</strong></td></tr>
+          <tr class="highlight"><td>Fleet Total</td><td><strong>CHF $bwsTotal/month</strong> ($($s.RecommendedHostsTotal) hosts)</td></tr>
+"@
+        $priceNote = '<p class="note">BWS managed pricing (monthly). Prices from BWS catalog.</p>'
+      } elseif (-not $hidePricing -and $script:LastVmPrice -and $script:LastVmPrice.PSObject.Properties.Name -contains 'RetailPricePerHour') {
         $monthly = [Math]::Round($script:LastVmPrice.RetailPricePerHour * 730, 2)
         $totalMonthly = [Math]::Round($monthly * $s.RecommendedHostsTotal, 2)
         $cur = esc $script:LastVmPrice.CurrencyCode
@@ -2775,7 +2729,7 @@ $BtnExportReport.add_Click({
           <tr><td>Est. Monthly/Host (list)</td><td>$monthly $cur</td></tr>
           <tr class="highlight"><td>Est. Monthly Total (list)</td><td><strong>$totalMonthly $cur</strong> ($($s.RecommendedHostsTotal) hosts)</td></tr>
 "@
-        $priceNote = '<p class="note">Azure retail list price (pay-as-you-go). Discounts, RI, Savings Plans, and AHB not applied. See User Costs section below for effective pricing.</p>'
+        $priceNote = '<p class="note">Azure retail list price (pay-as-you-go). Discounts, RI, Savings Plans, and AHB not applied.</p>'
       }
       $vmHtml = @"
       <section>
@@ -2794,57 +2748,53 @@ $BtnExportReport.add_Click({
       $sectionNum++
     }
 
-    # User Costs section (Expert mode only)
+    # User Costs section
     $userCostsHtml = ''
-    if ($Expert -and $script:LastVmPrice -and -not ($script:LastVmPrice.PSObject.Properties.Name -contains 'Error' -and $script:LastVmPrice.Error)) {
+    $isBwsPrice = $script:LastVmPrice -and ($script:LastVmPrice.PSObject.Properties.Name -contains 'bwsTotalPerHost')
+    if ($script:LastVmPrice -and ($isBwsPrice -or ($script:LastVmPrice.PSObject.Properties.Name -contains 'RetailPricePerHour'))) {
       $ucHoursPerDay  = [Math]::Max(1, [Math]::Min(24, (ConvertTo-IntSafe -Text $TxtOperatingHours.Text -Default 10)))
       $ucDaysPerMonth = [Math]::Max(1, [Math]::Min(31, (ConvertTo-IntSafe -Text $TxtOperatingDays.Text -Default 22)))
-      $ucHasAhb = ($ChkAhb.IsChecked -eq $true)
-      $ucCspPct = [Math]::Max(0, [Math]::Min(100, (ConvertTo-DoubleSafe -Text $TxtCspDiscount.Text -Default 0)))
-      $ucRiPct  = [Math]::Max(0, [Math]::Min(100, (ConvertTo-DoubleSafe -Text $TxtRiDiscount.Text -Default 0)))
-      $ucAddPct = [Math]::Max(0, [Math]::Min(100, (ConvertTo-DoubleSafe -Text $TxtAdditionalDiscount.Text -Default 0)))
-      $ucTotalDiscPct = [Math]::Min(100, $ucCspPct + $ucRiPct + $ucAddPct)
-      $ucMultiplier = 1.0 - ($ucTotalDiscPct / 100.0)
-
-      $ucListPrice = [double]$script:LastVmPrice.RetailPricePerHour
-      $ucEffPrice  = [Math]::Round($ucListPrice * $ucMultiplier, 6)
-      $ucCur = esc $script:LastVmPrice.CurrencyCode
       $ucMonthlyHrs = $ucHoursPerDay * $ucDaysPerMonth
-      $ucHostsTotal = [int]$s.RecommendedHostsTotal
-      $ucTotalUsers = [int]$s.TotalUsers
-      $ucPeakUsers  = [int]$s.PeakConcurrentUsers
 
-      $ucMonthlyPerHost = [Math]::Round($ucEffPrice * $ucMonthlyHrs, 2)
-      $ucMonthlyAll     = [Math]::Round($ucMonthlyPerHost * $ucHostsTotal, 2)
-      $ucPerNamed       = if ($ucTotalUsers -gt 0) { [Math]::Round($ucMonthlyAll / $ucTotalUsers, 2) } else { 0 }
-      $ucPerConcurrent  = if ($ucPeakUsers -gt 0) { [Math]::Round($ucMonthlyAll / $ucPeakUsers, 2) } else { 0 }
-      $ucPerDay         = if ($ucTotalUsers -gt 0 -and $ucDaysPerMonth -gt 0) { [Math]::Round($ucPerNamed / $ucDaysPerMonth, 2) } else { 0 }
-      $ucYearlyPerUser  = [Math]::Round($ucPerNamed * 12, 2)
-      $ucYearlyTotal    = [Math]::Round($ucMonthlyAll * 12, 2)
-
-      $ucListMonthlyAll = [Math]::Round($ucListPrice * $ucMonthlyHrs * $ucHostsTotal, 2)
-      $ucMonthlySavings = [Math]::Round($ucListMonthlyAll - $ucMonthlyAll, 2)
-      $ucYearlySavings  = [Math]::Round($ucMonthlySavings * 12, 2)
-
-      # Discount rows
-      $discountRows = ''
-      if ($ucTotalDiscPct -gt 0) {
-        if ($ucCspPct -gt 0) { $discountRows += "<tr><td>CSP / EA / Partner</td><td>$ucCspPct %</td></tr>`n" }
-        if ($ucRiPct -gt 0)  { $discountRows += "<tr><td>Reserved Instance</td><td>$ucRiPct %</td></tr>`n" }
-        if ($ucAddPct -gt 0) { $discountRows += "<tr><td>Additional</td><td>$ucAddPct %</td></tr>`n" }
-        $discountRows += @"
-          <tr class="highlight"><td>Total Discount</td><td><strong>$ucTotalDiscPct %</strong></td></tr>
-          <tr><td>Effective Price/Hour</td><td>$ucEffPrice $ucCur (was $ucListPrice $ucCur)</td></tr>
-          <tr><td>Monthly Savings</td><td><strong>$ucMonthlySavings $ucCur</strong></td></tr>
-          <tr><td>Yearly Savings</td><td><strong>$ucYearlySavings $ucCur</strong></td></tr>
-"@
+      if ($isBwsPrice) {
+        $ucMonthlyPerHost = [Math]::Round($script:LastVmPrice.bwsTotalPerHost, 2)
+        $ucCur = 'CHF'
+      } else {
+        $ucListPrice = [double]$script:LastVmPrice.RetailPricePerHour
+        $ucCur = esc $script:LastVmPrice.CurrencyCode
+        $ucMonthlyPerHost = [Math]::Round($ucListPrice * $ucMonthlyHrs, 2)
       }
 
-      $discountSection = ''
-      if ($ucTotalDiscPct -gt 0) {
-        $discountSection = @"
-        <h3>Applied Discounts</h3>
-        <table><tbody>$discountRows</tbody></table>
+      $ucHostsTotal = [int]$s.RecommendedHostsTotal
+      $ucTotalUsers = [int]$s.TotalUsers
+
+      $ucMonthlyAll     = [Math]::Round($ucMonthlyPerHost * $ucHostsTotal, 2)
+      $ucPerUser        = if ($ucTotalUsers -gt 0) { [Math]::Round($ucMonthlyAll / $ucTotalUsers, 2) } else { 0 }
+      $ucYearlyPerUser  = [Math]::Round($ucPerUser * 12, 2)
+      $ucYearlyTotal    = [Math]::Round($ucMonthlyAll * 12, 2)
+
+      # Build cost breakdown rows for BWS
+      $costBreakdownHtml = ''
+      if ($isBwsPrice -and $script:LastVmPrice) {
+        $cbVm = $script:LastVmPrice.bwsVmMonthly
+        $cbOs = $script:LastVmPrice.bwsOsDiskMonthly
+        $cbAdd = $script:LastVmPrice.bwsAddDiskMonthly
+        $addDiskDetailRows = ''
+        if ($cbAdd -gt 0 -and $script:LastVmPick.BwsAddDisks -and @($script:LastVmPick.BwsAddDisks).Count -gt 0) {
+          foreach ($ad in @($script:LastVmPick.BwsAddDisks)) {
+            $addDiskDetailRows += "            <tr><td style='padding-left:24px'>$($ad.Sku) ($($ad.SizeGiB) GiB, $($ad.IOPS) IOPS, $($ad.MBps) MB/s)</td><td>$($ad.PriceCHF) $ucCur</td></tr>`n"
+          }
+        }
+        $costBreakdownHtml = @"
+        <h3>Cost Breakdown per Host</h3>
+        <table>
+          <tbody>
+            <tr><td>VM</td><td>$cbVm $ucCur</td></tr>
+            <tr><td>OS Disk</td><td>$cbOs $ucCur</td></tr>
+            $(if($cbAdd -gt 0){"<tr><td>Additional Disks</td><td>$cbAdd $ucCur</td></tr>`n$addDiskDetailRows"}else{''})
+            <tr class="highlight"><td><strong>Total per Host</strong></td><td><strong>$ucMonthlyPerHost $ucCur</strong></td></tr>
+          </tbody>
+        </table>
 "@
       }
 
@@ -2857,11 +2807,10 @@ $BtnExportReport.add_Click({
             <tr><td>Hours/Day</td><td>$ucHoursPerDay</td></tr>
             <tr><td>Days/Month</td><td>$ucDaysPerMonth</td></tr>
             <tr><td>Monthly Hours/Host</td><td>$ucMonthlyHrs</td></tr>
-            <tr><td>Azure Hybrid Benefit</td><td>$(if($ucHasAhb){'Yes (Windows license covered)'}else{'No'})</td></tr>
           </tbody>
         </table>
-        $discountSection
-        <h3>Host Costs</h3>
+        $costBreakdownHtml
+        <h3>Fleet Costs</h3>
         <table>
           <tbody>
             <tr><td>Hosts Total</td><td>$ucHostsTotal</td></tr>
@@ -2870,18 +2819,15 @@ $BtnExportReport.add_Click({
             <tr><td>Yearly All Hosts</td><td>$ucYearlyTotal $ucCur</td></tr>
           </tbody>
         </table>
-        <h3>Per-User Costs</h3>
+        <h3>Costs per User</h3>
         <table>
           <tbody>
-            <tr><td>Total Named Users</td><td>$ucTotalUsers</td></tr>
-            <tr><td>Peak Concurrent Users</td><td>$ucPeakUsers</td></tr>
-            <tr class="highlight"><td>Monthly / Named User</td><td><strong>$ucPerNamed $ucCur</strong></td></tr>
-            <tr><td>Monthly / Concurrent User</td><td>$ucPerConcurrent $ucCur</td></tr>
-            <tr><td>Daily / Named User</td><td>$ucPerDay $ucCur</td></tr>
-            <tr class="highlight"><td>Yearly / Named User</td><td><strong>$ucYearlyPerUser $ucCur</strong></td></tr>
+            <tr><td>Total Users</td><td>$ucTotalUsers</td></tr>
+            <tr class="highlight"><td>Monthly / User</td><td><strong>$ucPerUser $ucCur</strong></td></tr>
+            <tr class="highlight"><td>Yearly / User</td><td><strong>$ucYearlyPerUser $ucCur</strong></td></tr>
           </tbody>
         </table>
-        <p class="note">Compute costs only. Does not include FSLogix storage, OS disks, networking, licenses (unless AHB), AVD access rights, monitoring, or backup.</p>
+        <p class="note">BWS managed pricing. Includes VM, OS Disk and additional disks per host.</p>
       </section>
 "@
       $sectionNum++
@@ -3182,92 +3128,70 @@ $BtnCalcUserCosts.add_Click({
   try {
     if (-not $script:LastSizing) { Write-UiWarning 'Calculate sizing first.'; return }
     if (-not $script:LastVmPick) { Write-UiWarning "Click 'Suggest VM Template' first to get pricing data."; return }
-    if (-not $script:LastVmPrice -or ($script:LastVmPrice.PSObject.Properties.Name -contains 'Error' -and $script:LastVmPrice.Error)) {
-      Write-UiWarning 'VM pricing not available. Check Azure login and try Pick VM again.'; return
-    }
+    if (-not $script:LastVmPrice) { Write-UiWarning 'VM pricing not available.'; return }
 
     $s = $script:LastSizing; $r = $s.Recommended; $p = $script:LastVmPrice
     $hoursPerDay  = [Math]::Max(1, [Math]::Min(24, (ConvertTo-IntSafe -Text $TxtOperatingHours.Text -Default 10)))
     $daysPerMonth = [Math]::Max(1, [Math]::Min(31, (ConvertTo-IntSafe -Text $TxtOperatingDays.Text -Default 22)))
-    $hasAhb = ($ChkAhb.IsChecked -eq $true)
 
-    # Parse discount percentages (0-100, clamped)
-    $cspPct = [Math]::Max(0, [Math]::Min(100, (ConvertTo-DoubleSafe -Text $TxtCspDiscount.Text -Default 0)))
-    $riPct  = [Math]::Max(0, [Math]::Min(100, (ConvertTo-DoubleSafe -Text $TxtRiDiscount.Text -Default 0)))
-    $addPct = [Math]::Max(0, [Math]::Min(100, (ConvertTo-DoubleSafe -Text $TxtAdditionalDiscount.Text -Default 0)))
-    $totalDiscountPct = [Math]::Min(100, $cspPct + $riPct + $addPct)
-    $discountMultiplier = 1.0 - ($totalDiscountPct / 100.0)
+    $isBwsP = $p.PSObject.Properties.Name -contains 'bwsTotalPerHost'
+    if ($isBwsP) {
+      $monthlyPerHost = [Math]::Round($p.bwsTotalPerHost, 2)
+      $currency = 'CHF'
+    } else {
+      $listPricePerHour = [double]$p.RetailPricePerHour
+      $currency = [string]$p.CurrencyCode
+      $monthlyHoursPerHost = $hoursPerDay * $daysPerMonth
+      $monthlyPerHost = [Math]::Round($listPricePerHour * $monthlyHoursPerHost, 2)
+    }
 
-    $listPricePerHour = [double]$p.RetailPricePerHour
-    $effectivePricePerHour = [Math]::Round($listPricePerHour * $discountMultiplier, 6)
-
-    $currency = [string]$p.CurrencyCode
     $hostsTotal = [int]$s.RecommendedHostsTotal
     $usersPerHost = [int]$r.UsersPerHost
     $peakUsers = [int]$s.PeakConcurrentUsers
     $totalUsers = [int]$s.TotalUsers
 
-    # Monthly hours per host
-    $monthlyHoursPerHost = $hoursPerDay * $daysPerMonth
-
-    # VM compute cost (with discounts applied)
-    $monthlyPerHost = [Math]::Round($effectivePricePerHour * $monthlyHoursPerHost, 2)
     $monthlyAllHosts = [Math]::Round($monthlyPerHost * $hostsTotal, 2)
-
-    # List price costs (for comparison)
-    $monthlyPerHostList = [Math]::Round($listPricePerHour * $monthlyHoursPerHost, 2)
-    $monthlyAllHostsList = [Math]::Round($monthlyPerHostList * $hostsTotal, 2)
-    $monthlySavings = [Math]::Round($monthlyAllHostsList - $monthlyAllHosts, 2)
-
-    # Per-user costs (two perspectives)
-    $costPerConcurrentUser = if ($peakUsers -gt 0) { [Math]::Round($monthlyAllHosts / $peakUsers, 2) } else { 0 }
-    $costPerNamedUser = if ($totalUsers -gt 0) { [Math]::Round($monthlyAllHosts / $totalUsers, 2) } else { 0 }
-    $costPerUserPerDay = if ($totalUsers -gt 0 -and $daysPerMonth -gt 0) { [Math]::Round($costPerNamedUser / $daysPerMonth, 2) } else { 0 }
-    $costPerUserPerHour = if ($totalUsers -gt 0 -and $monthlyHoursPerHost -gt 0) { [Math]::Round($monthlyAllHosts / $totalUsers / $monthlyHoursPerHost, 4) } else { 0 }
-
-    # Yearly
-    $yearlyPerNamedUser = [Math]::Round($costPerNamedUser * 12, 2)
+    $costPerUser = if ($totalUsers -gt 0) { [Math]::Round($monthlyAllHosts / $totalUsers, 2) } else { 0 }
+    $yearlyPerUser = [Math]::Round($costPerUser * 12, 2)
     $yearlyTotal = [Math]::Round($monthlyAllHosts * 12, 2)
 
     # Build results grid
     $rows = [System.Collections.Generic.List[object]]::new()
     $rows.Add([pscustomobject]@{ Key='--- VM TEMPLATE ---'; Value='' })
-    $rows.Add([pscustomobject]@{ Key='VM Size'; Value=$script:LastVmPick.Name })
-    $rows.Add([pscustomobject]@{ Key='List Price/Hour'; Value="$listPricePerHour $currency" })
-    if ($totalDiscountPct -gt 0) {
-      $rows.Add([pscustomobject]@{ Key='Effective Price/Hour'; Value="$effectivePricePerHour $currency (-$totalDiscountPct%)" })
+    if ($isBwsP) {
+      $vmDisplayName = if ($script:LastVmPick.BwsName) { $script:LastVmPick.BwsName } else { $script:LastVmPick.Name }
+      $rows.Add([pscustomobject]@{ Key='VM Template'; Value=$vmDisplayName })
+    } else {
+      $rows.Add([pscustomobject]@{ Key='VM Size'; Value=$script:LastVmPick.Name })
     }
     $rows.Add([pscustomobject]@{ Key='Operating hours/day'; Value=$hoursPerDay })
     $rows.Add([pscustomobject]@{ Key='Operating days/month'; Value=$daysPerMonth })
-    $rows.Add([pscustomobject]@{ Key='Monthly hours/host'; Value=$monthlyHoursPerHost })
-    $rows.Add([pscustomobject]@{ Key='Azure Hybrid Benefit'; Value=$(if($hasAhb){'Yes (Windows license covered)'}else{'No (Windows cost included in VM price)'}) })
 
-    if ($totalDiscountPct -gt 0) {
-      $rows.Add([pscustomobject]@{ Key='--- DISCOUNTS ---'; Value='' })
-      if ($cspPct -gt 0) { $rows.Add([pscustomobject]@{ Key='CSP / EA / Partner'; Value="$cspPct %" }) }
-      if ($riPct -gt 0)  { $rows.Add([pscustomobject]@{ Key='Reserved Instance'; Value="$riPct %" }) }
-      if ($addPct -gt 0) { $rows.Add([pscustomobject]@{ Key='Additional discount'; Value="$addPct %" }) }
-      $rows.Add([pscustomobject]@{ Key='Total discount'; Value="$totalDiscountPct %" })
-      $rows.Add([pscustomobject]@{ Key='Monthly savings'; Value="$monthlySavings $currency" })
+    $rows.Add([pscustomobject]@{ Key='--- COST BREAKDOWN PER HOST ---'; Value='' })
+    if ($isBwsP) {
+      $rows.Add([pscustomobject]@{ Key='VM Cost'; Value="CHF $($p.bwsVmMonthly)/month" })
+      $rows.Add([pscustomobject]@{ Key='OS Disk Cost'; Value="CHF $($p.bwsOsDiskMonthly)/month" })
+      if ($p.bwsAddDiskMonthly -gt 0) {
+        if ($script:LastVmPick.BwsAddDisks -and @($script:LastVmPick.BwsAddDisks).Count -gt 0) {
+          foreach ($ad in @($script:LastVmPick.BwsAddDisks)) {
+            $rows.Add([pscustomobject]@{ Key="  Additional Disk ($($ad.Sku))"; Value="$($ad.SizeGiB) GiB — CHF $($ad.PriceCHF)/mo" })
+          }
+        }
+        $rows.Add([pscustomobject]@{ Key='Additional Disks Total'; Value="CHF $($p.bwsAddDiskMonthly)/month" })
+      }
+      $rows.Add([pscustomobject]@{ Key='Total per Host'; Value="CHF $monthlyPerHost/month" })
+    } else {
+      $rows.Add([pscustomobject]@{ Key='Monthly/Host'; Value="$monthlyPerHost $currency" })
     }
 
-    $rows.Add([pscustomobject]@{ Key='--- HOST COSTS ---'; Value='' })
+    $rows.Add([pscustomobject]@{ Key='--- FLEET COSTS ---'; Value='' })
     $rows.Add([pscustomobject]@{ Key='Hosts total'; Value=$hostsTotal })
-    $rows.Add([pscustomobject]@{ Key='Monthly/Host'; Value="$monthlyPerHost $currency" })
     $rows.Add([pscustomobject]@{ Key='Monthly all Hosts'; Value="$monthlyAllHosts $currency" })
-    if ($totalDiscountPct -gt 0) {
-      $rows.Add([pscustomobject]@{ Key='Monthly all Hosts (list)'; Value="$monthlyAllHostsList $currency" })
-    }
     $rows.Add([pscustomobject]@{ Key='Yearly all Hosts'; Value="$yearlyTotal $currency" })
-    $rows.Add([pscustomobject]@{ Key='--- PER USER COSTS ---'; Value='' })
-    $rows.Add([pscustomobject]@{ Key='Total named users'; Value=$totalUsers })
-    $rows.Add([pscustomobject]@{ Key='Peak concurrent users'; Value=$peakUsers })
-    $rows.Add([pscustomobject]@{ Key='Users/Host'; Value=$usersPerHost })
-    $rows.Add([pscustomobject]@{ Key='Monthly/named user'; Value="$costPerNamedUser $currency" })
-    $rows.Add([pscustomobject]@{ Key='Monthly/concurrent user'; Value="$costPerConcurrentUser $currency" })
-    $rows.Add([pscustomobject]@{ Key='Daily/named user'; Value="$costPerUserPerDay $currency" })
-    $rows.Add([pscustomobject]@{ Key='Hourly/named user'; Value="$costPerUserPerHour $currency" })
-    $rows.Add([pscustomobject]@{ Key='Yearly/named user'; Value="$yearlyPerNamedUser $currency" })
+    $rows.Add([pscustomobject]@{ Key='--- COSTS PER USER ---'; Value='' })
+    $rows.Add([pscustomobject]@{ Key='Total Users'; Value=$totalUsers })
+    $rows.Add([pscustomobject]@{ Key='Monthly / User'; Value="$costPerUser $currency" })
+    $rows.Add([pscustomobject]@{ Key='Yearly / User'; Value="$yearlyPerUser $currency" })
 
     $GridUserCosts.ItemsSource = $rows
 
@@ -3275,234 +3199,35 @@ $BtnCalcUserCosts.add_Click({
     $notes = [System.Text.StringBuilder]::new()
     [void]$notes.AppendLine("USER COST ANALYSIS")
     [void]$notes.AppendLine("==================")
-    [void]$notes.AppendLine("VM: $($script:LastVmPick.Name) | $hostsTotal hosts | $effectivePricePerHour $currency/hr")
-    [void]$notes.AppendLine("Schedule: ${hoursPerDay}h/day x ${daysPerMonth} days = $monthlyHoursPerHost hrs/month")
-    if ($totalDiscountPct -gt 0) {
+    if ($isBwsP) {
+      $vmN = if ($script:LastVmPick.BwsName) { $script:LastVmPick.BwsName } else { $script:LastVmPick.Name }
+      [void]$notes.AppendLine("VM: $vmN | $hostsTotal hosts")
       [void]$notes.AppendLine("")
-      [void]$notes.AppendLine("APPLIED DISCOUNTS:")
-      if ($cspPct -gt 0) { [void]$notes.AppendLine("  CSP / EA / Partner:     $cspPct %") }
-      if ($riPct -gt 0)  { [void]$notes.AppendLine("  Reserved Instance:      $riPct %") }
-      if ($addPct -gt 0) { [void]$notes.AppendLine("  Additional:             $addPct %") }
-      [void]$notes.AppendLine("  --------------------------------")
-      [void]$notes.AppendLine("  Total discount:         $totalDiscountPct %")
-      [void]$notes.AppendLine("  List price:             $listPricePerHour $currency/hr")
-      [void]$notes.AppendLine("  Effective price:        $effectivePricePerHour $currency/hr")
-      [void]$notes.AppendLine("  Monthly savings:        $monthlySavings $currency")
-      [void]$notes.AppendLine("  Yearly savings:         $([Math]::Round($monthlySavings * 12, 2)) $currency")
+      [void]$notes.AppendLine("COST BREAKDOWN PER HOST:")
+      [void]$notes.AppendLine("  VM:              CHF $($p.bwsVmMonthly)/month")
+      [void]$notes.AppendLine("  OS Disk:         CHF $($p.bwsOsDiskMonthly)/month")
+      if ($p.bwsAddDiskMonthly -gt 0) {
+        [void]$notes.AppendLine("  Additional Disks: CHF $($p.bwsAddDiskMonthly)/month")
+      }
+      [void]$notes.AppendLine("  ────────────────────────────")
+      [void]$notes.AppendLine("  Total per Host:  CHF $monthlyPerHost/month")
+    } else {
+      [void]$notes.AppendLine("VM: $($script:LastVmPick.Name) | $hostsTotal hosts")
     }
     [void]$notes.AppendLine("")
-    [void]$notes.AppendLine("COMPUTE ONLY (after discounts, no storage/networking/licenses):")
-    [void]$notes.AppendLine("  Monthly total: $monthlyAllHosts $currency")
-    [void]$notes.AppendLine("  Per named user/month: $costPerNamedUser $currency")
-    [void]$notes.AppendLine("  Per named user/year: $yearlyPerNamedUser $currency")
+    [void]$notes.AppendLine("Schedule: ${hoursPerDay}h/day x ${daysPerMonth} days")
     [void]$notes.AppendLine("")
-    [void]$notes.AppendLine("NOT INCLUDED:")
-    [void]$notes.AppendLine("  - FSLogix profile storage (Azure Files Premium)")
-    [void]$notes.AppendLine("  - OS managed disks")
-    [void]$notes.AppendLine("  - Networking (VNet, NSG, Private Endpoints)")
-    [void]$notes.AppendLine("  - Windows / M365 licenses (unless AHB)")
-    [void]$notes.AppendLine("  - AVD access rights (M365 E3/E5/F3, Win E3/E5)")
-    [void]$notes.AppendLine("  - Monitoring (Log Analytics, AVD Insights)")
-    [void]$notes.AppendLine("  - Backup, DR, management tools")
-    if (-not $hasAhb) {
-      [void]$notes.AppendLine("")
-      [void]$notes.AppendLine("TIP: Enable Azure Hybrid Benefit to save ~40% on Windows VMs")
-      [void]$notes.AppendLine("  Requires: Windows Server SA or M365 E3/E5 licenses")
-    }
-    if ($totalDiscountPct -eq 0) {
-      [void]$notes.AppendLine("")
-      [void]$notes.AppendLine("TIP: Enter your CSP/EA discount to see effective pricing.")
-      [void]$notes.AppendLine("  Typical CSP margins: 5-15%. EA discounts: 10-25%.")
-      [void]$notes.AppendLine("  Combined with RI (1yr ~35%, 3yr ~55%) for maximum savings.")
-    }
+    [void]$notes.AppendLine("FLEET + PER USER:")
+    [void]$notes.AppendLine("  Monthly total:   $monthlyAllHosts $currency ($hostsTotal hosts)")
+    [void]$notes.AppendLine("  Per user/month:  $costPerUser $currency")
+    [void]$notes.AppendLine("  Per user/year:   $yearlyPerUser $currency")
 
     $TxtUserCostNotes.Text = $notes.ToString()
-    Write-UiInfo "User costs calculated: $costPerNamedUser $currency/user/month ($yearlyPerNamedUser $currency/user/year)$(if($totalDiscountPct -gt 0){" (incl. $totalDiscountPct% discount)"})"
+    Write-UiInfo "User costs calculated: $costPerUser $currency/user/month ($yearlyPerUser $currency/user/year)"
   } catch { Write-UiError "User cost calculation failed: $($_.Exception.Message)" }
 })
 
-# Diagnostics handler (Expert mode only) — opens a dialog with info + Disconnect/Login buttons
-$BtnDiagnostics.add_Click({
-  try {
-    # --- Gather diagnostics info ---
-    $diag = [System.Text.StringBuilder]::new()
-    [void]$diag.AppendLine("=== AVD SIZING CALCULATOR DIAGNOSTICS ===")
-    [void]$diag.AppendLine("Version:      $ScriptVersion")
-    [void]$diag.AppendLine("Build:        $ScriptBuildUtc")
-    [void]$diag.AppendLine("Date:         $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
-    [void]$diag.AppendLine("PS Version:   $($PSVersionTable.PSVersion)")
-    [void]$diag.AppendLine("OS:           $([System.Runtime.InteropServices.RuntimeInformation]::OSDescription)")
-    [void]$diag.AppendLine("Thread:       $([System.Threading.Thread]::CurrentThread.ApartmentState)")
-    [void]$diag.AppendLine("")
-
-    # Az module status
-    [void]$diag.AppendLine("--- Az PowerShell Modules ---")
-    $azAccounts = Get-Module -ListAvailable -Name Az.Accounts -ErrorAction SilentlyContinue | Select-Object -First 1
-    $azCompute  = Get-Module -ListAvailable -Name Az.Compute  -ErrorAction SilentlyContinue | Select-Object -First 1
-    $azResources = Get-Module -ListAvailable -Name Az.Resources -ErrorAction SilentlyContinue | Select-Object -First 1
-    [void]$diag.AppendLine("Az.Accounts:  $(if($azAccounts){"v$($azAccounts.Version) OK"}else{'NOT INSTALLED'})")
-    [void]$diag.AppendLine("Az.Compute:   $(if($azCompute){"v$($azCompute.Version) OK"}else{'NOT INSTALLED'})")
-    [void]$diag.AppendLine("Az.Resources: $(if($azResources){"v$($azResources.Version) OK"}else{'NOT INSTALLED (optional)'})")
-    [void]$diag.AppendLine("")
-
-    # Azure connection status
-    $isLoggedIn = $false
-    $accountId = ''
-    [void]$diag.AppendLine("--- Azure Connection ---")
-    try {
-      if ($azAccounts) {
-        Import-Module Az.Accounts -ErrorAction Stop | Out-Null
-        $ctx = Get-AzContext -ErrorAction SilentlyContinue
-        if ($ctx -and $ctx.Account) {
-          $isLoggedIn = $true
-          $accountId = $ctx.Account.Id
-          [void]$diag.AppendLine("Logged in:    YES")
-          [void]$diag.AppendLine("Account:      $($ctx.Account.Id)")
-          [void]$diag.AppendLine("Subscription: $($ctx.Subscription.Name) ($($ctx.Subscription.Id))")
-          [void]$diag.AppendLine("Tenant:       $($ctx.Tenant.Id)")
-        } else {
-          [void]$diag.AppendLine("Logged in:    NO")
-        }
-      } else {
-        [void]$diag.AppendLine("Status:       Az modules not installed")
-      }
-    } catch {
-      [void]$diag.AppendLine("Status:       Error: $($_.Exception.Message)")
-    }
-    [void]$diag.AppendLine("")
-
-    # Region check
-    [void]$diag.AppendLine("--- Region Check ---")
-    $region = $TxtLocation.Text.Trim()
-    [void]$diag.AppendLine("Configured:   $region")
-    try {
-      if ($azAccounts -and $isLoggedIn) {
-        $loc = Get-AzLocation -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq $region -or $_.Location -eq $region }
-        if ($loc) { [void]$diag.AppendLine("Region found: $($loc.DisplayName) ($($loc.Location))") }
-        else      { [void]$diag.AppendLine("Region:       NOT FOUND - check spelling") }
-      } else {
-        [void]$diag.AppendLine("Region:       Cannot verify (not logged in)")
-      }
-    } catch { [void]$diag.AppendLine("Region:       Error: $($_.Exception.Message)") }
-    [void]$diag.AppendLine("")
-
-    # Calculator state
-    [void]$diag.AppendLine("--- Calculator State ---")
-    [void]$diag.AppendLine("LastSizing:   $(if($script:LastSizing){'Present'}else{'Empty (run Calculate)'})")
-    [void]$diag.AppendLine("LastVmPick:   $(if($script:LastVmPick){$script:LastVmPick.Name}else{'Empty (run Pick VM)'})")
-    [void]$diag.AppendLine("LastVmPrice:  $(if($script:LastVmPrice -and -not ($script:LastVmPrice.PSObject.Properties.Name -contains 'Error' -and $script:LastVmPrice.Error)){"$($script:LastVmPrice.RetailPricePerHour) $($script:LastVmPrice.CurrencyCode)/hr"}else{'Empty or error'})")
-    [void]$diag.AppendLine("")
-    [void]$diag.AppendLine("--- Script Parameters ---")
-    [void]$diag.AppendLine("Expert:       $Expert")
-
-    # --- Build Diagnostics WPF Dialog ---
-    $diagXaml = @"
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Diagnostics" Height="520" Width="620" WindowStartupLocation="CenterOwner"
-        Background="#FFFFFF" Foreground="#001155" ResizeMode="NoResize">
-  <Grid Margin="16">
-    <Grid.RowDefinitions>
-      <RowDefinition Height="*"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-    </Grid.RowDefinitions>
-    <TextBox Grid.Row="0" x:Name="TxtDiagInfo" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
-             VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11"
-             Background="#F5F8FC" Foreground="#001155" BorderBrush="#D8DFE8" Padding="8"/>
-    <StackPanel Grid.Row="1" Margin="0,12,0,0">
-      <TextBlock FontWeight="Bold" Foreground="#DD1122" Text="Azure Account Actions" Margin="0,0,0,6"/>
-      <TextBlock x:Name="TxtConnStatus" Foreground="#556688" FontSize="11" Margin="0,0,0,8"/>
-      <StackPanel Orientation="Horizontal">
-        <Button x:Name="BtnDiagLogin" Content="Login with different account" Width="220" Padding="10,6"
-                Background="#086ADB" Foreground="#FFFFFF" FontWeight="Bold" Cursor="Hand" Margin="0,0,10,0"/>
-        <Button x:Name="BtnDiagDisconnect" Content="Disconnect account" Width="180" Padding="10,6"
-                Background="#DD1122" Foreground="#FFFFFF" FontWeight="Bold" Cursor="Hand"/>
-      </StackPanel>
-    </StackPanel>
-    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-      <Button x:Name="BtnDiagClose" Content="Close" Width="100" Padding="10,6"
-              Background="#001155" Foreground="#FFFFFF" Cursor="Hand"/>
-    </StackPanel>
-  </Grid>
-</Window>
-"@
-    $diagReader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($diagXaml))
-    $diagWindow = [Windows.Markup.XamlReader]::Load($diagReader)
-    $diagWindow.Owner = $Window
-
-    $txtDiagInfo = $diagWindow.FindName('TxtDiagInfo')
-    $txtConnStatus = $diagWindow.FindName('TxtConnStatus')
-    $btnDiagLogin = $diagWindow.FindName('BtnDiagLogin')
-    $btnDiagDisconnect = $diagWindow.FindName('BtnDiagDisconnect')
-    $btnDiagClose = $diagWindow.FindName('BtnDiagClose')
-
-    $txtDiagInfo.Text = $diag.ToString()
-
-    if ($isLoggedIn) {
-      $txtConnStatus.Text = "Connected as: $accountId"
-      $btnDiagDisconnect.IsEnabled = $true
-    } else {
-      $txtConnStatus.Text = "Not connected to Azure"
-      $btnDiagDisconnect.IsEnabled = $false
-    }
-
-    if (-not $azAccounts) {
-      $btnDiagLogin.IsEnabled = $false
-      $btnDiagDisconnect.IsEnabled = $false
-      $txtConnStatus.Text = "Az.Accounts module not installed — run: Install-Module Az.Accounts -Scope CurrentUser"
-    }
-
-    # Disconnect button
-    $btnDiagDisconnect.add_Click({
-      try {
-        $txtConnStatus.Text = "Disconnecting..."
-        $btnDiagDisconnect.IsEnabled = $false
-        Disconnect-AzAccount -ErrorAction SilentlyContinue | Out-Null
-        Clear-AzContext -Force -ErrorAction SilentlyContinue | Out-Null
-        $txtConnStatus.Text = "Disconnected. All Azure sessions cleared."
-        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#44DD44')
-        $btnDiagLogin.Content = "Login to Azure"
-        Write-UiInfo "Azure account disconnected."
-      } catch {
-        $txtConnStatus.Text = "Disconnect failed: $($_.Exception.Message)"
-        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#FF4455')
-        $btnDiagDisconnect.IsEnabled = $true
-      }
-    }.GetNewClosure())
-
-    # Login button
-    $btnDiagLogin.add_Click({
-      try {
-        $txtConnStatus.Text = "Opening Azure login prompt..."
-        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#DD1122')
-        # Force new login (ignores cached token)
-        $newCtx = Connect-AzAccount -Force -ErrorAction Stop
-        if ($newCtx -and $newCtx.Context -and $newCtx.Context.Account) {
-          $newAcct = $newCtx.Context.Account.Id
-          $newSub  = $newCtx.Context.Subscription.Name
-          $txtConnStatus.Text = "Logged in as: $newAcct ($newSub)"
-          $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#44DD44')
-          $btnDiagDisconnect.IsEnabled = $true
-          Write-UiInfo "Azure login successful: $newAcct"
-        } else {
-          $txtConnStatus.Text = "Login cancelled or failed."
-          $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#FF4455')
-        }
-      } catch {
-        $txtConnStatus.Text = "Login failed: $($_.Exception.Message)"
-        $txtConnStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom('#FF4455')
-      }
-    }.GetNewClosure())
-
-    # Close button
-    $btnDiagClose.add_Click({ $diagWindow.Close() }.GetNewClosure())
-
-    [void]$diagWindow.ShowDialog()
-
-  } catch { Write-UiError "Diagnostics failed: $($_.Exception.Message)" }
-})
-
+# Diagnostics handler — opens a dialog with info + Disconnect/Login buttons
 $BtnReset.add_Click({
   # Clear calculation state
   $script:LastSizing = $null; $script:LastVmPick = $null; $script:LastVmPrice = $null
@@ -3537,7 +3262,6 @@ $BtnReset.add_Click({
 
   # Azure tab
   $CmbVmSeries.SelectedIndex = 0      # Any (auto)
-  $TxtTemplateOut.Text = ''
   $script:BwsAdditionalDisks.Clear()
 
   # Results tab - clear
@@ -3547,10 +3271,6 @@ $BtnReset.add_Click({
   # Costs tab - clear
   $TxtOperatingHours.Text = '10'
   $TxtOperatingDays.Text = '22'
-  $ChkAhb.IsChecked = $true
-  $TxtCspDiscount.Text = '0'
-  $TxtRiDiscount.Text = '0'
-  $TxtAdditionalDiscount.Text = '0'
   $GridUserCosts.ItemsSource = $null
   $TxtUserCostNotes.Text = ''
 
@@ -3561,6 +3281,47 @@ $BtnClose.add_Click({ $Window.Close() })
 
 $CmbSku.Items.Clear(); @('win11-24h2-avd-m365','win11-23h2-avd-m365','win11-24h2-avd','win11-23h2-avd') | ForEach-Object { [void]$CmbSku.Items.Add($_) }
 $CmbSku.SelectedIndex = 0
+#endregion
+
+#region Disclaimer Dialog
+$disclaimerXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="BWS AVD Sizing — Disclaimer" Width="560" Height="400"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Background="#FFFFFF">
+  <Grid Margin="24">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <!-- Header -->
+    <StackPanel Grid.Row="0" Margin="0,0,0,16">
+      <TextBlock Text="Disclaimer" FontSize="20" FontWeight="Bold" Foreground="#001155"/>
+      <Rectangle Height="3" Fill="#DD1122" HorizontalAlignment="Left" Width="60" Margin="0,6,0,0"/>
+    </StackPanel>
+
+    <!-- Disclaimer Content -->
+    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,0,0,16">
+      <TextBlock x:Name="TxtDisclaimer" TextWrapping="Wrap" Foreground="#333333" FontSize="13" LineHeight="22"
+                 Text="Disclaimer text will be added here."/>
+    </ScrollViewer>
+
+    <!-- Accept Button -->
+    <Button x:Name="BtnAcceptDisclaimer" Grid.Row="2" Content="Accept" Width="160" Height="36"
+            HorizontalAlignment="Center" FontWeight="Bold" FontSize="14"
+            Background="#086ADB" Foreground="#FFFFFF" BorderThickness="0"
+            Cursor="Hand"/>
+  </Grid>
+</Window>
+"@
+$disclaimerReader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($disclaimerXaml))
+$disclaimerWindow = [System.Windows.Markup.XamlReader]::Load($disclaimerReader)
+$disclaimerWindow.FindName('BtnAcceptDisclaimer').add_Click({ $disclaimerWindow.DialogResult = $true; $disclaimerWindow.Close() })
+$accepted = $disclaimerWindow.ShowDialog()
+if ($accepted -ne $true) { exit 0 }
 #endregion
 
 [void]$Window.ShowDialog()
