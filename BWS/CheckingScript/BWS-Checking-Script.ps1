@@ -230,7 +230,7 @@ function Get-BWS-ResourceNames {
         
         # Public IPs
         BnsPublicIP = "pip-" + $BCID.ToLower() + "-bwsbns-nch-0"
-        InetOutboundS00 = "pip-" + $BCID.ToLower() + "-internet-" + $BCID.ToLower() + "s00-nch-0"
+        InetOutboundS00 = "pip-" + $BCID.ToLower() + "-internet-" + $BCID.ToLower() + "-s00-nch-0"
         
         # Connections
         ConBwsBnsEC = "s2sp1-" + $BCID.ToLower() + "-bwsbns-nch-0"
@@ -497,36 +497,10 @@ function Test-IntunePolicies {
             Write-Host "  [Intune Policy] " -NoNewline -ForegroundColor Gray
             Write-Host "$requiredPolicy" -NoNewline
             
-            $normalizedRequired = Normalize-PolicyName $requiredPolicy
-            $foundPolicy = $null
-            
-            # Strategy 1: Exact match
+            # Nur exakte Übereinstimmung erlaubt (Case-Insensitive)
             $foundPolicy = $allIntunePolicies | Where-Object { 
-                (Normalize-PolicyName $_.DisplayName) -eq $normalizedRequired
+                $_.DisplayName.Trim() -eq $requiredPolicy.Trim()
             } | Select-Object -First 1
-            
-            # Strategy 2: Contains match
-            if (-not $foundPolicy) {
-                $foundPolicy = $allIntunePolicies | Where-Object { 
-                    (Normalize-PolicyName $_.DisplayName) -like "*$normalizedRequired*"
-                } | Select-Object -First 1
-            }
-            
-            # Strategy 3: Reverse contains
-            if (-not $foundPolicy) {
-                $foundPolicy = $allIntunePolicies | Where-Object { 
-                    $normalizedRequired -like "*$(Normalize-PolicyName $_.DisplayName)*"
-                } | Select-Object -First 1
-            }
-            
-            # Strategy 4: Fuzzy match
-            if (-not $foundPolicy) {
-                $cleanRequired = $normalizedRequired -replace '\s*(std|standard|policy|policies|-)\s*', ' ' -replace '\s+', ' ' -replace '^\s+|\s+$', ''
-                $foundPolicy = $allIntunePolicies | Where-Object {
-                    $cleanActual = (Normalize-PolicyName $_.DisplayName) -replace '\s*(std|standard|policy|policies|-)\s*', ' ' -replace '\s+', ' ' -replace '^\s+|\s+$', ''
-                    $cleanActual -like "*$cleanRequired*" -or $cleanRequired -like "*$cleanActual*"
-                } | Select-Object -First 1
-            }
             
             if ($foundPolicy) {
                 Write-Host " ✓" -ForegroundColor Green
@@ -535,7 +509,6 @@ function Test-IntunePolicies {
                     ActualName = $foundPolicy.DisplayName
                     PolicyId = $foundPolicy.Id
                     Status = "Found"
-                    MatchType = if ((Normalize-PolicyName $foundPolicy.DisplayName) -eq $normalizedRequired) { "Exact" } else { "Fuzzy" }
                 }
             } else {
                 Write-Host " ✗ MISSING" -ForegroundColor Red
@@ -569,18 +542,7 @@ function Test-IntunePolicies {
         if ($intuneFoundPolicies.Count -gt 0) {
             Write-Host "FOUND INTUNE POLICIES:" -ForegroundColor Green
             Write-Host ""
-            $intuneFoundPolicies | Format-Table PolicyName, ActualName, MatchType -AutoSize
-            
-            $fuzzyMatches = $intuneFoundPolicies | Where-Object { $_.MatchType -eq "Fuzzy" }
-            if ($fuzzyMatches.Count -gt 0) {
-                Write-Host ""
-                Write-Host "Note: The following policies were matched using fuzzy logic:" -ForegroundColor Yellow
-                $fuzzyMatches | ForEach-Object {
-                    Write-Host "  Expected: $($_.PolicyName)" -ForegroundColor Yellow
-                    Write-Host "  Found:    $($_.ActualName)" -ForegroundColor Gray
-                    Write-Host ""
-                }
-            }
+            $intuneFoundPolicies | Format-Table PolicyName, ActualName -AutoSize
             Write-Host ""
         }
         
@@ -3500,19 +3462,16 @@ function Export-HTMLReport {
                         <tr>
                             <th>Status</th>
                             <th>Policy Name</th>
-                            <th>Match Type</th>
                         </tr>
                     </thead>
                     <tbody>
 "@
 
         foreach ($policy in $IntuneResults.Found) {
-            $matchType = if ($policy.MatchType) { $policy.MatchType } else { "Exact" }
             $html += @"
                         <tr>
                             <td><span class="status-icon status-found">✓</span></td>
                             <td>$($policy.PolicyName)</td>
-                            <td>$matchType</td>
                         </tr>
 "@
         }
@@ -3522,7 +3481,6 @@ function Export-HTMLReport {
                         <tr>
                             <td><span class="status-icon status-missing">✗</span></td>
                             <td>$($policy.PolicyName)</td>
-                            <td>Not Found</td>
                         </tr>
 "@
         }
