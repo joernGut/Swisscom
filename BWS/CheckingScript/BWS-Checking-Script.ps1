@@ -1,8 +1,7 @@
 #Requires -Version 5.1
 #Requires -PSEdition Desktop
-#Requires -Modules @{ ModuleName="Az.Accounts";     ModuleVersion="2.0.0" }
-#Requires -Modules @{ ModuleName="Az.Resources";    ModuleVersion="1.0.0" }
-#Requires -Modules @{ ModuleName="Microsoft.Graph"; ModuleVersion="1.0.0" }
+# NOTE: Module requirements are handled at runtime by Install-BWSDependencies
+#       to allow automatic installation of missing modules with visual progress.
 
 <#
 .SYNOPSIS
@@ -36,7 +35,7 @@
 .PARAMETER RunTests
     Run built-in unit tests (Pester-style) before executing checks
 .NOTES
-    Version: 2.2.0
+    Version: 2.3.0
     Datum: 2025-03-12
     Autor: BWS PowerShell Script
 .EXAMPLE
@@ -50,7 +49,7 @@
 param(
     [Parameter(Mandatory=$false)]
     [ValidateNotNullOrEmpty()]
-    [ValidatePattern('^[0-9A-Za-z]{1,8}$', ErrorMessage = 'BCID must be 1-8 alphanumeric characters (e.g. 1234 or AB12CD).')]
+    [ValidatePattern('^[0-9A-Za-z]{1,8}$')]
     [string]$BCID = "0000",
     
     [Parameter(Mandatory=$false)]
@@ -118,12 +117,18 @@ param(
 )
 
 # Script Version
-$script:Version = "2.2.0"
+$script:Version = "2.3.0"
 
 #============================================================================
 # QUALITY ASSURANCE - Block 1: Strict Mode
 #============================================================================
-# Set-StrictMode -Version Latest catches:
+# Set-StrictMode -Version Latest
+
+# Remove any Microsoft.Graph modules that may have been loaded in this PS session
+# (e.g. from a previous script run). Microsoft.Graph SDK v2.x cannot load in PS 5.1
+# and causes a GetTokenAsync / .NET Framework incompatibility error if left in session.
+$null = Get-Module -Name 'Microsoft.Graph*' -ErrorAction SilentlyContinue |
+        Remove-Module -Force -ErrorAction SilentlyContinue catches:
 #   - Uninitialised variable access
 #   - Calling properties on $null
 #   - Out-of-bounds array indexing
@@ -258,7 +263,620 @@ if ($psVersion -ge 7 -or $psEdition -eq "Core") {
 }
 
 #============================================================================
-# QUALITY ASSURANCE - Block 5: PSScriptAnalyzer (optional, -RunAnalyzer)
+
+#============================================================================
+# Required Modules Definition
+#============================================================================
+
+$script:RequiredModules = @(
+    # MaxVersion="" = no upper bound.
+    # Microsoft.Graph.Authentication is pinned to v1.x (MaxVersion="1.99.99"):
+    #   Graph SDK v2.x requires .NET 6+ and will NOT load in PS 5.1 on .NET Framework 4.x.
+    #   v1.x uses Invoke-BWsGraphRequest for all API calls (v1.0 and /beta/ endpoints).
+    #   Sub-modules (DeviceManagement, Users etc.) are NOT needed - all calls go through
+    #   Invoke-BWsGraphRequest REST calls which only require Authentication.
+    @{ Name="Az.Accounts";                           MinVersion="2.0.0";  MaxVersion="";       Description="Azure Authentication";        Scope="CurrentUser"; Required=$true;  SkipParam="" },
+    @{ Name="Az.Resources";                          MinVersion="1.0.0";  MaxVersion="";       Description="Azure Resource Management";   Scope="CurrentUser"; Required=$true;  SkipParam="" },
+    @{ Name="Az.Storage";                            MinVersion="3.0.0";  MaxVersion="";       Description="Azure Storage (Defender)";    Scope="CurrentUser"; Required=$false; SkipParam="SkipDefender" },
+    # Microsoft.Graph.Authentication is NOT required - we use Az.Accounts token + Invoke-RestMethod.
+    # This avoids ALL Graph SDK version conflicts with PS 5.1 / .NET Framework 4.x.
+    @{ Name="Microsoft.Online.SharePoint.PowerShell";MinVersion="16.0.0"; MaxVersion="";       Description="SharePoint Online Admin";     Scope="CurrentUser"; Required=$false; SkipParam="SkipSharePoint" },
+    @{ Name="MicrosoftTeams";                        MinVersion="4.0.0";  MaxVersion="";       Description="Microsoft Teams Admin";       Scope="CurrentUser"; Required=$false; SkipParam="SkipTeams" },
+    @{ Name="PSScriptAnalyzer";                      MinVersion="1.20.0"; MaxVersion="";       Description="PS Static Code Analysis";     Scope="CurrentUser"; Required=$false; SkipParam="" }
+)
+
+
+#============================================================================
+# Graph REST API Helpers  -  Az.Accounts token + Invoke-RestMethod
+# No Microsoft.Graph module required. Works in PS 5.1 / .NET Framework 4.x.
+#============================================================================
+
+# Token cache
+$script:BWSGraphToken       = $null
+$script:BWSGraphTokenExpiry = [datetime]::MinValue
+$script:BWSGraphConnected   = $false
+
+#============================================================================
+# Graph REST Helpers - Invoke-AzRestMethod only, zero Graph SDK dependency
+# Works in PS 5.1 / .NET Framework 4.x with Az.Accounts v2+ (incl. v5.x).
+# Invoke-AzRestMethod is a native Az.Accounts cmdlet: it handles auth
+# internally using the active Az session and never touches the Graph SDK.
+#============================================================================
+
+$script:BWSGraphConnected = $false   # becomes $true after first successful call
+
+function Connect-BWsGraph {
+    <#
+    .SYNOPSIS
+        Validates the active Az session can reach Graph.
+        No Graph module, no token handling needed - Invoke-AzRestMethod does it all.
+    #>
+    param([string[]]$Scopes = @())   # kept for call-site compatibility only
+
+    # Remove any stale Graph SDK modules that may auto-load from session
+    Get-Module -Name 'Microsoft.Graph*' -ErrorAction SilentlyContinue |
+        Remove-Module -Force -ErrorAction SilentlyContinue
+
+    try {
+        $azCtx = Get-AzContext -ErrorAction Stop
+        if (-not $azCtx) {
+            Write-Host " [X] No active Az session - run Connect-AzAccount first" -ForegroundColor Red
+            $script:BWSGraphConnected = $false
+            return $false
+        }
+        # Probe Graph with a lightweight call to confirm auth works
+        $probe = Invoke-AzRestMethod -Uri "https://graph.microsoft.com/v1.0/organization?$`select=id" -Method GET -ErrorAction Stop
+        if ($probe.StatusCode -ge 200 -and $probe.StatusCode -lt 300) {
+            $script:BWSGraphConnected = $true
+            Write-Host " [OK] Graph connection verified (Az session: $($azCtx.Account.Id))" -ForegroundColor Green
+            return $true
+        } else {
+            Write-Host " [X] Graph probe returned HTTP $($probe.StatusCode)" -ForegroundColor Red
+            $script:BWSGraphConnected = $false
+            return $false
+        }
+    } catch {
+        Write-Host " [X] Graph connection failed: $($_.Exception.Message)" -ForegroundColor Red
+        $script:BWSGraphConnected = $false
+        return $false
+    }
+}
+
+function Get-BWsGraphContext {
+    <#
+    .SYNOPSIS  Returns $true if Graph is reachable via the active Az session.#>
+    $azCtx = Get-AzContext -ErrorAction SilentlyContinue
+    return $(if ($azCtx -and $script:BWSGraphConnected) {
+        @{ Account = $azCtx.Account.Id }
+    } else { $null })
+}
+
+function Invoke-BWsGraphRequest {
+    <#
+    .SYNOPSIS
+        Calls a Microsoft Graph v1.0 endpoint via Invoke-AzRestMethod.
+        No Graph module or bearer token handling needed.
+    .PARAMETER Uri
+        Full URL or path relative to https://graph.microsoft.com/v1.0/
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$Uri,
+        [string]   $Method      = "GET",
+        [hashtable]$Body        = $null,
+        [string]   $ErrorAction = "Stop"
+    )
+
+    if ($Uri -notmatch '^https://') {
+        $Uri = "https://graph.microsoft.com/v1.0/$($Uri.TrimStart('/'))"
+    }
+
+    $restParams = @{ Uri = $Uri; Method = $Method; ErrorAction = $ErrorAction }
+    if ($Body) { $restParams.Payload = ($Body | ConvertTo-Json -Depth 10) }
+
+    $resp = Invoke-AzRestMethod @restParams
+    if ($resp.StatusCode -lt 200 -or $resp.StatusCode -ge 300) {
+        if ($ErrorAction -eq "Stop") {
+            throw "Graph API error $($resp.StatusCode): $($resp.Content)"
+        }
+        return $null
+    }
+    return $resp.Content | ConvertFrom-Json
+}
+
+function Invoke-BWsGraphPagedRequest {
+    <#
+    .SYNOPSIS
+        Calls a Graph endpoint and follows @odata.nextLink pages.
+        Returns a flat array of all items.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$Uri,
+        [string]$Method = "GET"
+    )
+    if ($Uri -notmatch '^https://') {
+        $Uri = "https://graph.microsoft.com/v1.0/$($Uri.TrimStart('/'))"
+    }
+    $allItems = [System.Collections.Generic.List[object]]::new()
+    $nextUri  = $Uri
+    do {
+        $resp = Invoke-BWsGraphRequest -Uri $nextUri -Method $Method -ErrorAction Stop
+        if ($null -eq $resp) { break }
+        if ($resp.value) {
+            foreach ($item in $resp.value) { $allItems.Add($item) }
+        } elseif ($null -ne $resp) {
+            $allItems.Add($resp)
+        }
+        $nextUri = if ($resp.PSObject.Properties['@odata.nextLink']) { $resp.'@odata.nextLink' } else { $null }
+    } while ($nextUri)
+    return $allItems.ToArray()
+}
+
+function Invoke-BWsBetaGraphRequest {
+    <#
+    .SYNOPSIS  Calls the Microsoft Graph BETA endpoint via Invoke-AzRestMethod.#>
+    param(
+        [Parameter(Mandatory=$true)][string]$Uri,
+        [string]   $Method = "GET",
+        [hashtable]$Body   = $null
+    )
+    if ($Uri -notmatch '^https://') {
+        $Uri = "https://graph.microsoft.com/beta/$($Uri.TrimStart('/'))"
+    }
+    return Invoke-BWsGraphRequest -Uri $Uri -Method $Method -Body $Body
+}
+
+# Public alias kept for any external callers
+function Invoke-MgBetaGraphRequest {
+    param(
+        [Parameter(Mandatory=$true)][string]$Uri,
+        [string]   $Method = "GET",
+        [hashtable]$Body   = $null
+    )
+    return Invoke-BWsBetaGraphRequest -Uri $Uri -Method $Method -Body $Body
+}
+
+
+function Get-ModuleStatus {
+    param([string]$Name, [string]$MinVersion = "0.0.0", [string]$MaxVersion = "")
+
+    # Safe version comparison - [version] cast can throw on unusual version strings in PS 5.1
+    $minVer = try { [version]$MinVersion } catch { [version]"0.0.0" }
+
+    $avail = Get-Module -ListAvailable -Name $Name -ErrorAction SilentlyContinue |
+             Where-Object {
+                 $modVer = try { [version]$_.Version } catch { [version]"0.0.0" }
+                 $modVer -ge $minVer
+             } |
+             Sort-Object { try { [version]$_.Version } catch { [version]"0.0.0" } } -Descending |
+             Select-Object -First 1
+
+    $loaded = Get-Module -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+
+    return @{
+        IsAvailable  = ($null -ne $avail)
+        IsLoaded     = ($null -ne $loaded)
+        InstalledVer = if ($avail)  { $avail.Version.ToString()  } else { $null }
+        LoadedVer    = if ($loaded) { $loaded.Version.ToString() } else { $null }
+    }
+}
+
+#============================================================================
+# Module Setup: Install-BWSDependencies (Console + GUI callback)
+#============================================================================
+
+function Install-BWSDependencies {
+    <#
+    .SYNOPSIS
+        Checks, installs and imports all required modules with live timing output.
+    .PARAMETER SkipParams
+        Hashtable of skip flags, e.g. @{SkipSharePoint=$true; SkipTeams=$true}
+    .PARAMETER GUICallback
+        Scriptblock called after each module step for GUI updates.
+    #>
+    param(
+        [hashtable]$SkipParams    = @{},
+        [scriptblock]$GUICallback = $null
+    )
+
+    $W = @{ N=36; D=30; S=18; I=9; M=9 }
+    $sep = "  +" + ("-" * ($W.N+2)) + "+" + ("-" * ($W.D+2)) + "+" + ("-" * ($W.S+2)) + "+" + ("-" * ($W.I+2)) + "+" + ("-" * ($W.M+2)) + "+"
+
+    function Write-MRow {
+        param($R, [string]$Override = "")
+        $s  = if ($Override) { $Override } else { $R.Status }
+        $ni = $R.InstallTime; $mi = $R.ImportTime
+        $n  = $R.Name.PadRight($W.N).Substring(0,$W.N)
+        $d  = if ($R.Desc.Length -gt $W.D) { $R.Desc.Substring(0,$W.D) } else { $R.Desc.PadRight($W.D) }
+        $ss = if ($s.Length -gt $W.S) { $s.Substring(0,$W.S) } else { $s.PadRight($W.S) }
+        $ii = if ($ni) { $ni.PadRight($W.I).Substring(0,$W.I) } else { "".PadRight($W.I) }
+        $mm = if ($mi) { $mi.PadRight($W.M).Substring(0,$W.M) } else { "".PadRight($W.M) }
+        $ln = "  | $n | $d | $ss | $ii | $mm |"
+        if     ($s -like "*[OK]*")   { $c = "Green"    }
+        elseif ($s -like "*SKIP*")   { $c = "DarkGray" }
+        elseif ($s -like "*[X]*")    { $c = "Red"      }
+        elseif ($s -like "*[!]*")    { $c = "Yellow"   }
+        elseif ($s -like "*...*")    { $c = "Cyan"     }
+        else                         { $c = "White"    }
+        Write-Host $ln -ForegroundColor $c
+    }
+
+    Write-Host ""
+    Write-Host $sep -ForegroundColor Cyan
+    $hdr = "  | " + "BWS Module Prerequisites".PadRight($W.N) + " | " + "Description".PadRight($W.D) + " | " + "Status".PadRight($W.S) + " | " + "Install".PadRight($W.I) + " | " + "Import".PadRight($W.M) + " |"
+    Write-Host $hdr -ForegroundColor White
+    Write-Host $sep -ForegroundColor DarkGray
+
+    $allResults = [System.Collections.Generic.List[hashtable]]::new()
+    $totalSW    = [System.Diagnostics.Stopwatch]::StartNew()
+    $modCount   = 0
+
+    # Ensure NuGet provider is available (required in PS 5.1 for Install-Module)
+    $nuget = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
+    if (-not $nuget -or $nuget.Version -lt [version]"2.8.5.201") {
+        Write-Host "  Installing NuGet package provider (required for Install-Module)..." -ForegroundColor Yellow
+        try {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force -ErrorAction Stop | Out-Null
+            Write-Host "  [OK] NuGet provider ready" -ForegroundColor Green
+        } catch {
+            Write-Host "  [!] NuGet provider install failed: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+
+    # Trust PSGallery if not already trusted (avoids interactive prompts during Install-Module)
+    $gallery = Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue
+    if ($gallery -and $gallery.InstallationPolicy -ne "Trusted") {
+        try {
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+            Write-Host "  [OK] PSGallery set to Trusted for this session" -ForegroundColor Gray
+        } catch {}
+    }
+
+    foreach ($mod in $script:RequiredModules) {
+        $modCount++
+        $row = @{ Name=$mod.Name; Desc=$mod.Description; Status="Checking..."; InstallTime=""; ImportTime=""; Error=""; Skipped=$false }
+
+        # Skip check
+        $doSkip = $false
+        if ($mod['SkipParam'] -and $SkipParams.ContainsKey($mod['SkipParam']) -and $SkipParams[$mod['SkipParam']] -eq $true) { $doSkip = $true }
+
+        Write-Progress -Activity "BWS Module Setup" `
+            -Status "[$modCount/$($script:RequiredModules.Count)] $($mod.Name)" `
+            -PercentComplete ([int](($modCount-1) / $script:RequiredModules.Count * 100))
+
+        if ($doSkip) {
+            $row.Status = "SKIP"; $row.InstallTime = "n/a"; $row.ImportTime = "n/a"; $row.Skipped = $true
+            $allResults.Add($row); Write-MRow $row
+            if ($GUICallback) { & $GUICallback $row }
+            continue
+        }
+
+        $maxV = if ($mod.ContainsKey('MaxVersion') -and $mod['MaxVersion']) { $mod['MaxVersion'] } else { '' }
+        $st = Get-ModuleStatus -Name $mod.Name -MinVersion $mod.MinVersion -MaxVersion $maxV
+
+        #  Install 
+        if (-not $st.IsAvailable) {
+            $row.Status = "Installing..."
+            Write-MRow $row
+            if ($GUICallback) { & $GUICallback $row }
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            try {
+                $installParams = @{
+                    Name            = $mod.Name
+                    MinimumVersion  = $mod.MinVersion
+                    Scope           = $mod.Scope
+                    Repository      = "PSGallery"
+                    Force           = $true
+                    AllowClobber    = $true
+                    ErrorAction     = "Stop"
+                }
+                if ($mod.ContainsKey('MaxVersion') -and $mod['MaxVersion']) { $installParams.MaximumVersion = $mod['MaxVersion'] }
+                Install-Module @installParams
+                $sw.Stop()
+                $row.InstallTime = "$([int]$sw.Elapsed.TotalSeconds)s"
+            } catch {
+                $sw.Stop()
+                $row.Status      = "[X] Install failed"
+                $row.InstallTime = "$([int]$sw.Elapsed.TotalSeconds)s"
+                $row.Error       = $_.Exception.Message
+                $allResults.Add($row); Write-MRow $row
+                Write-Host "      ERR: $($_.Exception.Message)" -ForegroundColor Red
+                if ($GUICallback) { & $GUICallback $row }
+                continue
+            }
+        } else {
+            $row.InstallTime = "cached"
+        }
+
+        #  Import 
+        $st2 = Get-ModuleStatus -Name $mod.Name -MinVersion $mod.MinVersion -MaxVersion $maxV
+        if (-not $st2.IsLoaded) {
+            $row.Status = "Importing..."
+            Write-MRow $row
+            if ($GUICallback) { & $GUICallback $row }
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            try {
+                # Register-AzModule TypeInitializationException and SharePoint unapproved-verb
+                # warnings are non-terminating errors on stream 2 and warnings on stream 3.
+                # Both must be redirected. ErrorAction SilentlyContinue allows stream 2 to be
+                # redirected via 2>$null; we then verify the import succeeded by checking the
+                # loaded module list ourselves and throw if it genuinely failed.
+                $importParams = @{
+                    Name              = $mod.Name
+                    Force             = $true
+                    WarningAction     = "SilentlyContinue"
+                    ErrorAction       = "SilentlyContinue"
+                }
+                # If MaxVersion is set (e.g. Graph v1.x pin), load the specific pinned version
+                if ($maxV) {
+                    $pinVer = Get-Module -ListAvailable -Name $mod.Name -ErrorAction SilentlyContinue |
+                              Where-Object {
+                                  $mv = try { [version]$_.Version } catch { [version]"0.0.0" }
+                                  $mv -le [version]$maxV
+                              } |
+                              Sort-Object { try { [version]$_.Version } catch { [version]"0.0.0" } } -Descending |
+                              Select-Object -First 1
+                    if ($pinVer) {
+                        $importParams.RequiredVersion = $pinVer.Version.ToString()
+                    }
+                }
+                # Redirect stream 2 (errors) and stream 3 (warnings) to suppress cosmetic noise
+                Import-Module @importParams 2>$null 3>$null
+                # Verify the module actually loaded - throw if not so catch block fires
+                $verifyLoaded = Get-Module -Name $mod.Name -ErrorAction SilentlyContinue
+                if (-not $verifyLoaded) {
+                    throw "Module '$($mod.Name)' did not load after Import-Module (no terminating error was thrown)"
+                }
+                $sw.Stop()
+                $row.ImportTime = "$([int]$sw.Elapsed.TotalSeconds)s"
+            } catch {
+                $sw.Stop()
+                $row.Status     = "[!] Import failed"
+                $row.ImportTime = "$([int]$sw.Elapsed.TotalSeconds)s"
+                $row.Error      = $_.Exception.Message
+                $allResults.Add($row); Write-MRow $row
+                Write-Host "      ERR: $($_.Exception.Message)" -ForegroundColor Red
+                if ($GUICallback) { & $GUICallback $row }
+                continue
+            }
+        } else {
+            $row.ImportTime = "loaded"
+        }
+
+        $st3        = Get-ModuleStatus -Name $mod.Name -MinVersion $mod.MinVersion -MaxVersion $maxV
+        $row.Status = if ($st3.IsLoaded) { "[OK] v$($st3.LoadedVer)" } `
+                      elseif ($st3.IsAvailable) { "[!] Not loaded" } `
+                      else { "[X] Not found" }
+        $allResults.Add($row)
+        Write-MRow $row
+        if ($GUICallback) { & $GUICallback $row }
+    }
+
+    $totalSW.Stop()
+    Write-Progress -Activity "BWS Module Setup" -Completed -ErrorAction SilentlyContinue
+
+    $failed   = @($allResults | Where-Object { $_.Status -like "*[X]*" -or $_.Status -like "*failed*" })
+    $warnings = @($allResults | Where-Object { $_.Status -like "*[!]*" })
+    $skipped  = @($allResults | Where-Object { $_.Skipped -eq $true })
+    $ok       = @($allResults | Where-Object { $_.Status -like "*[OK]*" })
+
+    Write-Host $sep -ForegroundColor Cyan
+    $sumColor = if ($failed.Count -gt 0) { "Red" } elseif ($warnings.Count -gt 0) { "Yellow" } else { "Green" }
+    Write-Host "  Modules: $($allResults.Count)  [OK]: $($ok.Count)  Skipped: $($skipped.Count)  Warn: $($warnings.Count)  Failed: $($failed.Count)  Time: $([int]$totalSW.Elapsed.TotalSeconds)s" -ForegroundColor $sumColor
+    Write-Host $sep -ForegroundColor Cyan
+    Write-Host ""
+
+    return @{
+        Results   = $allResults
+        OK        = $ok.Count
+        Failed    = $failed.Count
+        Warnings  = $warnings.Count
+        Skipped   = $skipped.Count
+        TotalSecs = [int]$totalSW.Elapsed.TotalSeconds
+        AllReady  = ($failed.Count -eq 0)
+    }
+}
+
+#============================================================================
+# Module Setup: Show-ModuleSetupDialog (WinForms GUI variant)
+#============================================================================
+
+function Show-ModuleSetupDialog {
+    <#
+    .SYNOPSIS
+        WinForms dialog that shows module install/import progress in real-time.
+    .PARAMETER SkipParams
+        Same as Install-BWSDependencies -SkipParams.
+    #>
+    param([hashtable]$SkipParams = @{})
+
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    $dlg                  = New-Object System.Windows.Forms.Form
+    $dlg.Text             = "BWS Module Prerequisites"
+    $dlg.Size             = New-Object System.Drawing.Size(880, 510)
+    $dlg.StartPosition    = "CenterScreen"
+    $dlg.FormBorderStyle  = "FixedDialog"
+    $dlg.MaximizeBox      = $false
+    $dlg.MinimizeBox      = $false
+    $dlg.BackColor        = [System.Drawing.Color]::FromArgb(22, 22, 30)
+
+    # Title
+    $lTitle               = New-Object System.Windows.Forms.Label
+    $lTitle.Text          = "Checking and loading required PowerShell modules..."
+    $lTitle.Location      = New-Object System.Drawing.Point(14, 12)
+    $lTitle.Size          = New-Object System.Drawing.Size(840, 24)
+    $lTitle.ForeColor     = [System.Drawing.Color]::FromArgb(160, 210, 255)
+    $lTitle.Font          = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+    $dlg.Controls.Add($lTitle)
+
+    # ListView
+    $lv                   = New-Object System.Windows.Forms.ListView
+    $lv.Location          = New-Object System.Drawing.Point(14, 44)
+    $lv.Size              = New-Object System.Drawing.Size(840, 290)
+    $lv.View              = [System.Windows.Forms.View]::Details
+    $lv.FullRowSelect     = $true
+    $lv.GridLines         = $true
+    $lv.BackColor         = [System.Drawing.Color]::FromArgb(28, 28, 40)
+    $lv.ForeColor         = [System.Drawing.Color]::FromArgb(205, 205, 205)
+    $lv.Font              = New-Object System.Drawing.Font("Consolas", 9)
+    $lv.HeaderStyle       = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
+    $null = $lv.Columns.Add("Module",       170)
+    $null = $lv.Columns.Add("Description",  200)
+    $null = $lv.Columns.Add("Status",       155)
+    $null = $lv.Columns.Add("Install",       80)
+    $null = $lv.Columns.Add("Import",        80)
+    $null = $lv.Columns.Add("Version",      110)
+    $dlg.Controls.Add($lv)
+
+    # Pre-populate rows and keep hashtable for updates
+    $lvMap = @{}
+    foreach ($mod in $script:RequiredModules) {
+        $item = New-Object System.Windows.Forms.ListViewItem($mod.Name)
+        $null = $item.SubItems.Add($mod.Description)
+        $null = $item.SubItems.Add("Waiting...")
+        $null = $item.SubItems.Add("")
+        $null = $item.SubItems.Add("")
+        $null = $item.SubItems.Add("")
+        $item.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 120)
+        $lv.Items.Add($item) | Out-Null
+        $lvMap[$mod.Name] = $item
+    }
+
+    # Overall progress bar
+    $pb               = New-Object System.Windows.Forms.ProgressBar
+    $pb.Location      = New-Object System.Drawing.Point(14, 346)
+    $pb.Size          = New-Object System.Drawing.Size(840, 22)
+    $pb.Style         = "Continuous"
+    $pb.Maximum       = ($script:RequiredModules | Measure-Object).Count
+    $pb.Value         = 0
+    $dlg.Controls.Add($pb)
+
+    # Current-module label
+    $lCur             = New-Object System.Windows.Forms.Label
+    $lCur.Location    = New-Object System.Drawing.Point(14, 374)
+    $lCur.Size        = New-Object System.Drawing.Size(840, 20)
+    $lCur.ForeColor   = [System.Drawing.Color]::FromArgb(200, 190, 100)
+    $lCur.Font        = New-Object System.Drawing.Font("Segoe UI", 9)
+    $lCur.Text        = "Starting..."
+    $dlg.Controls.Add($lCur)
+
+    # Timing detail label
+    $lTime            = New-Object System.Windows.Forms.Label
+    $lTime.Location   = New-Object System.Drawing.Point(14, 394)
+    $lTime.Size       = New-Object System.Drawing.Size(840, 18)
+    $lTime.ForeColor  = [System.Drawing.Color]::FromArgb(130, 130, 130)
+    $lTime.Font       = New-Object System.Drawing.Font("Consolas", 8)
+    $lTime.Text       = ""
+    $dlg.Controls.Add($lTime)
+
+    # Continue button (disabled until complete)
+    $btn              = New-Object System.Windows.Forms.Button
+    $btn.Location     = New-Object System.Drawing.Point(360, 420)
+    $btn.Size         = New-Object System.Drawing.Size(160, 36)
+    $btn.Text         = "Please wait..."
+    $btn.Enabled      = $false
+    $btn.BackColor    = [System.Drawing.Color]::FromArgb(50, 80, 50)
+    $btn.ForeColor    = [System.Drawing.Color]::White
+    $btn.Font         = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $btn.Add_Click({ $dlg.Close() })
+    $dlg.Controls.Add($btn)
+
+    # Wire up the callback
+    $script:_dlgLVMap = $lvMap
+    $script:_dlgPB    = $pb
+    $script:_dlgLCur  = $lCur
+    $script:_dlgLTime = $lTime
+    $script:_dlgDone  = 0
+
+    $cb = {
+        param($Row)
+        $itm = $script:_dlgLVMap[$Row.Name]
+        if (-not $itm) { return }
+
+        $s = $Row.Status
+        if     ($s -like "*[OK]*")    { $c = [System.Drawing.Color]::FromArgb( 90,210, 90) }
+        elseif ($s -like "*SKIP*")    { $c = [System.Drawing.Color]::FromArgb(110,110,120) }
+        elseif ($s -like "*[X]*")     { $c = [System.Drawing.Color]::FromArgb(240, 80, 80) }
+        elseif ($s -like "*[!]*")     { $c = [System.Drawing.Color]::FromArgb(240,190, 60) }
+        elseif ($s -like "*Install*") { $c = [System.Drawing.Color]::FromArgb( 80,170,255) }
+        elseif ($s -like "*Import*")  { $c = [System.Drawing.Color]::FromArgb(170,130,255) }
+        else                          { $c = [System.Drawing.Color]::FromArgb(200,200,200) }
+        $itm.SubItems[2].Text = $s
+        $itm.SubItems[3].Text = $Row.InstallTime
+        $itm.SubItems[4].Text = $Row.ImportTime
+        $itm.ForeColor        = $c
+        if ($s -like "*[OK]*") {
+            $vs = Get-ModuleStatus -Name $Row.Name -MinVersion "0.0.0"
+            $itm.SubItems[5].Text = $vs.LoadedVer
+        }
+
+        $script:_dlgLCur.Text  = "$($Row.Name) -- $s"
+
+        $tp = @()
+        if ($Row.InstallTime -and $Row.InstallTime -notin @("","n/a","cached","already")) { $tp += "Installed: $($Row.InstallTime)" }
+        if ($Row.ImportTime  -and $Row.ImportTime  -notin @("","n/a","loaded"))           { $tp += "Imported: $($Row.ImportTime)" }
+        $script:_dlgLTime.Text = $tp -join " | "
+
+        if ($s -notlike "*ing*" -and $s -ne "Waiting...") {
+            $script:_dlgDone++
+            $script:_dlgPB.Value = [Math]::Min($script:_dlgDone, $script:_dlgPB.Maximum)
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+
+    $script:_modResult = $null
+    $dlg.Add_Shown({
+        $lCur.Text = "Running module verification..."
+        [System.Windows.Forms.Application]::DoEvents()
+
+        $script:_modResult = Install-BWSDependencies -SkipParams $SkipParams -GUICallback $cb
+
+        $f = $script:_modResult.Failed
+        $t = $script:_modResult.TotalSecs
+        if ($f -gt 0) {
+            $lCur.Text      = "[!] Setup finished with $f error(s). Some checks may not run."
+            $lCur.ForeColor = [System.Drawing.Color]::FromArgb(255,120,120)
+        } else {
+            $lCur.Text      = "[OK] All modules ready in ${t}s -- Click Continue"
+            $lCur.ForeColor = [System.Drawing.Color]::FromArgb(90,210,90)
+        }
+        $lTitle.Text    = "Module setup complete."
+        $btn.Text       = if ($f -gt 0) { "Continue (errors)" } else { "Continue" }
+        $btn.Enabled    = $true
+        $btn.BackColor  = if ($f -gt 0) { [System.Drawing.Color]::FromArgb(130,50,50) } else { [System.Drawing.Color]::FromArgb(40,100,50) }
+        [System.Windows.Forms.Application]::DoEvents()
+    })
+
+    $dlg.ShowDialog() | Out-Null
+    $dlg.Dispose()
+    return $script:_modResult
+}
+
+#============================================================================
+# MODULE PREREQUISITES CHECK (console mode)
+#============================================================================
+Write-Host ""
+Write-Host "======================================================" -ForegroundColor Cyan
+Write-Host "  MODULE PREREQUISITES CHECK" -ForegroundColor Cyan
+Write-Host "======================================================" -ForegroundColor Cyan
+
+$_skipParams = @{
+    SkipSharePoint = [bool]$SkipSharePoint
+    SkipTeams      = [bool]$SkipTeams
+    SkipDefender   = [bool]$SkipDefender
+}
+
+if (-not $GUI) {
+    $script:moduleSetupResult = Install-BWSDependencies -SkipParams $_skipParams
+    if (-not $script:moduleSetupResult.AllReady) {
+        Write-Host "  [!] One or more required modules could not be installed." -ForegroundColor Yellow
+        Write-Host "      The script will continue but some checks may fail." -ForegroundColor Yellow
+        Write-Host ""
+    }
+}
+
+# QUALITY ASSURANCE - Block 6: PSScriptAnalyzer (optional, -RunAnalyzer)
 #============================================================================
 if ($RunAnalyzer) {
     Write-Host ""
@@ -781,14 +1399,14 @@ function Test-IntunePolicies {
     try {
         Write-Host "Checking Microsoft Graph authentication..." -ForegroundColor Yellow
         
-        $graphContext = Get-MgContext -ErrorAction SilentlyContinue
+        $graphContext = Get-BWsGraphContext -ErrorAction SilentlyContinue
         
         if (-not $graphContext) {
             Write-Host "Not connected to Microsoft Graph. Attempting to connect..." -ForegroundColor Yellow
             Write-Host "Please authenticate when prompted..." -ForegroundColor Yellow
             
             try {
-                Connect-MgGraph -Scopes "DeviceManagementConfiguration.Read.All", "DeviceManagementManagedDevices.Read.All" -ErrorAction Stop
+                Connect-BWsGraph -Scopes "DeviceManagementConfiguration.Read.All", "DeviceManagementManagedDevices.Read.All" -ErrorAction Stop
                 Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
             } catch {
                 Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
@@ -811,7 +1429,7 @@ function Test-IntunePolicies {
         $allIntunePolicies = @()
         
         try {
-            $deviceConfigs = Get-MgDeviceManagementDeviceConfiguration -All -ErrorAction Stop
+            $deviceConfigs = Invoke-BWsGraphPagedRequest -Uri 'deviceManagement/deviceConfigurations?$top=999'
             if ($deviceConfigs) { 
                 $allIntunePolicies += $deviceConfigs 
                 Write-Host "  Retrieved $($deviceConfigs.Count) Device Configuration policies" -ForegroundColor Gray
@@ -821,7 +1439,7 @@ function Test-IntunePolicies {
         }
         
         try {
-            $compliancePolicies = Get-MgDeviceManagementDeviceCompliancePolicy -All -ErrorAction Stop
+            $compliancePolicies = Invoke-BWsGraphPagedRequest -Uri 'deviceManagement/deviceCompliancePolicies?$top=999'
             if ($compliancePolicies) { 
                 $allIntunePolicies += $compliancePolicies 
                 Write-Host "  Retrieved $($compliancePolicies.Count) Device Compliance policies" -ForegroundColor Gray
@@ -831,7 +1449,7 @@ function Test-IntunePolicies {
         }
         
         try {
-            $configPolicies = Get-MgDeviceManagementConfigurationPolicy -All -ErrorAction Stop
+            $configPolicies = Invoke-BWsGraphPagedRequest -Uri 'deviceManagement/configurationPolicies?$top=999'
             if ($configPolicies) { 
                 $allIntunePolicies += $configPolicies 
                 Write-Host "  Retrieved $($configPolicies.Count) Configuration policies (Settings Catalog)" -ForegroundColor Gray
@@ -841,7 +1459,7 @@ function Test-IntunePolicies {
             
             try {
                 $graphUri = "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies"
-                $configPoliciesResponse = Invoke-MgGraphRequest -Uri $graphUri -Method GET -ErrorAction Stop
+                $configPoliciesResponse = Invoke-BWsGraphRequest -Uri $graphUri -Method GET -ErrorAction Stop
                 if ($configPoliciesResponse.value) {
                     $allIntunePolicies += $configPoliciesResponse.value
                     Write-Host "  Retrieved $($configPoliciesResponse.value.Count) Configuration policies via Graph API" -ForegroundColor Gray
@@ -853,7 +1471,7 @@ function Test-IntunePolicies {
         
         try {
             $intentUri = "https://graph.microsoft.com/beta/deviceManagement/intents"
-            $intentResponse = Invoke-MgGraphRequest -Uri $intentUri -Method GET -ErrorAction Stop
+            $intentResponse = Invoke-BWsGraphRequest -Uri $intentUri -Method GET -ErrorAction Stop
             if ($intentResponse.value) {
                 $allIntunePolicies += $intentResponse.value
                 Write-Host "  Retrieved $($intentResponse.value.Count) Endpoint Security policies" -ForegroundColor Gray
@@ -985,12 +1603,12 @@ function Test-EntraIDConnect {
         Write-Host ""
         
         # Check if Microsoft Graph is connected
-        $graphContext = Get-MgContext -ErrorAction SilentlyContinue
+        $graphContext = Get-BWsGraphContext -ErrorAction SilentlyContinue
         
         if (-not $graphContext) {
             Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
             try {
-                Connect-MgGraph -Scopes "Directory.Read.All", "Organization.Read.All" -ErrorAction Stop
+                Connect-BWsGraph -Scopes "Directory.Read.All", "Organization.Read.All" -ErrorAction Stop
                 Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
             } catch {
                 Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
@@ -1010,7 +1628,7 @@ function Test-EntraIDConnect {
             Write-Host "Checking directory synchronization..." -NoNewline
             
             $orgUri = "https://graph.microsoft.com/v1.0/organization"
-            $orgInfo = Invoke-MgGraphRequest -Uri $orgUri -Method GET -ErrorAction Stop
+            $orgInfo = Invoke-BWsGraphRequest -Uri $orgUri -Method GET -ErrorAction Stop
             
             if ($orgInfo.value -and $orgInfo.value.Count -gt 0) {
                 $org = $orgInfo.value[0]
@@ -1057,7 +1675,7 @@ function Test-EntraIDConnect {
                         Write-Host "Checking for sync errors..." -NoNewline
                         
                         $syncErrorsUri = "https://graph.microsoft.com/v1.0/directory/onPremisesSynchronization"
-                        $syncErrorsResponse = Invoke-MgGraphRequest -Uri $syncErrorsUri -Method GET -ErrorAction SilentlyContinue
+                        $syncErrorsResponse = Invoke-BWsGraphRequest -Uri $syncErrorsUri -Method GET -ErrorAction SilentlyContinue
                         
                         if ($syncErrorsResponse) {
                             Write-Host " [OK] NO ERRORS" -ForegroundColor Green
@@ -1075,7 +1693,7 @@ function Test-EntraIDConnect {
                         
                         # Check via domain federation settings
                         $domainsUri = "https://graph.microsoft.com/v1.0/domains"
-                        $domains = Invoke-MgGraphRequest -Uri $domainsUri -Method GET -ErrorAction Stop
+                        $domains = Invoke-BWsGraphRequest -Uri $domainsUri -Method GET -ErrorAction Stop
                         
                         $passwordSyncEnabled = $false
                         foreach ($domain in $domains.value) {
@@ -1113,7 +1731,7 @@ function Test-EntraIDConnect {
                         
                         # Method 1: Check for hybrid joined devices (trustType = ServerAd)
                         $devicesUri = 'https://graph.microsoft.com/v1.0/devices?$top=999&$filter=trustType eq ''ServerAd'''
-                        $hybridDevices = Invoke-MgGraphRequest -Uri $devicesUri -Method GET -ErrorAction Stop
+                        $hybridDevices = Invoke-BWsGraphRequest -Uri $devicesUri -Method GET -ErrorAction Stop
                         
                         $hybridDeviceCount = 0
                         if ($hybridDevices.value) {
@@ -1122,7 +1740,7 @@ function Test-EntraIDConnect {
                         
                         # Method 2: Also check for devices with onPremisesSyncEnabled
                         $syncedDevicesUri = 'https://graph.microsoft.com/v1.0/devices?$top=10&$select=id,displayName,onPremisesSyncEnabled,trustType'
-                        $syncedDevices = Invoke-MgGraphRequest -Uri $syncedDevicesUri -Method GET -ErrorAction SilentlyContinue
+                        $syncedDevices = Invoke-BWsGraphRequest -Uri $syncedDevicesUri -Method GET -ErrorAction SilentlyContinue
                         
                         $syncedDeviceCount = 0
                         if ($syncedDevices.value) {
@@ -1153,7 +1771,7 @@ function Test-EntraIDConnect {
                         
                         # Get users with and without licenses
                         $usersUri = 'https://graph.microsoft.com/v1.0/users?$select=id,displayName,assignedLicenses&$top=999'
-                        $users = Invoke-MgGraphRequest -Uri $usersUri -Method GET -ErrorAction Stop
+                        $users = Invoke-BWsGraphRequest -Uri $usersUri -Method GET -ErrorAction Stop
                         
                         $totalUsers = 0
                         $licensedUsers = 0
@@ -1286,12 +1904,12 @@ function Test-IntuneConnector {
         Write-Host ""
         
         # Check if Microsoft Graph is connected
-        $graphContext = Get-MgContext -ErrorAction SilentlyContinue
+        $graphContext = Get-BWsGraphContext -ErrorAction SilentlyContinue
         
         if (-not $graphContext) {
             Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
             try {
-                Connect-MgGraph -Scopes "DeviceManagementServiceConfig.Read.All", "DeviceManagementConfiguration.Read.All" -ErrorAction Stop
+                Connect-BWsGraph -Scopes "DeviceManagementServiceConfig.Read.All", "DeviceManagementConfiguration.Read.All" -ErrorAction Stop
                 Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
             } catch {
                 Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
@@ -1313,7 +1931,7 @@ function Test-IntuneConnector {
             Write-Host "Checking Intune Connector for AD (NDES)..." -NoNewline
             
             $certConnectorUri = "https://graph.microsoft.com/beta/deviceManagement/ndesConnectors"
-            $certConnectors = Invoke-MgGraphRequest -Uri $certConnectorUri -Method GET -ErrorAction Stop
+            $certConnectors = Invoke-BWsGraphRequest -Uri $certConnectorUri -Method GET -ErrorAction Stop
             
             if ($certConnectors.value -and $certConnectors.value.Count -gt 0) {
                 $activeCertConnectors = $certConnectors.value | Where-Object { $_.state -eq "active" }
@@ -1374,7 +1992,7 @@ function Test-IntuneConnector {
             Write-Host "Checking Exchange Connector..." -NoNewline
             
             $exchangeConnectorUri = "https://graph.microsoft.com/beta/deviceManagement/exchangeConnectors"
-            $exchangeConnectors = Invoke-MgGraphRequest -Uri $exchangeConnectorUri -Method GET -ErrorAction Stop
+            $exchangeConnectors = Invoke-BWsGraphRequest -Uri $exchangeConnectorUri -Method GET -ErrorAction Stop
             
             if ($exchangeConnectors.value -and $exchangeConnectors.value.Count -gt 0) {
                 $activeExchangeConnectors = $exchangeConnectors.value | Where-Object { $_.status -eq "healthy" -or $_.status -eq "active" }
@@ -1416,7 +2034,7 @@ function Test-IntuneConnector {
             
             # Check via organization settings
             $orgUri = "https://graph.microsoft.com/v1.0/organization"
-            $orgInfo = Invoke-MgGraphRequest -Uri $orgUri -Method GET -ErrorAction Stop
+            $orgInfo = Invoke-BWsGraphRequest -Uri $orgUri -Method GET -ErrorAction Stop
             
             if ($orgInfo.value -and $orgInfo.value.Count -gt 0) {
                 $org = $orgInfo.value[0]
@@ -1435,7 +2053,7 @@ function Test-IntuneConnector {
                     # Check verified domains (on-premises domains)
                     try {
                         $domainsUri = "https://graph.microsoft.com/v1.0/domains"
-                        $domains = Invoke-MgGraphRequest -Uri $domainsUri -Method GET -ErrorAction Stop
+                        $domains = Invoke-BWsGraphRequest -Uri $domainsUri -Method GET -ErrorAction Stop
                         
                         $onPremDomains = $domains.value | Where-Object { $_.isDefault -eq $false -and $_.authenticationType -eq "Federated" }
                         
@@ -1450,7 +2068,7 @@ function Test-IntuneConnector {
                     # Get directory sync details
                     try {
                         $dirSyncUri = 'https://graph.microsoft.com/v1.0/organization?$select=onPremisesSyncEnabled,onPremisesLastSyncDateTime,onPremisesLastPasswordSyncDateTime'
-                        $dirSync = Invoke-MgGraphRequest -Uri $dirSyncUri -Method GET -ErrorAction Stop
+                        $dirSync = Invoke-BWsGraphRequest -Uri $dirSyncUri -Method GET -ErrorAction Stop
                         
                         if ($dirSync.value -and $dirSync.value[0].onPremisesLastPasswordSyncDateTime) {
                             Write-Host "  [Hybrid Join] " -NoNewline -ForegroundColor Gray
@@ -1611,12 +2229,12 @@ function Test-DefenderForEndpoint {
         Write-Host ""
         
         # Check if Microsoft Graph is connected
-        $graphContext = Get-MgContext -ErrorAction SilentlyContinue
+        $graphContext = Get-BWsGraphContext -ErrorAction SilentlyContinue
         
         if (-not $graphContext) {
             Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
             try {
-                Connect-MgGraph -Scopes "DeviceManagementConfiguration.Read.All", "DeviceManagementManagedDevices.Read.All" -ErrorAction Stop
+                Connect-BWsGraph -Scopes "DeviceManagementConfiguration.Read.All", "DeviceManagementManagedDevices.Read.All" -ErrorAction Stop
                 Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
             } catch {
                 Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
@@ -1643,7 +2261,7 @@ function Test-DefenderForEndpoint {
             
             # Check Device Configuration Policies
             try {
-                $deviceConfigs = Get-MgDeviceManagementDeviceConfiguration -All -ErrorAction SilentlyContinue
+                $deviceConfigs = Invoke-BWsGraphPagedRequest -Uri 'deviceManagement/deviceConfigurations?$top=999'
                 $defenderDeviceConfigs = $deviceConfigs | Where-Object { 
                     $_.DisplayName -like "*Defender*" -or 
                     $_.DisplayName -like "*ATP*" -or
@@ -1659,7 +2277,7 @@ function Test-DefenderForEndpoint {
             # Check Configuration Policies (Settings Catalog)
             try {
                 $configPoliciesUri = "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies"
-                $configPolicies = Invoke-MgGraphRequest -Uri $configPoliciesUri -Method GET -ErrorAction SilentlyContinue
+                $configPolicies = Invoke-BWsGraphRequest -Uri $configPoliciesUri -Method GET -ErrorAction SilentlyContinue
                 if ($configPolicies.value) {
                     $defenderConfigPolicies = $configPolicies.value | Where-Object {
                         $_.name -like "*Defender*" -or 
@@ -1677,7 +2295,7 @@ function Test-DefenderForEndpoint {
             # Check Endpoint Security Policies (Intents)
             try {
                 $intentsUri = "https://graph.microsoft.com/beta/deviceManagement/intents"
-                $intents = Invoke-MgGraphRequest -Uri $intentsUri -Method GET -ErrorAction SilentlyContinue
+                $intents = Invoke-BWsGraphRequest -Uri $intentsUri -Method GET -ErrorAction SilentlyContinue
                 if ($intents.value) {
                     $defenderIntents = $intents.value | Where-Object {
                         $_.displayName -like "*Defender*" -or
@@ -1716,7 +2334,7 @@ function Test-DefenderForEndpoint {
             Write-Host "  [Defender] " -NoNewline -ForegroundColor Gray
             Write-Host "Checking compatible managed devices..." -NoNewline
             
-            $managedDevices = Get-MgDeviceManagementManagedDevice -All -ErrorAction SilentlyContinue
+            $managedDevices = Invoke-BWsGraphPagedRequest -Uri 'deviceManagement/managedDevices?$top=999'
             
             if ($managedDevices) {
                 # Count Windows and macOS devices (Defender-compatible)
@@ -1896,12 +2514,12 @@ function Test-BWSSoftwarePackages {
         Write-Host ""
         
         # Check if Microsoft Graph is connected
-        $graphContext = Get-MgContext -ErrorAction SilentlyContinue
+        $graphContext = Get-BWsGraphContext -ErrorAction SilentlyContinue
         
         if (-not $graphContext) {
             Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
             try {
-                Connect-MgGraph -Scopes "DeviceManagementApps.Read.All" -ErrorAction Stop
+                Connect-BWsGraph -Scopes "DeviceManagementApps.Read.All" -ErrorAction Stop
                 Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
             } catch {
                 Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
@@ -1918,7 +2536,7 @@ function Test-BWSSoftwarePackages {
         # Get all Intune Win32 Apps
         try {
             Write-Host "  [Software] Retrieving Win32 Apps from Intune..." -ForegroundColor Gray
-            $win32Apps = Get-MgDeviceAppManagementMobileApp -All -Filter "isof('microsoft.graph.win32LobApp')" -ErrorAction SilentlyContinue
+            $win32Apps = Invoke-BWsGraphPagedRequest -Uri 'deviceAppManagement/mobileApps?$filter=isof(''microsoft.graph.win32LobApp'')&$top=999'
             Write-Host "  [Software] Found $($win32Apps.Count) Win32 Apps" -ForegroundColor Gray
         } catch {
             Write-Host "  [Software] Error retrieving Win32 Apps: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -1928,7 +2546,7 @@ function Test-BWSSoftwarePackages {
         # Get all Microsoft Store Apps
         try {
             Write-Host "  [Software] Retrieving Microsoft Store Apps from Intune..." -ForegroundColor Gray
-            $storeApps = Get-MgDeviceAppManagementMobileApp -All -Filter "isof('microsoft.graph.winGetApp')" -ErrorAction SilentlyContinue
+            $storeApps = Invoke-BWsGraphPagedRequest -Uri 'deviceAppManagement/mobileApps?$filter=isof(''microsoft.graph.winGetApp'')&$top=999'
             Write-Host "  [Software] Found $($storeApps.Count) Store Apps" -ForegroundColor Gray
         } catch {
             Write-Host "  [Software] Error retrieving Store Apps: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -1939,11 +2557,11 @@ function Test-BWSSoftwarePackages {
         try {
             Write-Host "  [Software] Retrieving Microsoft 365 Apps from Intune..." -ForegroundColor Gray
             # Try with filter first
-            $m365Apps = Get-MgDeviceAppManagementMobileApp -All -Filter "isof('microsoft.graph.officeSuiteApp')" -ErrorAction SilentlyContinue
+            $m365Apps = Invoke-BWsGraphPagedRequest -Uri 'deviceAppManagement/mobileApps?$filter=isof(''microsoft.graph.officeSuiteApp'')&$top=999'
             
             # If filter doesn't work, get all apps and filter manually
             if (-not $m365Apps -or $m365Apps.Count -eq 0) {
-                $allMobileApps = Get-MgDeviceAppManagementMobileApp -All -ErrorAction SilentlyContinue
+                $allMobileApps = Invoke-BWsGraphPagedRequest -Uri 'deviceAppManagement/mobileApps?$top=999'
                 $m365Apps = $allMobileApps | Where-Object { 
                     $_.'@odata.type' -eq '#microsoft.graph.officeSuiteApp' -or
                     $_.DisplayName -like '*Microsoft 365 Apps*' -or
@@ -2870,12 +3488,12 @@ function Test-UsersAndLicenses {
         Write-Host ""
         
         # Check if Microsoft Graph is connected
-        $graphContext = Get-MgContext -ErrorAction SilentlyContinue
+        $graphContext = Get-BWsGraphContext -ErrorAction SilentlyContinue
         
         if (-not $graphContext) {
             Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
             try {
-                Connect-MgGraph -Scopes "User.Read.All", "Directory.Read.All", "RoleManagement.Read.Directory" -ErrorAction Stop
+                Connect-BWsGraph -Scopes "User.Read.All", "Directory.Read.All", "RoleManagement.Read.Directory" -ErrorAction Stop
                 Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
             } catch {
                 Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
@@ -2898,14 +3516,14 @@ function Test-UsersAndLicenses {
             
             # Get users with licenses - use proper Graph API syntax
             $usersUri = 'https://graph.microsoft.com/v1.0/users?$select=id,displayName,userPrincipalName,assignedLicenses,accountEnabled&$top=999'
-            $usersResponse = Invoke-MgGraphRequest -Uri $usersUri -Method GET -ErrorAction Stop
+            $usersResponse = Invoke-BWsGraphRequest -Uri $usersUri -Method GET -ErrorAction Stop
             
             $allUsers = @()
             $allUsers += $usersResponse.value
             
             # Handle pagination
             while ($usersResponse.'@odata.nextLink') {
-                $usersResponse = Invoke-MgGraphRequest -Uri $usersResponse.'@odata.nextLink' -Method GET -ErrorAction Stop
+                $usersResponse = Invoke-BWsGraphRequest -Uri $usersResponse.'@odata.nextLink' -Method GET -ErrorAction Stop
                 $allUsers += $usersResponse.value
             }
             
@@ -2930,14 +3548,14 @@ function Test-UsersAndLicenses {
             
             # Get all directory roles
             $rolesUri = "https://graph.microsoft.com/v1.0/directoryRoles"
-            $roles = Invoke-MgGraphRequest -Uri $rolesUri -Method GET -ErrorAction Stop
+            $roles = Invoke-BWsGraphRequest -Uri $rolesUri -Method GET -ErrorAction Stop
             
             $privilegedRoleMembers = @{}
             
             foreach ($role in $roles.value) {
                 # Get members of this role
                 $membersUri = "https://graph.microsoft.com/v1.0/directoryRoles/$($role.id)/members"
-                $members = Invoke-MgGraphRequest -Uri $membersUri -Method GET -ErrorAction SilentlyContinue
+                $members = Invoke-BWsGraphRequest -Uri $membersUri -Method GET -ErrorAction SilentlyContinue
                 
                 if ($members.value) {
                     foreach ($member in $members.value) {
@@ -2964,7 +3582,7 @@ function Test-UsersAndLicenses {
         $licenseSkus = @{}
         try {
             $skusUri = "https://graph.microsoft.com/v1.0/subscribedSkus"
-            $skus = Invoke-MgGraphRequest -Uri $skusUri -Method GET -ErrorAction SilentlyContinue
+            $skus = Invoke-BWsGraphRequest -Uri $skusUri -Method GET -ErrorAction SilentlyContinue
             
             foreach ($sku in $skus.value) {
                 $licenseSkus[$sku.skuId] = $sku.skuPartNumber
@@ -4651,7 +5269,7 @@ function Export-PDFReport {
 
 
 #============================================================================
-# QUALITY ASSURANCE - Block 6: Run Self-Tests if requested
+# QUALITY ASSURANCE - Block 7: Run Self-Tests if requested
 #============================================================================
 if ($RunTests) {
     $testSummary = Invoke-BWSSelfTest
@@ -4728,8 +5346,26 @@ if ($GUI) {
     $textSPUrl = New-Object System.Windows.Forms.TextBox
     $textSPUrl.Location = New-Object System.Drawing.Point(170, 76)
     $textSPUrl.Size = New-Object System.Drawing.Size(540, 20)
-    $textSPUrl.Text = $SharePointUrl
-    $textSPUrl.PlaceholderText = "https://TENANT-admin.sharepoint.com"
+    $script:spUrlPlaceholder = "https://TENANT-admin.sharepoint.com"
+    if ($SharePointUrl) {
+        $textSPUrl.Text = $SharePointUrl
+        $textSPUrl.ForeColor = [System.Drawing.SystemColors]::WindowText
+    } else {
+        $textSPUrl.Text = $script:spUrlPlaceholder
+        $textSPUrl.ForeColor = [System.Drawing.Color]::Gray
+    }
+    $textSPUrl.Add_GotFocus({
+        if ($textSPUrl.Text -eq $script:spUrlPlaceholder -and $textSPUrl.ForeColor -eq [System.Drawing.Color]::Gray) {
+            $textSPUrl.Text = ""
+            $textSPUrl.ForeColor = [System.Drawing.SystemColors]::WindowText
+        }
+    })
+    $textSPUrl.Add_LostFocus({
+        if ([string]::IsNullOrWhiteSpace($textSPUrl.Text)) {
+            $textSPUrl.Text = $script:spUrlPlaceholder
+            $textSPUrl.ForeColor = [System.Drawing.Color]::Gray
+        }
+    })
     $form.Controls.Add($textSPUrl)
     
     # GroupBox for Check Selection
@@ -4937,7 +5573,7 @@ if ($GUI) {
         $bcid = $textBCID.Text
         $customerName = $textCustomer.Text
         $subId = $textSubID.Text
-        $SharePointUrl = $textSPUrl.Text
+        $SharePointUrl = if ($textSPUrl.Text -eq $script:spUrlPlaceholder -or $textSPUrl.ForeColor -eq [System.Drawing.Color]::Gray) { "" } else { $textSPUrl.Text }
         $runAzure = $chkAzure.Checked
         $runIntune = $chkIntune.Checked
         $runEntraID = $chkEntraID.Checked
@@ -4955,7 +5591,28 @@ if ($GUI) {
         $exportFormat = "HTML"
         if ($radioPDF.Checked) { $exportFormat = "PDF" }
         if ($radioBoth.Checked) { $exportFormat = "Both" }
-        
+
+        # ---- Module Prerequisites (GUI Dialog) ----------------------------
+        $labelStatus.Text      = "Checking module prerequisites..."
+        $labelStatus.ForeColor = [System.Drawing.Color]::Orange
+        $form.Refresh()
+
+        $_guiSkipParams = @{
+            SkipSharePoint = (-not $runSharePoint)
+            SkipTeams      = (-not $runTeams)
+            SkipDefender   = (-not $runDefender)
+        }
+        $guiModResult = Show-ModuleSetupDialog -SkipParams $_guiSkipParams
+
+        if (-not $guiModResult.AllReady) {
+            $labelStatus.Text      = "[!] Some modules failed - checks may be incomplete"
+            $labelStatus.ForeColor = [System.Drawing.Color]::Orange
+        } else {
+            $labelStatus.Text      = "[OK] Modules ready ($($guiModResult.TotalSecs)s)"
+            $labelStatus.ForeColor = [System.Drawing.Color]::LightGreen
+        }
+        $form.Refresh()
+
         try {
             # Set subscription context if provided
             if ($subId) {
