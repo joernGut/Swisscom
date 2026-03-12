@@ -26,8 +26,8 @@
 .PARAMETER GUI
     Launch graphical user interface
 .NOTES
-    Version: 2.1.0
-    Datum: 2025-02-11
+    Version: 2.1.1
+    Datum: 2025-03-12
     Autor: BWS PowerShell Script
 .EXAMPLE
     .\BWS-Checking-Script.ps1 -BCID "1234" -CustomerName "Contoso AG"
@@ -93,7 +93,7 @@ param(
 )
 
 # Script Version
-$script:Version = "2.1.0"
+$script:Version = "2.1.1"
 
 #============================================================================
 # Global Variables and Configuration
@@ -107,7 +107,7 @@ if ($psVersion -ge 7 -or $psEdition -eq "Core") {
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Yellow
     Write-Host "  BWS-Checking-Script v$script:Version" -ForegroundColor Cyan
-    Write-Host "  ⚠ WARNUNG: PowerShell Version Inkompatibilität" -ForegroundColor Yellow
+    Write-Host "  [!] WARNUNG: PowerShell Version Inkompatibilitaet" -ForegroundColor Yellow
     Write-Host "======================================================" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Sie verwenden: PowerShell $($PSVersionTable.PSVersion) ($psEdition)" -ForegroundColor Yellow
@@ -116,31 +116,31 @@ if ($psVersion -ge 7 -or $psEdition -eq "Core") {
     Write-Host "WICHTIG:" -ForegroundColor Red
     Write-Host "  Der SharePoint-Check funktioniert NUR in PowerShell 5.1!" -ForegroundColor Red
     Write-Host "  Das Modul 'Microsoft.Online.SharePoint.PowerShell'" -ForegroundColor Red
-    Write-Host "  wird in PowerShell 7/Core NICHT unterstützt." -ForegroundColor Red
+    Write-Host "  wird in PowerShell 7/Core NICHT unterstuetzt." -ForegroundColor Red
     Write-Host ""
     Write-Host "6 von 7 Checks funktionieren in PowerShell 7:" -ForegroundColor Yellow
-    Write-Host "  ✓ Azure Resources" -ForegroundColor Green
-    Write-Host "  ✓ Intune Policies" -ForegroundColor Green
-    Write-Host "  ✓ Entra ID Connect" -ForegroundColor Green
-    Write-Host "  ✓ Hybrid Azure AD Join" -ForegroundColor Green
-    Write-Host "  ✓ Defender for Endpoint" -ForegroundColor Green
-    Write-Host "  ✓ BWS Software Packages" -ForegroundColor Green
-    Write-Host "  ✗ SharePoint Configuration (FEHLT)" -ForegroundColor Red
+    Write-Host "  [OK] Azure Resources" -ForegroundColor Green
+    Write-Host "  [OK] Intune Policies" -ForegroundColor Green
+    Write-Host "  [OK] Entra ID Connect" -ForegroundColor Green
+    Write-Host "  [OK] Hybrid Azure AD Join" -ForegroundColor Green
+    Write-Host "  [OK] Defender for Endpoint" -ForegroundColor Green
+    Write-Host "  [OK] BWS Software Packages" -ForegroundColor Green
+    Write-Host "  [X] SharePoint Configuration (FEHLT)" -ForegroundColor Red
     Write-Host ""
     Write-Host "Optionen:" -ForegroundColor Cyan
     Write-Host "  1. Script in PowerShell 5.1 neu starten (EMPFOHLEN)" -ForegroundColor White
-    Write-Host "     → Schließen Sie diese Konsole" -ForegroundColor Gray
-    Write-Host "     → Öffnen Sie 'Windows PowerShell' (nicht PowerShell 7)" -ForegroundColor Gray
-    Write-Host "     → Führen Sie das Script erneut aus" -ForegroundColor Gray
+    Write-Host "     -> Schliessen Sie diese Konsole" -ForegroundColor Gray
+    Write-Host "     -> Oeffnen Sie 'Windows PowerShell' (nicht PowerShell 7)" -ForegroundColor Gray
+    Write-Host "     -> Fuehren Sie das Script erneut aus" -ForegroundColor Gray
     Write-Host ""
-    Write-Host "  2. SharePoint-Check überspringen" -ForegroundColor White
-    Write-Host "     → Fügen Sie -SkipSharePoint Parameter hinzu" -ForegroundColor Gray
-    Write-Host "     → Beispiel: .\BWS-Checking-Script.ps1 -BCID '1234' -SkipSharePoint" -ForegroundColor Gray
+    Write-Host "  2. SharePoint-Check ueberspringen" -ForegroundColor White
+    Write-Host "     -> Fuegen Sie -SkipSharePoint Parameter hinzu" -ForegroundColor Gray
+    Write-Host "     -> Beispiel: .\BWS-Checking-Script.ps1 -BCID '1234' -SkipSharePoint" -ForegroundColor Gray
     Write-Host ""
     Write-Host "  3. Mit Login-GUI arbeiten" -ForegroundColor White
-    Write-Host "     → Starten Sie: .\Azure-M365-Login-GUI.ps1" -ForegroundColor Gray
-    Write-Host "     → Klicken Sie auf 'PowerShell 5.1' Button (Blau)" -ForegroundColor Gray
-    Write-Host "     → Führen Sie das Script in der neuen Konsole aus" -ForegroundColor Gray
+    Write-Host "     -> Starten Sie: .\Azure-M365-Login-GUI.ps1" -ForegroundColor Gray
+    Write-Host "     -> Klicken Sie auf 'PowerShell 5.1' Button (Blau)" -ForegroundColor Gray
+    Write-Host "     -> Fuehren Sie das Script in der neuen Konsole aus" -ForegroundColor Gray
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Yellow
     Write-Host ""
@@ -155,7 +155,7 @@ if ($psVersion -ge 7 -or $psEdition -eq "Core") {
             exit
         }
         Write-Host ""
-        Write-Host "Fahre fort ohne SharePoint-Check Unterstützung..." -ForegroundColor Yellow
+        Write-Host "Fahre fort ohne SharePoint-Check Unterstuetzung..." -ForegroundColor Yellow
         Write-Host ""
     }
 }
@@ -245,7 +245,7 @@ function Get-BWS-ResourceNames {
 
 function Normalize-PolicyName {
     param([string]$name)
-    return $name -replace '\s+', ' ' -replace '^\s+|\s+$', '' | ForEach-Object { $_.ToLower() }
+    return ($name -replace '\s+', ' ' -replace '^\s+|\s+$', '').ToLower()
 }
 
 #============================================================================
@@ -304,7 +304,7 @@ function Test-AzureResources {
             $azResource = Get-AzResource -Name $resource.Name -ResourceType $resource.Type -ErrorAction SilentlyContinue
             
             if ($azResource) {
-                Write-Host " ✓" -ForegroundColor Green
+                Write-Host " [OK]" -ForegroundColor Green
                 $foundResources += [PSCustomObject]@{
                     Category = $resource.Category
                     SubCategory = $resource.SubCategory
@@ -316,7 +316,7 @@ function Test-AzureResources {
                     ResourceId = $azResource.ResourceId
                 }
             } else {
-                Write-Host " ✗ MISSING" -ForegroundColor Red
+                Write-Host " [X] MISSING" -ForegroundColor Red
                 $missingResources += [PSCustomObject]@{
                     Category = $resource.Category
                     SubCategory = $resource.SubCategory
@@ -326,7 +326,7 @@ function Test-AzureResources {
                 }
             }
         } catch {
-            Write-Host " ⚠ ERROR" -ForegroundColor Yellow
+            Write-Host " [!] ERROR" -ForegroundColor Yellow
             $errorResources += [PSCustomObject]@{
                 Category = $resource.Category
                 SubCategory = $resource.SubCategory
@@ -497,51 +497,25 @@ function Test-IntunePolicies {
             Write-Host "  [Intune Policy] " -NoNewline -ForegroundColor Gray
             Write-Host "$requiredPolicy" -NoNewline
             
+            # Exact match only (case-insensitive, whitespace-normalized)
             $normalizedRequired = Normalize-PolicyName $requiredPolicy
-            $foundPolicy = $null
-            
-            # Strategy 1: Exact match
-            $foundPolicy = $allIntunePolicies | Where-Object { 
+            $foundPolicy = $allIntunePolicies | Where-Object {
                 (Normalize-PolicyName $_.DisplayName) -eq $normalizedRequired
             } | Select-Object -First 1
-            
-            # Strategy 2: Contains match
-            if (-not $foundPolicy) {
-                $foundPolicy = $allIntunePolicies | Where-Object { 
-                    (Normalize-PolicyName $_.DisplayName) -like "*$normalizedRequired*"
-                } | Select-Object -First 1
-            }
-            
-            # Strategy 3: Reverse contains
-            if (-not $foundPolicy) {
-                $foundPolicy = $allIntunePolicies | Where-Object { 
-                    $normalizedRequired -like "*$(Normalize-PolicyName $_.DisplayName)*"
-                } | Select-Object -First 1
-            }
-            
-            # Strategy 4: Fuzzy match
-            if (-not $foundPolicy) {
-                $cleanRequired = $normalizedRequired -replace '\s*(std|standard|policy|policies|-)\s*', ' ' -replace '\s+', ' ' -replace '^\s+|\s+$', ''
-                $foundPolicy = $allIntunePolicies | Where-Object {
-                    $cleanActual = (Normalize-PolicyName $_.DisplayName) -replace '\s*(std|standard|policy|policies|-)\s*', ' ' -replace '\s+', ' ' -replace '^\s+|\s+$', ''
-                    $cleanActual -like "*$cleanRequired*" -or $cleanRequired -like "*$cleanActual*"
-                } | Select-Object -First 1
-            }
-            
+
             if ($foundPolicy) {
-                Write-Host " ✓" -ForegroundColor Green
+                Write-Host " [OK]" -ForegroundColor Green
                 $intuneFoundPolicies += [PSCustomObject]@{
                     PolicyName = $requiredPolicy
                     ActualName = $foundPolicy.DisplayName
-                    PolicyId = $foundPolicy.Id
-                    Status = "Found"
-                    MatchType = if ((Normalize-PolicyName $foundPolicy.DisplayName) -eq $normalizedRequired) { "Exact" } else { "Fuzzy" }
+                    PolicyId   = $foundPolicy.Id
+                    Status     = "Found"
                 }
             } else {
-                Write-Host " ✗ MISSING" -ForegroundColor Red
+                Write-Host " [MISSING]" -ForegroundColor Red
                 $intuneMissingPolicies += [PSCustomObject]@{
                     PolicyName = $requiredPolicy
-                    Status = "Missing"
+                    Status     = "Missing"
                 }
             }
         }
@@ -569,18 +543,8 @@ function Test-IntunePolicies {
         if ($intuneFoundPolicies.Count -gt 0) {
             Write-Host "FOUND INTUNE POLICIES:" -ForegroundColor Green
             Write-Host ""
-            $intuneFoundPolicies | Format-Table PolicyName, ActualName, MatchType -AutoSize
+            $intuneFoundPolicies | Format-Table PolicyName, ActualName -AutoSize
             
-            $fuzzyMatches = $intuneFoundPolicies | Where-Object { $_.MatchType -eq "Fuzzy" }
-            if ($fuzzyMatches.Count -gt 0) {
-                Write-Host ""
-                Write-Host "Note: The following policies were matched using fuzzy logic:" -ForegroundColor Yellow
-                $fuzzyMatches | ForEach-Object {
-                    Write-Host "  Expected: $($_.PolicyName)" -ForegroundColor Yellow
-                    Write-Host "  Found:    $($_.ActualName)" -ForegroundColor Gray
-                    Write-Host ""
-                }
-            }
             Write-Host ""
         }
         
@@ -673,7 +637,7 @@ function Test-EntraIDConnect {
                 $onPremisesSyncEnabled = $org.onPremisesSyncEnabled
                 
                 if ($onPremisesSyncEnabled) {
-                    Write-Host " ✓ ENABLED" -ForegroundColor Green
+                    Write-Host " [OK] ENABLED" -ForegroundColor Green
                     $entraIDStatus.IsInstalled = $true
                     
                     # Get last sync time
@@ -687,21 +651,21 @@ function Test-EntraIDConnect {
                         
                         # Check if sync is recent (within last 30 minutes)
                         if ($timeSinceSync.TotalMinutes -le 30) {
-                            Write-Host "✓ RECENT" -ForegroundColor Green
+                            Write-Host "[OK] RECENT" -ForegroundColor Green
                             $entraIDStatus.IsRunning = $true
                         } elseif ($timeSinceSync.TotalHours -le 2) {
-                            Write-Host "⚠ WARNING (last sync > 30 min)" -ForegroundColor Yellow
+                            Write-Host "[!] WARNING (last sync > 30 min)" -ForegroundColor Yellow
                             $entraIDStatus.IsRunning = $true
                             $entraIDStatus.SyncErrors += "Last sync older than 30 minutes"
                         } else {
-                            Write-Host "✗ OLD (last sync > 2 hours)" -ForegroundColor Red
+                            Write-Host "[X] OLD (last sync > 2 hours)" -ForegroundColor Red
                             $entraIDStatus.IsRunning = $false
                             $entraIDStatus.SyncErrors += "Last sync older than 2 hours"
                         }
                     } else {
                         Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
                         Write-Host "Last sync time: " -NoNewline
-                        Write-Host "✗ UNKNOWN" -ForegroundColor Yellow
+                        Write-Host "[X] UNKNOWN" -ForegroundColor Yellow
                         $entraIDStatus.SyncErrors += "No last sync time available"
                     }
                     
@@ -714,12 +678,12 @@ function Test-EntraIDConnect {
                         $syncErrorsResponse = Invoke-MgGraphRequest -Uri $syncErrorsUri -Method GET -ErrorAction SilentlyContinue
                         
                         if ($syncErrorsResponse) {
-                            Write-Host " ✓ NO ERRORS" -ForegroundColor Green
+                            Write-Host " [OK] NO ERRORS" -ForegroundColor Green
                         } else {
-                            Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
+                            Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
                         }
                     } catch {
-                        Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
+                        Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
                     }
                     
                     # Check Password Hash Synchronization
@@ -749,14 +713,14 @@ function Test-EntraIDConnect {
                         $entraIDStatus.PasswordHashSync = $passwordSyncEnabled
                         
                         if ($passwordSyncEnabled) {
-                            Write-Host " ✓ ENABLED" -ForegroundColor Green
+                            Write-Host " [OK] ENABLED" -ForegroundColor Green
                         } else {
-                            Write-Host " ⚠ NOT DETECTED" -ForegroundColor Yellow
+                            Write-Host " [!] NOT DETECTED" -ForegroundColor Yellow
                             $entraIDStatus.SyncErrors += "Password Hash Sync status unclear"
                         }
                         
                     } catch {
-                        Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
+                        Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
                         $entraIDStatus.PasswordHashSync = "Unknown"
                     }
                     
@@ -766,7 +730,7 @@ function Test-EntraIDConnect {
                         Write-Host "Checking Device Hybrid Sync..." -NoNewline
                         
                         # Method 1: Check for hybrid joined devices (trustType = ServerAd)
-                        $devicesUri = "https://graph.microsoft.com/v1.0/devices?`$top=999&`$filter=trustType eq 'ServerAd'"
+                        $devicesUri = 'https://graph.microsoft.com/v1.0/devices?$top=999&$filter=trustType eq ''ServerAd'''
                         $hybridDevices = Invoke-MgGraphRequest -Uri $devicesUri -Method GET -ErrorAction Stop
                         
                         $hybridDeviceCount = 0
@@ -775,7 +739,7 @@ function Test-EntraIDConnect {
                         }
                         
                         # Method 2: Also check for devices with onPremisesSyncEnabled
-                        $syncedDevicesUri = "https://graph.microsoft.com/v1.0/devices?`$top=10&`$select=id,displayName,onPremisesSyncEnabled,trustType"
+                        $syncedDevicesUri = 'https://graph.microsoft.com/v1.0/devices?$top=10&$select=id,displayName,onPremisesSyncEnabled,trustType'
                         $syncedDevices = Invoke-MgGraphRequest -Uri $syncedDevicesUri -Method GET -ErrorAction SilentlyContinue
                         
                         $syncedDeviceCount = 0
@@ -785,18 +749,18 @@ function Test-EntraIDConnect {
                         
                         # Determine status
                         if ($hybridDeviceCount -gt 0) {
-                            Write-Host " ✓ ACTIVE ($hybridDeviceCount hybrid joined devices)" -ForegroundColor Green
+                            Write-Host " [OK] ACTIVE ($hybridDeviceCount hybrid joined devices)" -ForegroundColor Green
                             $entraIDStatus.DeviceWritebackEnabled = $true
                         } elseif ($syncedDeviceCount -gt 0) {
-                            Write-Host " ✓ ACTIVE ($syncedDeviceCount synced devices)" -ForegroundColor Green
+                            Write-Host " [OK] ACTIVE ($syncedDeviceCount synced devices)" -ForegroundColor Green
                             $entraIDStatus.DeviceWritebackEnabled = $true
                         } else {
-                            Write-Host " ⓘ NO HYBRID DEVICES FOUND" -ForegroundColor Gray
+                            Write-Host " [i] NO HYBRID DEVICES FOUND" -ForegroundColor Gray
                             $entraIDStatus.DeviceWritebackEnabled = $false
                         }
                         
                     } catch {
-                        Write-Host " ⚠ UNABLE TO CHECK: $($_.Exception.Message)" -ForegroundColor Yellow
+                        Write-Host " [!] UNABLE TO CHECK: $($_.Exception.Message)" -ForegroundColor Yellow
                         $entraIDStatus.DeviceWritebackEnabled = "Unknown"
                     }
                     
@@ -806,7 +770,7 @@ function Test-EntraIDConnect {
                         Write-Host "Checking user license assignment..." -NoNewline
                         
                         # Get users with and without licenses
-                        $usersUri = "https://graph.microsoft.com/v1.0/users?\$select=id,displayName,assignedLicenses&\$top=999"
+                        $usersUri = 'https://graph.microsoft.com/v1.0/users?$select=id,displayName,assignedLicenses&$top=999'
                         $users = Invoke-MgGraphRequest -Uri $usersUri -Method GET -ErrorAction Stop
                         
                         $totalUsers = 0
@@ -826,20 +790,20 @@ function Test-EntraIDConnect {
                         $entraIDStatus.LicensedUsers = $licensedUsers
                         $entraIDStatus.UnlicensedUsers = $unlicensedUsers
                         
-                        Write-Host " ✓ $licensedUsers/$totalUsers users licensed" -ForegroundColor Green
+                        Write-Host " [OK] $licensedUsers/$totalUsers users licensed" -ForegroundColor Green
                         
                         if ($unlicensedUsers -gt 0) {
                             Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
-                            Write-Host "⚠ $unlicensedUsers users without licenses" -ForegroundColor Yellow
+                            Write-Host "[!] $unlicensedUsers users without licenses" -ForegroundColor Yellow
                             $entraIDStatus.SyncErrors += "$unlicensedUsers users without assigned licenses"
                         }
                         
                     } catch {
-                        Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
+                        Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
                     }
                     
                 } else {
-                    Write-Host " ✗ NOT ENABLED" -ForegroundColor Red
+                    Write-Host " [X] NOT ENABLED" -ForegroundColor Red
                     $entraIDStatus.IsInstalled = $false
                     $entraIDStatus.SyncErrors += "Directory synchronization not enabled"
                 }
@@ -847,12 +811,12 @@ function Test-EntraIDConnect {
                 $entraIDStatus.Details += "Organization: $($org.displayName)"
                 
             } else {
-                Write-Host " ✗ UNABLE TO CHECK" -ForegroundColor Yellow
+                Write-Host " [X] UNABLE TO CHECK" -ForegroundColor Yellow
                 $entraIDStatus.SyncErrors += "Could not retrieve organization info"
             }
             
         } catch {
-            Write-Host " ✗ ERROR" -ForegroundColor Red
+            Write-Host " [X] ERROR" -ForegroundColor Red
             $entraIDStatus.SyncErrors += "Error checking Entra ID Connect: $($_.Exception.Message)"
         }
         
@@ -973,7 +937,7 @@ function Test-IntuneConnector {
                 $activeCertConnectors = $certConnectors.value | Where-Object { $_.state -eq "active" }
                 
                 if ($activeCertConnectors.Count -gt 0) {
-                    Write-Host " ✓ ACTIVE ($($activeCertConnectors.Count) connector(s))" -ForegroundColor Green
+                    Write-Host " [OK] ACTIVE ($($activeCertConnectors.Count) connector(s))" -ForegroundColor Green
                     $connectorStatus.IsConnected = $true
                     
                     foreach ($connector in $activeCertConnectors) {
@@ -993,26 +957,26 @@ function Test-IntuneConnector {
                             Write-Host "$($connector.displayName) - Last check-in: $($connector.lastConnectionDateTime) " -NoNewline
                             
                             if ($timeSinceCheckIn.TotalHours -le 1) {
-                                Write-Host "✓ RECENT" -ForegroundColor Green
+                                Write-Host "[OK] RECENT" -ForegroundColor Green
                             } elseif ($timeSinceCheckIn.TotalHours -le 24) {
-                                Write-Host "⚠ WARNING (> 1 hour)" -ForegroundColor Yellow
+                                Write-Host "[!] WARNING (> 1 hour)" -ForegroundColor Yellow
                                 $connectorStatus.Errors += "$($connector.displayName): Last check-in > 1 hour ago"
                             } else {
-                                Write-Host "✗ OLD (> 24 hours)" -ForegroundColor Red
+                                Write-Host "[X] OLD (> 24 hours)" -ForegroundColor Red
                                 $connectorStatus.Errors += "$($connector.displayName): Last check-in > 24 hours ago"
                             }
                         }
                     }
                 } else {
-                    Write-Host " ⚠ INACTIVE" -ForegroundColor Yellow
+                    Write-Host " [!] INACTIVE" -ForegroundColor Yellow
                     $connectorStatus.Errors += "Intune Connector for AD exists but is not active"
                 }
             } else {
-                Write-Host " ⓘ NOT CONFIGURED" -ForegroundColor Gray
+                Write-Host " [i] NOT CONFIGURED" -ForegroundColor Gray
             }
             
         } catch {
-            Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
+            Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
             $connectorStatus.Errors += "Error checking Intune Connector for AD: $($_.Exception.Message)"
         }
         # ============================================================================
@@ -1034,7 +998,7 @@ function Test-IntuneConnector {
                 $activeExchangeConnectors = $exchangeConnectors.value | Where-Object { $_.status -eq "healthy" -or $_.status -eq "active" }
                 
                 if ($activeExchangeConnectors.Count -gt 0) {
-                    Write-Host " ✓ ACTIVE ($($activeExchangeConnectors.Count) connector(s))" -ForegroundColor Green
+                    Write-Host " [OK] ACTIVE ($($activeExchangeConnectors.Count) connector(s))" -ForegroundColor Green
                     
                     foreach ($connector in $activeExchangeConnectors) {
                         $connectorStatus.Connectors += @{
@@ -1050,15 +1014,15 @@ function Test-IntuneConnector {
                         }
                     }
                 } else {
-                    Write-Host " ⚠ INACTIVE" -ForegroundColor Yellow
+                    Write-Host " [!] INACTIVE" -ForegroundColor Yellow
                     $connectorStatus.Errors += "Exchange connector exists but is not healthy"
                 }
             } else {
-                Write-Host " ⓘ NOT CONFIGURED" -ForegroundColor Gray
+                Write-Host " [i] NOT CONFIGURED" -ForegroundColor Gray
             }
             
         } catch {
-            Write-Host " ⓘ NOT CONFIGURED" -ForegroundColor Gray
+            Write-Host " [i] NOT CONFIGURED" -ForegroundColor Gray
         }
         #>
         # ============================================================================
@@ -1077,7 +1041,7 @@ function Test-IntuneConnector {
                 $onPremisesSyncEnabled = $org.onPremisesSyncEnabled
                 
                 if ($onPremisesSyncEnabled) {
-                    Write-Host " ✓ ENABLED (Sync active)" -ForegroundColor Green
+                    Write-Host " [OK] ENABLED (Sync active)" -ForegroundColor Green
                     
                     # Get additional details
                     if ($org.onPremisesLastSyncDateTime) {
@@ -1103,7 +1067,7 @@ function Test-IntuneConnector {
                     
                     # Get directory sync details
                     try {
-                        $dirSyncUri = "https://graph.microsoft.com/v1.0/organization?\$select=onPremisesSyncEnabled,onPremisesLastSyncDateTime,onPremisesLastPasswordSyncDateTime"
+                        $dirSyncUri = 'https://graph.microsoft.com/v1.0/organization?$select=onPremisesSyncEnabled,onPremisesLastSyncDateTime,onPremisesLastPasswordSyncDateTime'
                         $dirSync = Invoke-MgGraphRequest -Uri $dirSyncUri -Method GET -ErrorAction Stop
                         
                         if ($dirSync.value -and $dirSync.value[0].onPremisesLastPasswordSyncDateTime) {
@@ -1115,14 +1079,14 @@ function Test-IntuneConnector {
                     }
                     
                 } else {
-                    Write-Host " ⓘ NOT ENABLED" -ForegroundColor Gray
+                    Write-Host " [i] NOT ENABLED" -ForegroundColor Gray
                 }
             } else {
-                Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
+                Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
             }
             
         } catch {
-            Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
+            Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
         }
         
         # Check for AD Server with Azure Reservation (check if sync server exists in Azure)
@@ -1152,7 +1116,7 @@ function Test-IntuneConnector {
                     if ($adServers) {
                         $connectorStatus.ADServerReservation = $true
                         $connectorStatus.ADServerName = $adServers[0].Name
-                        Write-Host " ✓ FOUND ($($adServers.Count) server(s))" -ForegroundColor Green
+                        Write-Host " [OK] FOUND ($($adServers.Count) server(s))" -ForegroundColor Green
                         
                         foreach ($server in $adServers) {
                             Write-Host "  [AD Server] " -NoNewline -ForegroundColor Gray
@@ -1170,22 +1134,22 @@ function Test-IntuneConnector {
                         }
                     } else {
                         $connectorStatus.ADServerReservation = $false
-                        Write-Host " ⓘ NO AD SERVERS DETECTED" -ForegroundColor Gray
+                        Write-Host " [i] NO AD SERVERS DETECTED" -ForegroundColor Gray
                         Write-Host "  [AD Server] " -NoNewline -ForegroundColor Gray
                         Write-Host "Searched for: *DC*, *AD*, *Sync*, *-S00, *-S01, BCID-S## pattern" -ForegroundColor Gray
                     }
                 } catch {
-                    Write-Host " ⚠ UNABLE TO QUERY VMs: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host " [!] UNABLE TO QUERY VMs: $($_.Exception.Message)" -ForegroundColor Yellow
                     $connectorStatus.ADServerReservation = "Unknown"
                     $connectorStatus.Errors += "Unable to query Azure VMs for AD server"
                 }
             } else {
-                Write-Host " ⓘ NO AZURE CONNECTION" -ForegroundColor Gray
+                Write-Host " [i] NO AZURE CONNECTION" -ForegroundColor Gray
                 $connectorStatus.ADServerReservation = "NotChecked"
             }
             
         } catch {
-            Write-Host " ⚠ UNABLE TO CHECK" -ForegroundColor Yellow
+            Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
             $connectorStatus.ADServerReservation = "Error"
         }
         
@@ -1351,15 +1315,15 @@ function Test-DefenderForEndpoint {
             $defenderStatus.ConfiguredPolicies = $totalDefenderPolicies
             
             if ($defenderPoliciesFound -and $totalDefenderPolicies -gt 0) {
-                Write-Host " ✓ FOUND ($totalDefenderPolicies policies)" -ForegroundColor Green
+                Write-Host " [OK] FOUND ($totalDefenderPolicies policies)" -ForegroundColor Green
                 $defenderStatus.ConnectorActive = $true
             } else {
-                Write-Host " ⚠ NO POLICIES FOUND" -ForegroundColor Yellow
+                Write-Host " [!] NO POLICIES FOUND" -ForegroundColor Yellow
                 $defenderStatus.Errors += "No Defender for Endpoint policies configured"
             }
             
         } catch {
-            Write-Host " ⚠ ERROR" -ForegroundColor Yellow
+            Write-Host " [!] ERROR" -ForegroundColor Yellow
             $defenderStatus.Errors += "Error checking Defender policies: $($_.Exception.Message)"
         }
         
@@ -1381,16 +1345,16 @@ function Test-DefenderForEndpoint {
                 $defenderStatus.OnboardedDevices = $compatibleDevices.Count
                 
                 if ($compatibleDevices.Count -gt 0) {
-                    Write-Host " ✓ $($compatibleDevices.Count) compatible devices" -ForegroundColor Green
+                    Write-Host " [OK] $($compatibleDevices.Count) compatible devices" -ForegroundColor Green
                 } else {
-                    Write-Host " ⓘ No compatible devices found" -ForegroundColor Gray
+                    Write-Host " [i] No compatible devices found" -ForegroundColor Gray
                 }
             } else {
-                Write-Host " ⓘ Unable to retrieve devices" -ForegroundColor Gray
+                Write-Host " [i] Unable to retrieve devices" -ForegroundColor Gray
             }
             
         } catch {
-            Write-Host " ⓘ Unable to check" -ForegroundColor Gray
+            Write-Host " [i] Unable to check" -ForegroundColor Gray
         }
         
         # ============================================================================
@@ -1436,29 +1400,29 @@ function Test-DefenderForEndpoint {
                         }
                         
                         if ($defenderStatus.FilesMissing.Count -eq 0) {
-                            Write-Host " ✓ ALL FILES PRESENT (4/4)" -ForegroundColor Green
+                            Write-Host " [OK] ALL FILES PRESENT (4/4)" -ForegroundColor Green
                         } else {
-                            Write-Host " ⚠ MISSING FILES ($($defenderStatus.FilesFound.Count)/4)" -ForegroundColor Yellow
+                            Write-Host " [!] MISSING FILES ($($defenderStatus.FilesFound.Count)/4)" -ForegroundColor Yellow
                             $defenderStatus.Errors += "$($defenderStatus.FilesMissing.Count) onboarding file(s) missing"
                         }
                     } else {
-                        Write-Host " ⚠ CONTAINER EMPTY (0/4)" -ForegroundColor Yellow
+                        Write-Host " [!] CONTAINER EMPTY (0/4)" -ForegroundColor Yellow
                         $defenderStatus.FilesMissing = $requiredFiles
                         $defenderStatus.Errors += "Container 'defender-files' is empty"
                     }
                 } else {
-                    Write-Host " ✗ CONTAINER NOT FOUND (0/4)" -ForegroundColor Red
+                    Write-Host " [X] CONTAINER NOT FOUND (0/4)" -ForegroundColor Red
                     $defenderStatus.FilesMissing = $requiredFiles
                     $defenderStatus.Errors += "Container 'defender-files' not found"
                 }
             } else {
-                Write-Host " ✗ STORAGE ACCOUNT NOT FOUND (0/4)" -ForegroundColor Red
+                Write-Host " [X] STORAGE ACCOUNT NOT FOUND (0/4)" -ForegroundColor Red
                 $defenderStatus.FilesMissing = $requiredFiles
                 $defenderStatus.Errors += "Storage account '$storageAccountName' not found"
             }
             
         } catch {
-            Write-Host " ⚠ ERROR (0/4)" -ForegroundColor Yellow
+            Write-Host " [!] ERROR (0/4)" -ForegroundColor Yellow
             $defenderStatus.FilesMissing = $requiredFiles
             $defenderStatus.Errors += "Error checking storage: $($_.Exception.Message)"
         }
@@ -1486,7 +1450,7 @@ function Test-DefenderForEndpoint {
             Write-Host "FOUND ONBOARDING FILES:" -ForegroundColor Green
             Write-Host ""
             $defenderStatus.FilesFound | ForEach-Object {
-                Write-Host "  ✓ $_" -ForegroundColor Green
+                Write-Host "  [OK] $_" -ForegroundColor Green
             }
             Write-Host ""
         }
@@ -1495,7 +1459,7 @@ function Test-DefenderForEndpoint {
             Write-Host "MISSING ONBOARDING FILES:" -ForegroundColor Red
             Write-Host ""
             $defenderStatus.FilesMissing | ForEach-Object {
-                Write-Host "  ✗ $_" -ForegroundColor Red
+                Write-Host "  [X] $_" -ForegroundColor Red
             }
             Write-Host ""
         }
@@ -1671,7 +1635,7 @@ function Test-BWSSoftwarePackages {
             }
             
             if ($foundApp) {
-                Write-Host " ✓ FOUND" -ForegroundColor Green
+                Write-Host " [OK] FOUND" -ForegroundColor Green
                 $matchType = "Partial"
                 if ($foundApp.DisplayName -eq $software) {
                     $matchType = "Exact"
@@ -1688,7 +1652,7 @@ function Test-BWSSoftwarePackages {
                     MatchType = $matchType
                 }
             } else {
-                Write-Host " ✗ MISSING" -ForegroundColor Red
+                Write-Host " [X] MISSING" -ForegroundColor Red
                 $softwareStatus.Missing += @{
                     SoftwareName = $software
                 }
@@ -1716,7 +1680,7 @@ function Test-BWSSoftwarePackages {
             Write-Host "FOUND SOFTWARE PACKAGES:" -ForegroundColor Green
             Write-Host ""
             foreach ($app in $softwareStatus.Found) {
-                Write-Host "  ✓ $($app.SoftwareName)" -ForegroundColor Green
+                Write-Host "  [OK] $($app.SoftwareName)" -ForegroundColor Green
                 Write-Host "    Actual Name: $($app.ActualName)" -ForegroundColor Gray
                 Write-Host "    Match Type:  $($app.MatchType)" -ForegroundColor Gray
                 Write-Host ""
@@ -1727,7 +1691,7 @@ function Test-BWSSoftwarePackages {
             Write-Host "MISSING SOFTWARE PACKAGES:" -ForegroundColor Red
             Write-Host ""
             foreach ($app in $softwareStatus.Missing) {
-                Write-Host "  ✗ $($app.SoftwareName)" -ForegroundColor Red
+                Write-Host "  [X] $($app.SoftwareName)" -ForegroundColor Red
             }
             Write-Host ""
         }
@@ -1862,10 +1826,10 @@ function Test-SharePointConfiguration {
                     # Check SharePoint - SOLL: Anyone (allows anyone links)
                     if ($spSharingCapability -eq 2 -or $spSharingCapability -eq "ExternalUserAndGuestSharing") {
                         # Value 2 = "Anyone" in the Admin Center
-                        Write-Host " ✓ SharePoint: Anyone" -ForegroundColor Green
+                        Write-Host " [OK] SharePoint: Anyone" -ForegroundColor Green
                         $spConfig.Settings.SharePointExternalSharing = "Anyone"
                     } else {
-                        Write-Host " ⚠ SharePoint: $spSharingCapability (not 'Anyone')" -ForegroundColor Yellow
+                        Write-Host " [!] SharePoint: $spSharingCapability (not 'Anyone')" -ForegroundColor Yellow
                         $spConfig.Settings.SharePointExternalSharing = $spSharingCapability.ToString()
                         $spConfig.Errors += "SharePoint External Sharing should be 'Anyone' (ExternalUserAndGuestSharing)"
                     }
@@ -1875,16 +1839,16 @@ function Test-SharePointConfiguration {
                     Write-Host "Checking OneDrive External Sharing..." -NoNewline
                     
                     if ($odSharingCapability -eq 0 -or $odSharingCapability -eq "Disabled") {
-                        Write-Host " ✓ Only people in your organization" -ForegroundColor Green
+                        Write-Host " [OK] Only people in your organization" -ForegroundColor Green
                         $spConfig.Settings.OneDriveExternalSharing = "Disabled"
                     } else {
-                        Write-Host " ⚠ $odSharingCapability (not 'Disabled')" -ForegroundColor Yellow
+                        Write-Host " [!] $odSharingCapability (not 'Disabled')" -ForegroundColor Yellow
                         $spConfig.Settings.OneDriveExternalSharing = $odSharingCapability.ToString()
                         $spConfig.Errors += "OneDrive External Sharing should be 'Disabled' (Only people in your organization)"
                     }
                     
                 } catch {
-                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host " [!] ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
                     $spConfig.Settings.SharePointExternalSharing = "Error"
                     $spConfig.Settings.OneDriveExternalSharing = "Error"
                     $spConfig.Errors += "Error checking external sharing: $($_.Exception.Message)"
@@ -1909,25 +1873,25 @@ function Test-SharePointConfiguration {
                         
                         if ($siteCreationDisabled -eq $true) {
                             # Users CANNOT create sites (compliant)
-                            Write-Host " ✓ DISABLED (users cannot create sites)" -ForegroundColor Green
+                            Write-Host " [OK] DISABLED (users cannot create sites)" -ForegroundColor Green
                             $spConfig.Settings.SiteCreation = "Disabled"
                         } elseif ($siteCreationDisabled -eq $false) {
                             # Users CAN create sites (non-compliant)
-                            Write-Host " ⚠ ENABLED (users can create sites)" -ForegroundColor Yellow
+                            Write-Host " [!] ENABLED (users can create sites)" -ForegroundColor Yellow
                             $spConfig.Settings.SiteCreation = "Enabled"
                             $spConfig.Errors += "Site creation should be disabled - SelfServiceSiteCreationDisabled should be True"
                         } else {
                             # Property is null or unknown
-                            Write-Host " ⚠ Cannot verify (property not available)" -ForegroundColor Yellow
+                            Write-Host " [!] Cannot verify (property not available)" -ForegroundColor Yellow
                             $spConfig.Settings.SiteCreation = "Unknown"
                         }
                     } else {
-                        Write-Host " ⚠ Cannot verify (SPO module required)" -ForegroundColor Yellow
+                        Write-Host " [!] Cannot verify (SPO module required)" -ForegroundColor Yellow
                         $spConfig.Settings.SiteCreation = "Unknown"
                     }
                     
                 } catch {
-                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host " [!] ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
                     $spConfig.Settings.SiteCreation = "Error"
                     $spConfig.Errors += "Error checking site creation: $($_.Exception.Message)"
                 }
@@ -1953,26 +1917,26 @@ function Test-SharePointConfiguration {
                     }
                     
                     if ($null -eq $legacyAuthBlocked) {
-                        Write-Host " ⓘ Property not available" -ForegroundColor Gray
+                        Write-Host " [i] Property not available" -ForegroundColor Gray
                         $spConfig.Settings.LegacyAuthBlocked = "Unknown"
                     } elseif ($legacyAuthBlocked) {
-                        Write-Host " ✓ BLOCKED (Block Access)" -ForegroundColor Green
+                        Write-Host " [OK] BLOCKED (Block Access)" -ForegroundColor Green
                         $spConfig.Settings.LegacyAuthBlocked = $true
                     } else {
-                        Write-Host " ⚠ ALLOWED (should be 'Block Access')" -ForegroundColor Yellow
+                        Write-Host " [!] ALLOWED (should be 'Block Access')" -ForegroundColor Yellow
                         $spConfig.Settings.LegacyAuthBlocked = $false
                         $spConfig.Errors += "Apps that don't use modern authentication should be blocked"
                     }
                     
                 } catch {
-                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host " [!] ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
                     $spConfig.Settings.LegacyAuthBlocked = "Error"
                     $spConfig.Errors += "Error checking legacy auth: $($_.Exception.Message)"
                 }
                 
             } else {
                 # Not connected
-                Write-Host "  ⚠ Not connected to SharePoint" -ForegroundColor Yellow
+                Write-Host "  [!] Not connected to SharePoint" -ForegroundColor Yellow
                 $spConfig.Errors += "Not connected to SharePoint Online"
                 $spConfig.Settings.SharePointExternalSharing = "Not Connected"
                 $spConfig.Settings.OneDriveExternalSharing = "Not Connected"
@@ -1981,7 +1945,7 @@ function Test-SharePointConfiguration {
             }
             
         } else {
-            Write-Host "  ⚠ SharePoint PowerShell module not found" -ForegroundColor Yellow
+            Write-Host "  [!] SharePoint PowerShell module not found" -ForegroundColor Yellow
             $spConfig.Errors += "SharePoint PowerShell module not installed"
         }
         
@@ -2004,27 +1968,27 @@ function Test-SharePointConfiguration {
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  SharePoint Ext. Sharing: " -NoNewline -ForegroundColor White
     if ($spConfig.Settings.SharePointExternalSharing -eq "Anyone") {
-        Write-Host "Anyone (✓)" -ForegroundColor Green
+        Write-Host "Anyone ([OK])" -ForegroundColor Green
     } elseif ($spConfig.Settings.SharePointExternalSharing) {
-        Write-Host "$($spConfig.Settings.SharePointExternalSharing) (✗)" -ForegroundColor Yellow
+        Write-Host "$($spConfig.Settings.SharePointExternalSharing) ([X])" -ForegroundColor Yellow
     } else {
         Write-Host "Not Checked" -ForegroundColor Gray
     }
     
     Write-Host "  OneDrive Ext. Sharing:   " -NoNewline -ForegroundColor White
     if ($spConfig.Settings.OneDriveExternalSharing -eq "Disabled") {
-        Write-Host "Only Organization (✓)" -ForegroundColor Green
+        Write-Host "Only Organization ([OK])" -ForegroundColor Green
     } elseif ($spConfig.Settings.OneDriveExternalSharing) {
-        Write-Host "$($spConfig.Settings.OneDriveExternalSharing) (✗)" -ForegroundColor Yellow
+        Write-Host "$($spConfig.Settings.OneDriveExternalSharing) ([X])" -ForegroundColor Yellow
     } else {
         Write-Host "Not Checked" -ForegroundColor Gray
     }
     
     Write-Host "  Site Creation:           " -NoNewline -ForegroundColor White
     if ($spConfig.Settings.SiteCreation -eq "Disabled") {
-        Write-Host "Disabled (✓)" -ForegroundColor Green
+        Write-Host "Disabled ([OK])" -ForegroundColor Green
     } elseif ($spConfig.Settings.SiteCreation -eq "Enabled") {
-        Write-Host "Enabled (✗)" -ForegroundColor Yellow
+        Write-Host "Enabled ([X])" -ForegroundColor Yellow
     } elseif ($spConfig.Settings.SiteCreation) {
         Write-Host "$($spConfig.Settings.SiteCreation) (?)" -ForegroundColor Gray
     } else {
@@ -2033,9 +1997,9 @@ function Test-SharePointConfiguration {
     
     Write-Host "  Legacy Auth Blocked:     " -NoNewline -ForegroundColor White
     if ($spConfig.Settings.LegacyAuthBlocked -eq $true) {
-        Write-Host "Yes (✓)" -ForegroundColor Green
+        Write-Host "Yes ([OK])" -ForegroundColor Green
     } elseif ($spConfig.Settings.LegacyAuthBlocked -eq $false) {
-        Write-Host "No (✗)" -ForegroundColor Yellow
+        Write-Host "No ([X])" -ForegroundColor Yellow
     } else {
         Write-Host "Not Checked" -ForegroundColor Gray
     }
@@ -2120,22 +2084,22 @@ function Test-TeamsConfiguration {
                     $externalAccessEnabled = $federationConfig.AllowTeamsConsumer
                     
                     if ($externalAccessEnabled -eq $false) {
-                        Write-Host " ✓ DISABLED (unmanaged Teams blocked)" -ForegroundColor Green
+                        Write-Host " [OK] DISABLED (unmanaged Teams blocked)" -ForegroundColor Green
                         $teamsConfig.Settings.ExternalAccessEnabled = $false
                     } else {
-                        Write-Host " ⚠ ENABLED (unmanaged Teams allowed)" -ForegroundColor Yellow
+                        Write-Host " [!] ENABLED (unmanaged Teams allowed)" -ForegroundColor Yellow
                         $teamsConfig.Settings.ExternalAccessEnabled = $true
                         $teamsConfig.Errors += "External access to unmanaged Teams should be disabled"
                     }
                     
                 } catch {
-                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host " [!] ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
                     $teamsConfig.Settings.ExternalAccessEnabled = "Error"
                     $teamsConfig.Errors += "Error checking external access: $($_.Exception.Message)"
                 }
                 
                 # ============================================================
-                # CHECK 2: Cloud Storage Providers (Teams Settings → Files)
+                # CHECK 2: Cloud Storage Providers (Teams Settings -> Files)
                 # ============================================================
                 try {
                     Write-Host "  [Teams] " -NoNewline -ForegroundColor Gray
@@ -2145,7 +2109,7 @@ function Test-TeamsConfiguration {
                     # This controls the "Files" section in Teams Settings
                     $clientConfig = Get-CsTeamsClientConfiguration -ErrorAction Stop
                     
-                    # SOLL-WERT: Alle Cloud Storage Provider müssen DISABLED sein
+                    # SOLL-WERT: Alle Cloud Storage Provider muessen DISABLED sein
                     # Das bedeutet: Die Properties sollten $false sein (nicht $true)
                     # Wenn $false = Ausgeschaltet = Compliant
                     # Wenn $true = Eingeschaltet = Non-Compliant
@@ -2228,14 +2192,14 @@ function Test-TeamsConfiguration {
                     
                     # Ausgabe des Ergebnisses
                     if ($allDisabled) {
-                        Write-Host " ✓ ALL DISABLED" -ForegroundColor Green
+                        Write-Host " [OK] ALL DISABLED" -ForegroundColor Green
                     } else {
-                        Write-Host " ⚠ ENABLED: $($enabledProviders -join ', ')" -ForegroundColor Yellow
+                        Write-Host " [!] ENABLED: $($enabledProviders -join ', ')" -ForegroundColor Yellow
                         $teamsConfig.Errors += "Cloud storage providers must be disabled (ausgeschaltet): $($enabledProviders -join ', ')"
                     }
                     
                 } catch {
-                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host " [!] ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
                     $teamsConfig.Errors += "Error checking cloud storage: $($_.Exception.Message)"
                 }
                 
@@ -2267,14 +2231,14 @@ function Test-TeamsConfiguration {
                     }
                     
                     if ($meetingIssues.Count -eq 0) {
-                        Write-Host " ✓ COMPLIANT" -ForegroundColor Green
+                        Write-Host " [OK] COMPLIANT" -ForegroundColor Green
                     } else {
-                        Write-Host " ⚠ ISSUES: $($meetingIssues -join ', ')" -ForegroundColor Yellow
+                        Write-Host " [!] ISSUES: $($meetingIssues -join ', ')" -ForegroundColor Yellow
                         $teamsConfig.Errors += "Anonymous users should not be able to join or start meetings"
                     }
                     
                 } catch {
-                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host " [!] ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
                     $teamsConfig.Settings.AnonymousUsersCanJoin = "Error"
                     $teamsConfig.Settings.AnonymousUsersCanStartMeeting = "Error"
                     $teamsConfig.Errors += "Error checking meeting settings: $($_.Exception.Message)"
@@ -2294,25 +2258,25 @@ function Test-TeamsConfiguration {
                     
                     # EveryoneUserOverride means "Everyone" can present
                     if ($presenterRole -eq "EveryoneUserOverride") {
-                        Write-Host " ✓ EVERYONE (Compliant)" -ForegroundColor Green
+                        Write-Host " [OK] EVERYONE (Compliant)" -ForegroundColor Green
                     } else {
-                        Write-Host " ⚠ $presenterRole (Non-Compliant)" -ForegroundColor Yellow
+                        Write-Host " [!] $presenterRole (Non-Compliant)" -ForegroundColor Yellow
                         $teamsConfig.Errors += "Default presenter role should be 'Everyone' (EveryoneUserOverride)"
                     }
                     
                 } catch {
-                    Write-Host " ⚠ ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host " [!] ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
                     $teamsConfig.Settings.DefaultPresenterRole = "Error"
                     $teamsConfig.Errors += "Error checking presenter settings: $($_.Exception.Message)"
                 }
                 
             } else {
-                Write-Host "  ⚠ Not connected to Microsoft Teams" -ForegroundColor Yellow
+                Write-Host "  [!] Not connected to Microsoft Teams" -ForegroundColor Yellow
                 $teamsConfig.Errors += "Not connected to Microsoft Teams"
             }
             
         } else {
-            Write-Host "  ⚠ MicrosoftTeams PowerShell module not found" -ForegroundColor Yellow
+            Write-Host "  [!] MicrosoftTeams PowerShell module not found" -ForegroundColor Yellow
             Write-Host "  Install with: Install-Module -Name MicrosoftTeams" -ForegroundColor Gray
             $teamsConfig.Errors += "MicrosoftTeams PowerShell module not installed"
         }
@@ -2341,9 +2305,9 @@ function Test-TeamsConfiguration {
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  Meetings w/ unmanaged MS: " -NoNewline -ForegroundColor White
     if ($teamsConfig.Settings.ExternalAccessEnabled -eq $false) {
-        Write-Host "Disabled (✓)" -ForegroundColor Green
+        Write-Host "Disabled ([OK])" -ForegroundColor Green
     } elseif ($teamsConfig.Settings.ExternalAccessEnabled -eq $true) {
-        Write-Host "Enabled (✗)" -ForegroundColor Yellow
+        Write-Host "Enabled ([X])" -ForegroundColor Yellow
     } else {
         Write-Host "Not Checked" -ForegroundColor Gray
     }
@@ -2356,7 +2320,7 @@ function Test-TeamsConfiguration {
                           ($teamsConfig.Settings.CloudStorageEgnyte -eq "Disabled")
     
     if ($allStorageDisabled) {
-        Write-Host "All Disabled (✓)" -ForegroundColor Green
+        Write-Host "All Disabled ([OK])" -ForegroundColor Green
     } else {
         # Build list of enabled providers
         $enabledList = @()
@@ -2367,7 +2331,7 @@ function Test-TeamsConfiguration {
         if ($teamsConfig.Settings.CloudStorageEgnyte -eq "Enabled") { $enabledList += "Egnyte" }
         
         if ($enabledList.Count -gt 0) {
-            Write-Host "Enabled: $($enabledList -join ', ') (✗)" -ForegroundColor Yellow
+            Write-Host "Enabled: $($enabledList -join ', ') ([X])" -ForegroundColor Yellow
         } else {
             Write-Host "Unknown" -ForegroundColor Gray
         }
@@ -2375,9 +2339,9 @@ function Test-TeamsConfiguration {
     
     Write-Host "  Anonymous Join:          " -NoNewline -ForegroundColor White
     if ($teamsConfig.Settings.AnonymousUsersCanJoin -eq "Disabled") {
-        Write-Host "Disabled (✓)" -ForegroundColor Green
+        Write-Host "Disabled ([OK])" -ForegroundColor Green
     } elseif ($teamsConfig.Settings.AnonymousUsersCanJoin -eq "Enabled") {
-        Write-Host "Enabled (✗)" -ForegroundColor Yellow
+        Write-Host "Enabled ([X])" -ForegroundColor Yellow
     } elseif ($teamsConfig.Settings.AnonymousUsersCanJoin -eq "Error") {
         Write-Host "Error - Could not check" -ForegroundColor Red
     } else {
@@ -2386,9 +2350,9 @@ function Test-TeamsConfiguration {
     
     Write-Host "  Anonymous Can Start:     " -NoNewline -ForegroundColor White
     if ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq "Disabled") {
-        Write-Host "Disabled (✓)" -ForegroundColor Green
+        Write-Host "Disabled ([OK])" -ForegroundColor Green
     } elseif ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq "Enabled") {
-        Write-Host "Enabled (✗)" -ForegroundColor Yellow
+        Write-Host "Enabled ([X])" -ForegroundColor Yellow
     } elseif ($teamsConfig.Settings.AnonymousUsersCanStartMeeting -eq "Error") {
         Write-Host "Error - Could not check" -ForegroundColor Red
     } else {
@@ -2397,9 +2361,9 @@ function Test-TeamsConfiguration {
     
     Write-Host "  Who Can Present:         " -NoNewline -ForegroundColor White
     if ($teamsConfig.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") {
-        Write-Host "Everyone (✓)" -ForegroundColor Green
+        Write-Host "Everyone ([OK])" -ForegroundColor Green
     } elseif ($teamsConfig.Settings.DefaultPresenterRole) {
-        Write-Host "$($teamsConfig.Settings.DefaultPresenterRole) (✗)" -ForegroundColor Yellow
+        Write-Host "$($teamsConfig.Settings.DefaultPresenterRole) ([X])" -ForegroundColor Yellow
     } else {
         Write-Host "Not Checked" -ForegroundColor Gray
     }
@@ -2551,7 +2515,7 @@ function Test-UsersAndLicenses {
             Write-Host "Fetching all users and licenses..." -NoNewline
             
             # Get users with licenses - use proper Graph API syntax
-            $usersUri = "https://graph.microsoft.com/v1.0/users?`$select=id,displayName,userPrincipalName,assignedLicenses,accountEnabled&`$top=999"
+            $usersUri = 'https://graph.microsoft.com/v1.0/users?$select=id,displayName,userPrincipalName,assignedLicenses,accountEnabled&$top=999'
             $usersResponse = Invoke-MgGraphRequest -Uri $usersUri -Method GET -ErrorAction Stop
             
             $allUsers = @()
@@ -2564,10 +2528,10 @@ function Test-UsersAndLicenses {
             }
             
             $userLicenseStatus.TotalUsers = $allUsers.Count
-            Write-Host " ✓ $($allUsers.Count) users found" -ForegroundColor Green
+            Write-Host " [OK] $($allUsers.Count) users found" -ForegroundColor Green
             
         } catch {
-            Write-Host " ✗ ERROR: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host " [X] ERROR: $($_.Exception.Message)" -ForegroundColor Red
             $userLicenseStatus.Errors += "Error fetching users: $($_.Exception.Message)"
             return @{
                 Status = $userLicenseStatus
@@ -2605,10 +2569,10 @@ function Test-UsersAndLicenses {
                 }
             }
             
-            Write-Host " ✓ $($privilegedRoleMembers.Count) users with privileged roles" -ForegroundColor Green
+            Write-Host " [OK] $($privilegedRoleMembers.Count) users with privileged roles" -ForegroundColor Green
             
         } catch {
-            Write-Host " ⚠ WARNING: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host " [!] WARNING: $($_.Exception.Message)" -ForegroundColor Yellow
             $userLicenseStatus.Errors += "Error fetching roles: $($_.Exception.Message)"
         }
         
@@ -2722,7 +2686,7 @@ function Test-UsersAndLicenses {
             $userLicenseStatus.UserDetails += $userDetail
         }
         
-        Write-Host " ✓ DONE" -ForegroundColor Green
+        Write-Host " [OK] DONE" -ForegroundColor Green
         
     } catch {
         Write-Host "Error during user/license check: $($_.Exception.Message)" -ForegroundColor Red
@@ -2747,10 +2711,10 @@ function Test-UsersAndLicenses {
     Write-Host ""
     
     if (-not $CompactView -and $userLicenseStatus.InvalidPrivilegedUsers.Count -gt 0) {
-        Write-Host "⚠ COMPLIANCE VIOLATION - Users with privileged roles:" -ForegroundColor Red
+        Write-Host "[!] COMPLIANCE VIOLATION - Users with privileged roles:" -ForegroundColor Red
         Write-Host ""
         foreach ($user in $userLicenseStatus.InvalidPrivilegedUsers) {
-            Write-Host "  ✗ $($user.DisplayName) ($($user.UserPrincipalName))" -ForegroundColor Red
+            Write-Host "  [X] $($user.DisplayName) ($($user.UserPrincipalName))" -ForegroundColor Red
             Write-Host "    Roles:    $($user.PrivilegedRoles -join ', ')" -ForegroundColor Yellow
             if ($user.Licenses.Count -gt 0) {
                 Write-Host "    Licenses: $($user.Licenses -join ', ')" -ForegroundColor Gray
@@ -2762,10 +2726,10 @@ function Test-UsersAndLicenses {
     }
     
     if (-not $CompactView -and $userLicenseStatus.InvalidEntraIDP2Users.Count -gt 0) {
-        Write-Host "⚠ COMPLIANCE VIOLATION - Users with Entra ID P2 license:" -ForegroundColor Red
+        Write-Host "[!] COMPLIANCE VIOLATION - Users with Entra ID P2 license:" -ForegroundColor Red
         Write-Host ""
         foreach ($user in $userLicenseStatus.InvalidEntraIDP2Users) {
-            Write-Host "  ✗ $($user.DisplayName) ($($user.UserPrincipalName))" -ForegroundColor Red
+            Write-Host "  [X] $($user.DisplayName) ($($user.UserPrincipalName))" -ForegroundColor Red
             Write-Host "    License:  Azure Active Directory Premium P2" -ForegroundColor Yellow
             if ($user.Licenses.Count -gt 0) {
                 Write-Host "    All Licenses: $($user.Licenses -join ', ')" -ForegroundColor Gray
@@ -2775,10 +2739,10 @@ function Test-UsersAndLicenses {
     }
     
     if (-not $CompactView -and $userLicenseStatus.PrivilegedUsers.Count -gt 0) {
-        Write-Host "✓ Valid ADM Accounts with Privileged Roles:" -ForegroundColor Green
+        Write-Host "[OK] Valid ADM Accounts with Privileged Roles:" -ForegroundColor Green
         Write-Host ""
         foreach ($user in $userLicenseStatus.PrivilegedUsers) {
-            Write-Host "  ✓ $($user.DisplayName) ($($user.UserPrincipalName))" -ForegroundColor Green
+            Write-Host "  [OK] $($user.DisplayName) ($($user.UserPrincipalName))" -ForegroundColor Green
             Write-Host "    Roles:    $($user.PrivilegedRoles -join ', ')" -ForegroundColor Gray
             if ($user.Licenses.Count -gt 0) {
                 Write-Host "    Licenses: $($user.Licenses -join ', ')" -ForegroundColor Gray
@@ -2791,11 +2755,11 @@ function Test-UsersAndLicenses {
     
     # Show guest accounts
     if (-not $CompactView -and $userLicenseStatus.GuestAccounts.Count -gt 0) {
-        Write-Host "👥 Guest Accounts (External Users):" -ForegroundColor Cyan
+        Write-Host " Guest Accounts (External Users):" -ForegroundColor Cyan
         Write-Host ""
         foreach ($guest in $userLicenseStatus.GuestAccounts | Sort-Object DisplayName) {
             $guestColor = if ($guest.AccountEnabled) { "White" } else { "Gray" }
-            Write-Host "  • $($guest.DisplayName) ($($guest.UserPrincipalName))" -ForegroundColor $guestColor
+            Write-Host "  - $($guest.DisplayName) ($($guest.UserPrincipalName))" -ForegroundColor $guestColor
             
             if ($guest.Licenses.Count -gt 0) {
                 Write-Host "    Licenses: $($guest.Licenses -join ', ')" -ForegroundColor Gray
@@ -2809,7 +2773,7 @@ function Test-UsersAndLicenses {
             
             # Show if guest has privileged roles (unusual!)
             if ($guest.HasPrivilegedRole) {
-                Write-Host "    ⚠ WARNING: Guest has privileged roles: $($guest.PrivilegedRoles -join ', ')" -ForegroundColor Yellow
+                Write-Host "    [!] WARNING: Guest has privileged roles: $($guest.PrivilegedRoles -join ', ')" -ForegroundColor Yellow
             }
         }
         Write-Host ""
@@ -2819,7 +2783,7 @@ function Test-UsersAndLicenses {
     
     # Show top 10 users with most licenses (optional detailed view)
     if (-not $CompactView -and $userLicenseStatus.UserDetails.Count -gt 0) {
-        Write-Host "📊 License Distribution Summary:" -ForegroundColor Cyan
+        Write-Host " License Distribution Summary:" -ForegroundColor Cyan
         Write-Host ""
         
         # Count licenses
@@ -3233,7 +3197,7 @@ function Export-HTMLReport {
 <body>
     <div class="container">
         <div class="header">
-            <h1>🛡️ Business Workplace Services Check Report</h1>
+            <h1>&#128737; Business Workplace Services Check Report</h1>
 "@
     
     if ($CustomerName) {
@@ -3251,23 +3215,23 @@ function Export-HTMLReport {
                 <strong>Subscription:</strong> $SubscriptionName
             </div>
             <div class="status-badge $(if ($OverallStatus) { 'status-pass' } else { 'status-fail' })">
-                $(if ($OverallStatus) { '✓ Passed' } else { '✗ Issues Found' })
+                $(if ($OverallStatus) { '&#10003; Passed' } else { '&#10007; Issues Found' })
             </div>
         </div>
         
         <div class="toc">
-            <h2>📋 Table of Contents</h2>
+            <h2>&#128203; Table of Contents</h2>
             <ul>
-                <li><a href="#summary">→ Executive Summary</a></li>
-                <li><a href="#azure">→ Azure Resources</a></li>
-                <li><a href="#intune">→ Intune Policies</a></li>
-                <li><a href="#entra">→ Entra ID Connect</a></li>
-                <li><a href="#hybrid">→ Hybrid Azure AD Join & Intune Connectors</a></li>
-                <li><a href="#defender">→ Defender for Endpoint</a></li>
-                <li><a href="#software">→ BWS Software Packages</a></li>
-                <li><a href="#sharepoint">→ SharePoint Configuration</a></li>
-                <li><a href="#teams">→ Teams Configuration</a></li>
-                <li><a href="#users">→ Users, Licenses & Privileged Roles</a></li>
+                <li><a href="#summary">&rarr; Executive Summary</a></li>
+                <li><a href="#azure">&rarr; Azure Resources</a></li>
+                <li><a href="#intune">&rarr; Intune Policies</a></li>
+                <li><a href="#entra">&rarr; Entra ID Connect</a></li>
+                <li><a href="#hybrid">&rarr; Hybrid Azure AD Join & Intune Connectors</a></li>
+                <li><a href="#defender">&rarr; Defender for Endpoint</a></li>
+                <li><a href="#software">&rarr; BWS Software Packages</a></li>
+                <li><a href="#sharepoint">&rarr; SharePoint Configuration</a></li>
+                <li><a href="#teams">&rarr; Teams Configuration</a></li>
+                <li><a href="#users">&rarr; Users, Licenses & Privileged Roles</a></li>
             </ul>
         </div>
         
@@ -3277,7 +3241,7 @@ function Export-HTMLReport {
     # Summary Section
     $html += @"
             <div class="section" id="summary">
-                <h2><span class="section-icon">📊</span>Executive Summary</h2>
+                <h2><span class="section-icon">&#128202;</span>Executive Summary</h2>
                 <div class="summary-grid">
 "@
 
@@ -3310,7 +3274,7 @@ function Export-HTMLReport {
         $entraClass = if ($EntraIDResults.Status.IsRunning) { "success" } else { "error" }
         $entraDetails = ""
         if ($EntraIDResults.Status.PasswordHashSync -eq $true) {
-            $entraDetails = "PW Sync ✓"
+            $entraDetails = "PW Sync [OK]"
         } elseif ($EntraIDResults.Status.IsRunning) {
             $entraDetails = "Active"
         } else {
@@ -3319,7 +3283,7 @@ function Export-HTMLReport {
         $html += @"
                     <div class="summary-card $entraClass">
                         <h3>Entra ID Sync</h3>
-                        <div class="value">$(if ($EntraIDResults.Status.IsRunning) { '✓' } else { '✗' })</div>
+                        <div class="value">$(if ($EntraIDResults.Status.IsRunning) { '&#10003;' } else { '&#10007;' })</div>
                         <p>$entraDetails</p>
                     </div>
 "@
@@ -3330,7 +3294,7 @@ function Export-HTMLReport {
         $connectorClass = if ($IntuneConnResults.Status.IsConnected -and $IntuneConnResults.Status.Errors.Count -eq 0) { "success" } elseif ($IntuneConnResults.Status.IsConnected) { "warning" } else { "error" }
         $connectorDetails = ""
         if ($IntuneConnResults.Status.ADServerName) {
-            $connectorDetails = "AD Server ✓"
+            $connectorDetails = "AD Server [OK]"
         } elseif ($IntuneConnResults.Status.IsConnected) {
             $connectorDetails = "Active"
         } else {
@@ -3339,7 +3303,7 @@ function Export-HTMLReport {
         $html += @"
                     <div class="summary-card $connectorClass">
                         <h3>Hybrid Join & Connectors</h3>
-                        <div class="value">$(if ($IntuneConnResults.Status.IsConnected) { '✓' } else { '✗' })</div>
+                        <div class="value">$(if ($IntuneConnResults.Status.IsConnected) { '&#10003;' } else { '&#10007;' })</div>
                         <p>$connectorDetails</p>
                     </div>
 "@
@@ -3351,7 +3315,7 @@ function Export-HTMLReport {
         $html += @"
                     <div class="summary-card $defenderClass">
                         <h3>Defender for Endpoint</h3>
-                        <div class="value">$(if ($DefenderResults.Status.ConnectorActive) { '✓' } else { '✗' })</div>
+                        <div class="value">$(if ($DefenderResults.Status.ConnectorActive) { '&#10003;' } else { '&#10007;' })</div>
                         <p>$($DefenderResults.Status.FilesFound.Count)/4 Files</p>
                     </div>
 "@
@@ -3388,7 +3352,7 @@ function Export-HTMLReport {
         $html += @"
                     <div class="summary-card $spClass">
                         <h3>SharePoint Config</h3>
-                        <div class="value">$(if ($SharePointResults.Status.Compliant) { '✓' } else { '⚠' })</div>
+                        <div class="value">$(if ($SharePointResults.Status.Compliant) { '&#10003;' } else { '&#9888;' })</div>
                         <p>$spDetails</p>
                     </div>
 "@
@@ -3415,7 +3379,7 @@ function Export-HTMLReport {
         $html += @"
                     <div class="summary-card $teamsClass">
                         <h3>Teams Config</h3>
-                        <div class="value">$(if ($TeamsResults.Status.Compliant) { '✓' } else { '⚠' })</div>
+                        <div class="value">$(if ($TeamsResults.Status.Compliant) { '&#10003;' } else { '&#9888;' })</div>
                         <p>$teamsDetails</p>
                     </div>
 "@
@@ -3436,7 +3400,7 @@ function Export-HTMLReport {
         $html += @"
                     <div class="summary-card $userClass">
                         <h3>User & Licenses</h3>
-                        <div class="value">$(if ($UserLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0) { '✓' } else { '✗' })</div>
+                        <div class="value">$(if ($UserLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0) { '&#10003;' } else { '&#10007;' })</div>
                         <p>$userDetails</p>
                     </div>
 "@
@@ -3451,7 +3415,7 @@ function Export-HTMLReport {
     if ($AzureResults) {
         $html += @"
             <div class="section" id="azure">
-                <h2><span class="section-icon">☁️</span>Azure Resources</h2>
+                <h2><span class="section-icon">&#9729;</span>Azure Resources</h2>
                 <table>
                     <thead>
                         <tr>
@@ -3466,7 +3430,7 @@ function Export-HTMLReport {
         foreach ($resource in $AzureResults.Found) {
             $html += @"
                         <tr>
-                            <td><span class="status-icon status-found">✓</span></td>
+                            <td><span class="status-icon status-found">&#10003;</span></td>
                             <td>$($resource.Type)</td>
                             <td>$($resource.Name)</td>
                         </tr>
@@ -3476,7 +3440,7 @@ function Export-HTMLReport {
         foreach ($resource in $AzureResults.Missing) {
             $html += @"
                         <tr>
-                            <td><span class="status-icon status-missing">✗</span></td>
+                            <td><span class="status-icon status-missing">&#10007;</span></td>
                             <td>$($resource.Type)</td>
                             <td>$($resource.Name)</td>
                         </tr>
@@ -3494,7 +3458,7 @@ function Export-HTMLReport {
     if ($IntuneResults -and $IntuneResults.CheckPerformed) {
         $html += @"
             <div class="section" id="intune">
-                <h2><span class="section-icon">🔒</span>Intune Policies</h2>
+                <h2><span class="section-icon">&#128274;</span>Intune Policies</h2>
                 <table>
                     <thead>
                         <tr>
@@ -3510,7 +3474,7 @@ function Export-HTMLReport {
             $matchType = if ($policy.MatchType) { $policy.MatchType } else { "Exact" }
             $html += @"
                         <tr>
-                            <td><span class="status-icon status-found">✓</span></td>
+                            <td><span class="status-icon status-found">&#10003;</span></td>
                             <td>$($policy.PolicyName)</td>
                             <td>$matchType</td>
                         </tr>
@@ -3520,7 +3484,7 @@ function Export-HTMLReport {
         foreach ($policy in $IntuneResults.Missing) {
             $html += @"
                         <tr>
-                            <td><span class="status-icon status-missing">✗</span></td>
+                            <td><span class="status-icon status-missing">&#10007;</span></td>
                             <td>$($policy.PolicyName)</td>
                             <td>Not Found</td>
                         </tr>
@@ -3538,7 +3502,7 @@ function Export-HTMLReport {
     if ($SoftwareResults -and $SoftwareResults.CheckPerformed) {
         $html += @"
             <div class="section" id="software">
-                <h2><span class="section-icon">📦</span>BWS Standard Software Packages</h2>
+                <h2><span class="section-icon">&#128230;</span>BWS Standard Software Packages</h2>
                 <table>
                     <thead>
                         <tr>
@@ -3554,7 +3518,7 @@ function Export-HTMLReport {
         foreach ($app in $SoftwareResults.Status.Found) {
             $html += @"
                         <tr>
-                            <td><span class="status-icon status-found">✓</span></td>
+                            <td><span class="status-icon status-found">&#10003;</span></td>
                             <td>$($app.SoftwareName)</td>
                             <td>$($app.ActualName)</td>
                             <td>$($app.MatchType)</td>
@@ -3565,7 +3529,7 @@ function Export-HTMLReport {
         foreach ($app in $SoftwareResults.Status.Missing) {
             $html += @"
                         <tr>
-                            <td><span class="status-icon status-missing">✗</span></td>
+                            <td><span class="status-icon status-missing">&#10007;</span></td>
                             <td>$($app.SoftwareName)</td>
                             <td>Not Found</td>
                             <td>-</td>
@@ -3584,7 +3548,7 @@ function Export-HTMLReport {
     if ($SharePointResults -and $SharePointResults.CheckPerformed) {
         $html += @"
             <div class="section" id="sharepoint">
-                <h2><span class="section-icon">🌐</span>SharePoint Configuration</h2>
+                <h2><span class="section-icon">&#127760;</span>SharePoint Configuration</h2>
 "@
         
         # Add Tenant URL if available
@@ -3600,10 +3564,10 @@ function Export-HTMLReport {
         
         $html += @"
                 <ul class="info-list">
-                    <li><strong>SharePoint External Sharing:</strong> $(if ($SharePointResults.Status.Settings.SharePointExternalSharing -eq 'Anyone') { '<span class="status-found">✓ Anyone (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.SharePointExternalSharing -like '*Unknown*' -or $SharePointResults.Status.Settings.SharePointExternalSharing -like '*Not Connected*') { '<span class="status-error">⚠ Could not verify - Not connected</span>' } elseif ($SharePointResults.Status.Settings.SharePointExternalSharing) { "<span class='status-error'>⚠ $($SharePointResults.Status.Settings.SharePointExternalSharing) (Non-Compliant - should be 'Anyone')</span>" } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
-                    <li><strong>OneDrive External Sharing:</strong> $(if ($SharePointResults.Status.Settings.OneDriveExternalSharing -eq 'Disabled') { '<span class="status-found">✓ Only people in your organization (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.OneDriveExternalSharing -like '*Unknown*' -or $SharePointResults.Status.Settings.OneDriveExternalSharing -like '*Not Connected*') { '<span class="status-error">⚠ Could not verify - Not connected</span>' } elseif ($SharePointResults.Status.Settings.OneDriveExternalSharing) { "<span class='status-error'>⚠ $($SharePointResults.Status.Settings.OneDriveExternalSharing) (Non-Compliant - should be 'Disabled')</span>" } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
-                    <li><strong>Site Creation:</strong> $(if ($SharePointResults.Status.Settings.SiteCreation -eq 'Disabled') { '<span class="status-found">✓ Disabled - Users cannot create sites (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.SiteCreation -eq 'Enabled') { '<span class="status-error">✗ Enabled - Users can create sites (Non-Compliant)</span>' } elseif ($SharePointResults.Status.Settings.SiteCreation -like '*Unknown*') { '<span class="status-error">⚠ Could not verify</span>' } elseif ($SharePointResults.Status.Settings.SiteCreation) { "<span class='status-error'>⚠ $($SharePointResults.Status.Settings.SiteCreation)</span>" } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
-                    <li><strong>Legacy Browser Auth Blocked:</strong> $(if ($SharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { '<span class="status-found">✓ Yes - Legacy browser auth protocols blocked (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.LegacyAuthBlocked -eq $false) { '<span class="status-error">✗ No - Legacy browser auth protocols allowed (Non-Compliant)</span>' } elseif ($SharePointResults.Status.Settings.LegacyAuthBlocked -like '*Property Not Available*') { '<span class="status-error">⚠ Property not available in tenant</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>SharePoint External Sharing:</strong> $(if ($SharePointResults.Status.Settings.SharePointExternalSharing -eq 'Anyone') { '<span class="status-found">&#10003; Anyone (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.SharePointExternalSharing -like '*Unknown*' -or $SharePointResults.Status.Settings.SharePointExternalSharing -like '*Not Connected*') { '<span class="status-error">&#9888; Could not verify - Not connected</span>' } elseif ($SharePointResults.Status.Settings.SharePointExternalSharing) { "<span class='status-error'>&#9888; $($SharePointResults.Status.Settings.SharePointExternalSharing) (Non-Compliant - should be 'Anyone')</span>" } else { '<span class="status-error">&#9888; Check not performed</span>' })</li>
+                    <li><strong>OneDrive External Sharing:</strong> $(if ($SharePointResults.Status.Settings.OneDriveExternalSharing -eq 'Disabled') { '<span class="status-found">&#10003; Only people in your organization (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.OneDriveExternalSharing -like '*Unknown*' -or $SharePointResults.Status.Settings.OneDriveExternalSharing -like '*Not Connected*') { '<span class="status-error">&#9888; Could not verify - Not connected</span>' } elseif ($SharePointResults.Status.Settings.OneDriveExternalSharing) { "<span class='status-error'>&#9888; $($SharePointResults.Status.Settings.OneDriveExternalSharing) (Non-Compliant - should be 'Disabled')</span>" } else { '<span class="status-error">&#9888; Check not performed</span>' })</li>
+                    <li><strong>Site Creation:</strong> $(if ($SharePointResults.Status.Settings.SiteCreation -eq 'Disabled') { '<span class="status-found">&#10003; Disabled - Users cannot create sites (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.SiteCreation -eq 'Enabled') { '<span class="status-error">&#10007; Enabled - Users can create sites (Non-Compliant)</span>' } elseif ($SharePointResults.Status.Settings.SiteCreation -like '*Unknown*') { '<span class="status-error">&#9888; Could not verify</span>' } elseif ($SharePointResults.Status.Settings.SiteCreation) { "<span class='status-error'>&#9888; $($SharePointResults.Status.Settings.SiteCreation)</span>" } else { '<span class="status-error">&#9888; Check not performed</span>' })</li>
+                    <li><strong>Legacy Browser Auth Blocked:</strong> $(if ($SharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { '<span class="status-found">&#10003; Yes - Legacy browser auth protocols blocked (Compliant)</span>' } elseif ($SharePointResults.Status.Settings.LegacyAuthBlocked -eq $false) { '<span class="status-error">&#10007; No - Legacy browser auth protocols allowed (Non-Compliant)</span>' } elseif ($SharePointResults.Status.Settings.LegacyAuthBlocked -like '*Property Not Available*') { '<span class="status-error">&#9888; Property not available in tenant</span>' } else { '<span class="status-error">&#9888; Check not performed</span>' })</li>
                 </ul>
 "@
         
@@ -3612,14 +3576,14 @@ function Export-HTMLReport {
         # SharePoint check was attempted but not performed (no connection)
         $html += @"
             <div class="section" id="sharepoint">
-                <h2><span class="section-icon">🌐</span>SharePoint Configuration</h2>
+                <h2><span class="section-icon">&#127760;</span>SharePoint Configuration</h2>
                 <ul class="info-list">
-                    <li><strong>Status:</strong> <span class="status-error">⚠ Check not performed</span></li>
+                    <li><strong>Status:</strong> <span class="status-error">&#9888; Check not performed</span></li>
 "@
         if ($SharePointResults.Status.Errors.Count -gt 0) {
             $html += "<li><strong>Reason:</strong></li></ul><ul class='info-list'>"
             foreach ($error in $SharePointResults.Status.Errors) {
-                $html += "<li><span class='status-error'>⚠</span> $error</li>"
+                $html += "<li><span class='status-error'>[!]</span> $error</li>"
             }
         }
         $html += @"
@@ -3636,22 +3600,22 @@ function Export-HTMLReport {
     if ($TeamsResults -and $TeamsResults.CheckPerformed) {
         $html += @"
             <div class="section" id="teams">
-                <h2><span class="section-icon">💬</span>Teams Configuration</h2>
+                <h2><span class="section-icon">&#128172;</span>Teams Configuration</h2>
                 <h3>Configuration Settings:</h3>
                 <ul class="info-list">
-                    <li><strong>Meetings with unmanaged MS Accounts:</strong> $(if ($TeamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.ExternalAccessEnabled -eq $true) { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>Meetings with unmanaged MS Accounts:</strong> $(if ($TeamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { '<span class="status-found">&#10003; Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.ExternalAccessEnabled -eq $true) { '<span class="status-error">&#10007; Enabled (Non-Compliant)</span>' } else { '<span class="status-error">&#9888; Check not performed</span>' })</li>
                     <li><strong>Cloud Storage Providers:</strong>
                         <ul style="margin-top: 5px;">
-                            <li>Citrix Files: $(if ($TeamsResults.Status.Settings.CloudStorageCitrix -eq "Disabled") { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
-                            <li>Dropbox: $(if ($TeamsResults.Status.Settings.CloudStorageDropbox -eq "Disabled") { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
-                            <li>Box: $(if ($TeamsResults.Status.Settings.CloudStorageBox -eq "Disabled") { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
-                            <li>Google Drive: $(if ($TeamsResults.Status.Settings.CloudStorageGoogleDrive -eq "Disabled") { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
-                            <li>Egnyte: $(if ($TeamsResults.Status.Settings.CloudStorageEgnyte -eq "Disabled") { '<span class="status-found">✓ Disabled</span>' } else { '<span class="status-error">✗ Enabled</span>' })</li>
+                            <li>Citrix Files: $(if ($TeamsResults.Status.Settings.CloudStorageCitrix -eq "Disabled") { '<span class="status-found">&#10003; Disabled</span>' } else { '<span class="status-error">&#10007; Enabled</span>' })</li>
+                            <li>Dropbox: $(if ($TeamsResults.Status.Settings.CloudStorageDropbox -eq "Disabled") { '<span class="status-found">&#10003; Disabled</span>' } else { '<span class="status-error">&#10007; Enabled</span>' })</li>
+                            <li>Box: $(if ($TeamsResults.Status.Settings.CloudStorageBox -eq "Disabled") { '<span class="status-found">&#10003; Disabled</span>' } else { '<span class="status-error">&#10007; Enabled</span>' })</li>
+                            <li>Google Drive: $(if ($TeamsResults.Status.Settings.CloudStorageGoogleDrive -eq "Disabled") { '<span class="status-found">&#10003; Disabled</span>' } else { '<span class="status-error">&#10007; Enabled</span>' })</li>
+                            <li>Egnyte: $(if ($TeamsResults.Status.Settings.CloudStorageEgnyte -eq "Disabled") { '<span class="status-found">&#10003; Disabled</span>' } else { '<span class="status-error">&#10007; Enabled</span>' })</li>
                         </ul>
                     </li>
-                    <li><strong>Anonymous Users Can Join:</strong> $(if ($TeamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Enabled") { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
-                    <li><strong>Anonymous Users Can Start Meeting:</strong> $(if ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq "Disabled") { '<span class="status-found">✓ Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq "Enabled") { '<span class="status-error">✗ Enabled (Non-Compliant)</span>' } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
-                    <li><strong>Who Can Present:</strong> $(if ($TeamsResults.Status.Settings.DefaultPresenterRole -eq 'EveryoneUserOverride') { '<span class="status-found">✓ Everyone (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.DefaultPresenterRole) { "<span class='status-error'>✗ $($TeamsResults.Status.Settings.DefaultPresenterRole) (Non-Compliant)</span>" } else { '<span class="status-error">⚠ Check not performed</span>' })</li>
+                    <li><strong>Anonymous Users Can Join:</strong> $(if ($TeamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { '<span class="status-found">&#10003; Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Enabled") { '<span class="status-error">&#10007; Enabled (Non-Compliant)</span>' } else { '<span class="status-error">&#9888; Check not performed</span>' })</li>
+                    <li><strong>Anonymous Users Can Start Meeting:</strong> $(if ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq "Disabled") { '<span class="status-found">&#10003; Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq "Enabled") { '<span class="status-error">&#10007; Enabled (Non-Compliant)</span>' } else { '<span class="status-error">&#9888; Check not performed</span>' })</li>
+                    <li><strong>Who Can Present:</strong> $(if ($TeamsResults.Status.Settings.DefaultPresenterRole -eq 'EveryoneUserOverride') { '<span class="status-found">&#10003; Everyone (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.DefaultPresenterRole) { "<span class='status-error'>&#10007; $($TeamsResults.Status.Settings.DefaultPresenterRole) (Non-Compliant)</span>" } else { '<span class="status-error">&#9888; Check not performed</span>' })</li>
                 </ul>
             </div>
 "@
@@ -3659,8 +3623,8 @@ function Export-HTMLReport {
         # Teams check was attempted but not performed
         $html += @"
             <div class="section" id="teams">
-                <h2><span class="section-icon">💬</span>Teams Configuration</h2>
-                <p class="status-error">⚠ Check not performed</p>
+                <h2><span class="section-icon">&#128172;</span>Teams Configuration</h2>
+                <p class="status-error">&#9888; Check not performed</p>
                 <p style="color: #666; font-style: italic;">
                     Reason: Not connected to Microsoft Teams<br>
                     Tip: Connect first with: <code>Connect-MicrosoftTeams</code>
@@ -3673,10 +3637,10 @@ function Export-HTMLReport {
     if ($EntraIDResults -and $EntraIDResults.CheckPerformed) {
         $html += @"
             <div class="section" id="entra">
-                <h2><span class="section-icon">🔗</span>Entra ID Connect</h2>
+                <h2><span class="section-icon">&#128279;</span>Entra ID Connect</h2>
                 <ul class="info-list">
-                    <li><strong>Sync Enabled:</strong> $(if ($EntraIDResults.Status.IsInstalled) { '<span class="status-found">✓ Yes</span>' } else { '<span class="status-missing">✗ No</span>' })</li>
-                    <li><strong>Sync Active:</strong> $(if ($EntraIDResults.Status.IsRunning) { '<span class="status-found">✓ Yes</span>' } else { '<span class="status-missing">✗ No</span>' })</li>
+                    <li><strong>Sync Enabled:</strong> $(if ($EntraIDResults.Status.IsInstalled) { '<span class="status-found">&#10003; Yes</span>' } else { '<span class="status-missing">&#10007; No</span>' })</li>
+                    <li><strong>Sync Active:</strong> $(if ($EntraIDResults.Status.IsRunning) { '<span class="status-found">&#10003; Yes</span>' } else { '<span class="status-missing">&#10007; No</span>' })</li>
 "@
         if ($EntraIDResults.Status.LastSyncTime) {
             $html += @"
@@ -3684,7 +3648,7 @@ function Export-HTMLReport {
 "@
         }
         if ($EntraIDResults.Status.PasswordHashSync -ne $null) {
-            $passwordSyncIcon = if ($EntraIDResults.Status.PasswordHashSync -eq $true) { '✓' } elseif ($EntraIDResults.Status.PasswordHashSync -eq $false) { '⚠' } else { '?' }
+            $passwordSyncIcon = if ($EntraIDResults.Status.PasswordHashSync -eq $true) { '[OK]' } elseif ($EntraIDResults.Status.PasswordHashSync -eq $false) { '[!]' } else { '?' }
             $passwordSyncClass = if ($EntraIDResults.Status.PasswordHashSync -eq $true) { 'status-found' } elseif ($EntraIDResults.Status.PasswordHashSync -eq $false) { 'status-error' } else { 'status-missing' }
             $passwordSyncText = if ($EntraIDResults.Status.PasswordHashSync -eq $true) { 'Enabled' } elseif ($EntraIDResults.Status.PasswordHashSync -eq $false) { 'Disabled' } else { 'Unknown' }
             $html += @"
@@ -3692,7 +3656,7 @@ function Export-HTMLReport {
 "@
         }
         if ($EntraIDResults.Status.DeviceWritebackEnabled -ne $null) {
-            $deviceSyncIcon = if ($EntraIDResults.Status.DeviceWritebackEnabled -eq $true) { '✓' } else { '⚠' }
+            $deviceSyncIcon = if ($EntraIDResults.Status.DeviceWritebackEnabled -eq $true) { '[OK]' } else { '[!]' }
             $deviceSyncClass = if ($EntraIDResults.Status.DeviceWritebackEnabled -eq $true) { 'status-found' } else { 'status-error' }
             $deviceSyncText = if ($EntraIDResults.Status.DeviceWritebackEnabled -eq $true) { 'Active' } elseif ($EntraIDResults.Status.DeviceWritebackEnabled -eq $false) { 'No Devices' } else { 'Unknown' }
             $html += @"
@@ -3700,14 +3664,14 @@ function Export-HTMLReport {
 "@
         }
         if ($EntraIDResults.Status.TotalUsers -gt 0) {
-            $licenseIcon = if ($EntraIDResults.Status.UnlicensedUsers -eq 0) { '✓' } else { '⚠' }
+            $licenseIcon = if ($EntraIDResults.Status.UnlicensedUsers -eq 0) { '[OK]' } else { '[!]' }
             $licenseClass = if ($EntraIDResults.Status.UnlicensedUsers -eq 0) { 'status-found' } else { 'status-error' }
             $html += @"
                     <li><strong>Licensed Users:</strong> <span class="$licenseClass">$licenseIcon $($EntraIDResults.Status.LicensedUsers)/$($EntraIDResults.Status.TotalUsers)</span></li>
 "@
             if ($EntraIDResults.Status.UnlicensedUsers -gt 0) {
                 $html += @"
-                    <li><strong>Unlicensed Users:</strong> <span class="status-error">⚠ $($EntraIDResults.Status.UnlicensedUsers)</span></li>
+                    <li><strong>Unlicensed Users:</strong> <span class="status-error">&#9888; $($EntraIDResults.Status.UnlicensedUsers)</span></li>
 "@
             }
         }
@@ -3726,10 +3690,10 @@ function Export-HTMLReport {
     if ($IntuneConnResults -and $IntuneConnResults.CheckPerformed) {
         $html += @"
             <div class="section" id="hybrid">
-                <h2><span class="section-icon">🔐</span>Hybrid Azure AD Join & Intune Connectors</h2>
+                <h2><span class="section-icon">&#128272;</span>Hybrid Azure AD Join & Intune Connectors</h2>
                 <ul class="info-list">
-                    <li><strong>Check Performed:</strong> <span class="status-found">✓ Yes</span></li>
-                    <li><strong>NDES Connector Active:</strong> $(if ($IntuneConnResults.Status.IsConnected) { '<span class="status-found">✓ Yes</span>' } else { '<span class="status-error">✗ No</span>' })</li>
+                    <li><strong>Check Performed:</strong> <span class="status-found">&#10003; Yes</span></li>
+                    <li><strong>NDES Connector Active:</strong> $(if ($IntuneConnResults.Status.IsConnected) { '<span class="status-found">&#10003; Yes</span>' } else { '<span class="status-error">&#10007; No</span>' })</li>
                     <li><strong>Active Connectors:</strong> $($IntuneConnResults.Status.Connectors.Count)</li>
                     <li><strong>Errors/Warnings:</strong> $(if ($IntuneConnResults.Status.Errors.Count -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($IntuneConnResults.Status.Errors.Count)</span>" })</li>
                 </ul>
@@ -3742,7 +3706,7 @@ function Export-HTMLReport {
                 <ul class="info-list">
 "@
             foreach ($connector in $IntuneConnResults.Status.Connectors) {
-                $stateIcon = if ($connector.State -eq "active") { "✓" } else { "⚠" }
+                $stateIcon = if ($connector.State -eq "active") { "[OK]" } else { "[!]" }
                 $stateColor = if ($connector.State -eq "active") { "status-found" } else { "status-error" }
                 $html += @"
                     <li><span class="$stateColor">$stateIcon</span> <strong>$($connector.Type):</strong> $($connector.Name)
@@ -3771,7 +3735,7 @@ function Export-HTMLReport {
                 if ($adServerConnectors) {
                     foreach ($adServer in $adServerConnectors) {
                         $html += @"
-                    <li><span class="status-found">✓</span> <strong>$($adServer.Name)</strong>
+                    <li><span class="status-found">&#10003;</span> <strong>$($adServer.Name)</strong>
                         <ul style="margin-left: 20px; margin-top: 5px;">
                             <li>Location: $($adServer.Location)</li>
                             <li>VM Size: $($adServer.VMSize)</li>
@@ -3786,16 +3750,16 @@ function Export-HTMLReport {
                     }
                 } else {
                     $html += @"
-                    <li><span class="status-found">✓</span> Server found: <strong>$($IntuneConnResults.Status.ADServerName)</strong></li>
+                    <li><span class="status-found">&#10003;</span> Server found: <strong>$($IntuneConnResults.Status.ADServerName)</strong></li>
 "@
                 }
             } elseif ($IntuneConnResults.Status.ADServerReservation -eq $true) {
                 $html += @"
-                    <li><span class="status-found">✓</span> AD Server detected in Azure</li>
+                    <li><span class="status-found">&#10003;</span> AD Server detected in Azure</li>
 "@
             } elseif ($IntuneConnResults.Status.ADServerReservation -eq $false) {
                 $html += @"
-                    <li><span class="status-error">⚠</span> No AD Server detected in Azure
+                    <li><span class="status-error">&#9888;</span> No AD Server detected in Azure
                         <ul style="margin-left: 20px; margin-top: 5px;">
                             <li>Searched for patterns: *DC*, *AD*, *Sync*, *-S00, *-S01, BCID-S##</li>
                         </ul>
@@ -3817,7 +3781,7 @@ function Export-HTMLReport {
 "@
             foreach ($error in $IntuneConnResults.Status.Errors) {
                 $html += @"
-                    <li><span class="status-error">⚠</span> $error</li>
+                    <li><span class="status-error">&#9888;</span> $error</li>
 "@
             }
             $html += "</ul>`n"
@@ -3830,12 +3794,12 @@ function Export-HTMLReport {
     if ($DefenderResults -and $DefenderResults.CheckPerformed) {
         $html += @"
             <div class="section" id="defender">
-                <h2><span class="section-icon">🛡️</span>Microsoft Defender for Endpoint</h2>
+                <h2><span class="section-icon">&#128737;</span>Microsoft Defender for Endpoint</h2>
                 <ul class="info-list">
                     <li><strong>Policies Configured:</strong> $($DefenderResults.Status.ConfiguredPolicies)</li>
                     <li><strong>Compatible Devices:</strong> $($DefenderResults.Status.OnboardedDevices)</li>
                     <li><strong>Onboarding Files:</strong> $($DefenderResults.Status.FilesFound.Count)/4</li>
-                    <li><strong>Status:</strong> $(if ($DefenderResults.Status.ConnectorActive) { '<span class="status-found">✓ Active</span>' } else { '<span class="status-missing">✗ Not Configured</span>' })</li>
+                    <li><strong>Status:</strong> $(if ($DefenderResults.Status.ConnectorActive) { '<span class="status-found">&#10003; Active</span>' } else { '<span class="status-missing">&#10007; Not Configured</span>' })</li>
                 </ul>
 "@
         
@@ -3846,7 +3810,7 @@ function Export-HTMLReport {
 "@
             foreach ($file in $DefenderResults.Status.FilesFound) {
                 $html += @"
-                    <li><span class="status-found">✓</span> $file</li>
+                    <li><span class="status-found">&#10003;</span> $file</li>
 "@
             }
             $html += "</ul>"
@@ -3859,7 +3823,7 @@ function Export-HTMLReport {
 "@
             foreach ($file in $DefenderResults.Status.FilesMissing) {
                 $html += @"
-                    <li><span class="status-missing">✗</span> $file</li>
+                    <li><span class="status-missing">&#10007;</span> $file</li>
 "@
             }
             $html += "</ul>"
@@ -3872,7 +3836,7 @@ function Export-HTMLReport {
     if ($UserLicenseResults -and $UserLicenseResults.CheckPerformed) {
         $html += @"
             <div class="section" id="users">
-                <h2><span class="section-icon">👥</span>Users, Licenses & Privileged Roles</h2>
+                <h2><span class="section-icon">&#128101;</span>Users, Licenses & Privileged Roles</h2>
                 <ul class="info-list">
                     <li><strong>Total Users:</strong> $($UserLicenseResults.Status.TotalUsers)</li>
                     <li><strong>Licensed Users:</strong> <span class="status-found">$($UserLicenseResults.Status.LicensedUsers)</span></li>
@@ -3901,7 +3865,7 @@ function Export-HTMLReport {
         
         if ($licenseCount.Count -gt 0) {
             $html += @"
-                <h3 style="margin-top: 20px;">📊 License Distribution:</h3>
+                <h3 style="margin-top: 20px;">&#128202; License Distribution:</h3>
                 <table>
                     <thead>
                         <tr>
@@ -3932,7 +3896,7 @@ function Export-HTMLReport {
         # Show INVALID privileged users (COMPLIANCE VIOLATION)
         if ($UserLicenseResults.Status.InvalidPrivilegedUsers.Count -gt 0) {
             $html += @"
-                <h3 style="color: #dc2626; margin-top: 20px;">⚠ COMPLIANCE VIOLATION - Privileged Roles:</h3>
+                <h3 style="color: #dc2626; margin-top: 20px;">&#9888; COMPLIANCE VIOLATION - Privileged Roles:</h3>
                 <table>
                     <thead>
                         <tr>
@@ -3946,7 +3910,7 @@ function Export-HTMLReport {
                     <tbody>
 "@
             foreach ($user in $UserLicenseResults.Status.InvalidPrivilegedUsers) {
-                $rolesHtml = ($user.PrivilegedRoles | ForEach-Object { "<span style='display:block; padding:2px 0;'>• $_</span>" }) -join ''
+                $rolesHtml = ($user.PrivilegedRoles | ForEach-Object { "<span style='display:block; padding:2px 0;'>- $_</span>" }) -join ''
                 $licensesHtml = if ($user.Licenses.Count -gt 0) { 
                     ($user.Licenses | ForEach-Object { "<span style='display:block; padding:2px 0; background:#f0f9ff; margin:1px 0; padding-left:5px; border-left:2px solid #0ea5e9;'>$_</span>" }) -join ''
                 } else { 
@@ -3954,7 +3918,7 @@ function Export-HTMLReport {
                 }
                 $html += @"
                         <tr>
-                            <td><span class="status-missing">✗ INVALID</span></td>
+                            <td><span class="status-missing">&#10007; INVALID</span></td>
                             <td><strong>$($user.DisplayName)</strong></td>
                             <td>$($user.UserPrincipalName)</td>
                             <td style="color: #dc2626;">$rolesHtml</td>
@@ -3971,7 +3935,7 @@ function Export-HTMLReport {
         # Show valid ADM accounts
         if ($UserLicenseResults.Status.PrivilegedUsers.Count -gt 0) {
             $html += @"
-                <h3 style="margin-top: 20px;">✓ Valid ADM Accounts with Privileged Roles:</h3>
+                <h3 style="margin-top: 20px;">&#10003; Valid ADM Accounts with Privileged Roles:</h3>
                 <table>
                     <thead>
                         <tr>
@@ -3985,7 +3949,7 @@ function Export-HTMLReport {
                     <tbody>
 "@
             foreach ($user in $UserLicenseResults.Status.PrivilegedUsers) {
-                $rolesHtml = ($user.PrivilegedRoles | ForEach-Object { "<span style='display:block; padding:2px 0;'>• $_</span>" }) -join ''
+                $rolesHtml = ($user.PrivilegedRoles | ForEach-Object { "<span style='display:block; padding:2px 0;'>- $_</span>" }) -join ''
                 $licensesHtml = if ($user.Licenses.Count -gt 0) { 
                     ($user.Licenses | ForEach-Object { "<span style='display:block; padding:2px 0; background:#f0fdf4; margin:1px 0; padding-left:5px; border-left:2px solid #22c55e;'>$_</span>" }) -join ''
                 } else { 
@@ -3993,7 +3957,7 @@ function Export-HTMLReport {
                 }
                 $html += @"
                         <tr>
-                            <td><span class="status-found">✓ VALID</span></td>
+                            <td><span class="status-found">&#10003; VALID</span></td>
                             <td><strong>$($user.DisplayName)</strong></td>
                             <td>$($user.UserPrincipalName)</td>
                             <td>$rolesHtml</td>
@@ -4010,7 +3974,7 @@ function Export-HTMLReport {
         # Show Entra ID P2 violations
         if ($UserLicenseResults.Status.InvalidEntraIDP2Users.Count -gt 0) {
             $html += @"
-                <h3 style="color: #dc2626; margin-top: 20px;">⚠ COMPLIANCE VIOLATION - Entra ID P2 License without ADM:</h3>
+                <h3 style="color: #dc2626; margin-top: 20px;">&#9888; COMPLIANCE VIOLATION - Entra ID P2 License without ADM:</h3>
                 <p style="color: #dc2626; margin-bottom: 10px;">Users with Azure Active Directory Premium P2 license should have 'ADM' in their DisplayName:</p>
                 <table>
                     <thead>
@@ -4039,10 +4003,10 @@ function Export-HTMLReport {
                 }
                 $html += @"
                         <tr>
-                            <td><span class="status-missing">✗ INVALID</span></td>
+                            <td><span class="status-missing">&#10007; INVALID</span></td>
                             <td><strong>$($user.DisplayName)</strong></td>
                             <td>$($user.UserPrincipalName)</td>
-                            <td style="color: #dc2626; font-weight: bold;">⚠ Has Entra ID P2</td>
+                            <td style="color: #dc2626; font-weight: bold;">&#9888; Has Entra ID P2</td>
                             <td style="font-size:0.9em;">$licensesHtml</td>
                         </tr>
 "@
@@ -4056,7 +4020,7 @@ function Export-HTMLReport {
         # Show guest accounts (external users)
         if ($UserLicenseResults.Status.GuestAccounts.Count -gt 0) {
             $html += @"
-                <h3 style="margin-top: 20px; color: #06b6d4;">👥 Guest Accounts (External Users):</h3>
+                <h3 style="margin-top: 20px; color: #06b6d4;">&#128101; Guest Accounts (External Users):</h3>
                 <p style="margin-bottom: 10px;">Users with #EXT# in their User Principal Name are external guest accounts:</p>
                 <table>
                     <thead>
@@ -4072,9 +4036,9 @@ function Export-HTMLReport {
 "@
             foreach ($guest in $UserLicenseResults.Status.GuestAccounts | Sort-Object DisplayName) {
                 $accountStatus = if ($guest.AccountEnabled) { 
-                    '<span class="status-found">✓ Enabled</span>' 
+                    '<span class="status-found">[OK] Enabled</span>' 
                 } else { 
-                    '<span class="status-error">✗ Disabled</span>' 
+                    '<span class="status-error">[X] Disabled</span>' 
                 }
                 
                 $licensesHtml = if ($guest.Licenses.Count -gt 0) { 
@@ -4086,7 +4050,7 @@ function Export-HTMLReport {
                 }
                 
                 $rolesHtml = if ($guest.HasPrivilegedRole) {
-                    '<span style="color:#dc2626; font-weight:bold;">⚠ ' + ($guest.PrivilegedRoles -join ', ') + '</span>'
+                    '<span style="color:#dc2626; font-weight:bold;">[!] ' + ($guest.PrivilegedRoles -join ', ') + '</span>'
                 } else {
                     '<em style="color:#999;">None</em>'
                 }
@@ -4110,7 +4074,7 @@ function Export-HTMLReport {
         
         # Show all corporate users with their licenses (excludes guests)
         $html += @"
-                <h3 style="margin-top: 20px;">📋 Corp Users & Licenses:</h3>
+                <h3 style="margin-top: 20px;">&#128203; Corp Users & Licenses:</h3>
                 <p style="margin-bottom: 10px; color:#666;">Corporate users only (guest accounts are listed separately above):</p>
                 <table>
                     <thead>
@@ -4128,14 +4092,14 @@ function Export-HTMLReport {
         $corpUsers = $UserLicenseResults.Status.UserDetails | Where-Object { -not $_.IsGuest }
         
         foreach ($user in $corpUsers | Sort-Object DisplayName) {
-            $statusIcon = if ($user.Licenses.Count -gt 0) { '<span class="status-found">✓</span>' } else { '<span class="status-error">⚠</span>' }
+            $statusIcon = if ($user.Licenses.Count -gt 0) { '<span class="status-found">[OK]</span>' } else { '<span class="status-error">[!]</span>' }
             $statusText = if ($user.Licenses.Count -gt 0) { 'Licensed' } else { 'Unlicensed' }
             $licensesHtml = if ($user.Licenses.Count -gt 0) { 
                 ($user.Licenses | ForEach-Object { "<span style='display:block; padding:2px 0; background:#fef3c7; margin:1px 0; padding-left:5px; border-left:2px solid #f59e0b;'>$_</span>" }) -join ''
             } else { 
                 '<em style="color:#999;">No licenses</em>' 
             }
-            $enabledIcon = if ($user.AccountEnabled) { '✓' } else { '✗' }
+            $enabledIcon = if ($user.AccountEnabled) { '[OK]' } else { '[X]' }
             
             $html += @"
                         <tr>
@@ -4178,12 +4142,12 @@ function Export-PDFReport {
     
     # Validate input
     if ([string]::IsNullOrWhiteSpace($HTMLPath)) {
-        Write-Host "  ✗ Error: HTML path is empty" -ForegroundColor Red
+        Write-Host "  [X] Error: HTML path is empty" -ForegroundColor Red
         return $null
     }
     
     if (-not (Test-Path $HTMLPath)) {
-        Write-Host "  ✗ Error: HTML file not found: $HTMLPath" -ForegroundColor Red
+        Write-Host "  [X] Error: HTML file not found: $HTMLPath" -ForegroundColor Red
         return $null
     }
     
@@ -4206,10 +4170,10 @@ function Export-PDFReport {
             
             if ($process.ExitCode -eq 0 -and (Test-Path $pdfPath)) {
                 $conversionSuccess = $true
-                Write-Host "  ✓ PDF created successfully with wkhtmltopdf" -ForegroundColor Green
+                Write-Host "  [OK] PDF created successfully with wkhtmltopdf" -ForegroundColor Green
             }
         } catch {
-            Write-Host "  ✗ wkhtmltopdf error: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "  [X] wkhtmltopdf error: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
     
@@ -4258,10 +4222,10 @@ function Export-PDFReport {
                 
                 if (Test-Path $pdfPath) {
                     $conversionSuccess = $true
-                    Write-Host "  ✓ PDF created successfully with Chrome/Edge" -ForegroundColor Green
+                    Write-Host "  [OK] PDF created successfully with Chrome/Edge" -ForegroundColor Green
                 }
             } catch {
-                Write-Host "  ✗ Chrome/Edge error: $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host "  [X] Chrome/Edge error: $($_.Exception.Message)" -ForegroundColor Yellow
             }
         }
     }
@@ -4282,17 +4246,17 @@ function Export-PDFReport {
             
             if (Test-Path $pdfPath) {
                 $conversionSuccess = $true
-                Write-Host "  ✓ PDF created successfully with Word" -ForegroundColor Green
+                Write-Host "  [OK] PDF created successfully with Word" -ForegroundColor Green
             }
         } catch {
-            Write-Host "  ✗ Word error: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "  [X] Word error: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
     
     # Failed
     if (-not $conversionSuccess) {
         Write-Host ""
-        Write-Host "  ⚠ PDF conversion failed" -ForegroundColor Yellow
+        Write-Host "  [!] PDF conversion failed" -ForegroundColor Yellow
         Write-Host "  Install wkhtmltopdf: https://wkhtmltopdf.org/downloads.html" -ForegroundColor Gray
         Write-Host "  Or use: winget install wkhtmltopdf" -ForegroundColor Gray
         Write-Host ""
@@ -4836,25 +4800,25 @@ if ($GUI) {
                 Write-Host ""
                 Write-Host "  SharePoint Configuration:" -ForegroundColor White
                 Write-Host "    SP Ext. Sharing:   " -NoNewline -ForegroundColor White
-                Write-Host $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Anyone (✓)" } else { "$($sharePointResults.Status.Settings.SharePointExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Green" } else { "Yellow" })
+                Write-Host $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Anyone ([OK])" } else { "$($sharePointResults.Status.Settings.SharePointExternalSharing) ([X])" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Green" } else { "Yellow" })
                 Write-Host "    OD Ext. Sharing:   " -NoNewline -ForegroundColor White
-                Write-Host $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Only Organization (✓)" } else { "$($sharePointResults.Status.Settings.OneDriveExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Green" } else { "Yellow" })
+                Write-Host $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Only Organization ([OK])" } else { "$($sharePointResults.Status.Settings.OneDriveExternalSharing) ([X])" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Green" } else { "Yellow" })
                 Write-Host "    Site Creation:     " -NoNewline -ForegroundColor White  
-                Write-Host $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Disabled (✓)" } else { "$($sharePointResults.Status.Settings.SiteCreation) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Green" } else { "Yellow" })
+                Write-Host $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Disabled ([OK])" } else { "$($sharePointResults.Status.Settings.SiteCreation) ([X])" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Green" } else { "Yellow" })
                 Write-Host "    Legacy Auth Block: " -NoNewline -ForegroundColor White
-                Write-Host $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { "Yes (✓)" } else { "No (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked) { "Green" } else { "Yellow" })
+                Write-Host $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { "Yes ([OK])" } else { "No ([X])" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked) { "Green" } else { "Yellow" })
             }
             
             if ($runTeams -and $teamsResults -and $teamsResults.CheckPerformed) {
                 Write-Host ""
                 Write-Host "  Teams Configuration:" -ForegroundColor White
                 Write-Host "    Meetings w/ unmanaged MS: " -NoNewline -ForegroundColor White
-                Write-Host $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Green" } else { "Yellow" })
+                Write-Host $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Disabled ([OK])" } else { "Enabled ([X])" }) -ForegroundColor $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Green" } else { "Yellow" })
                 
                 $allStorageDisabled = ($teamsResults.Status.Settings.CloudStorageCitrix -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageDropbox -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageBox -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageEgnyte -eq "Disabled")
                 Write-Host "    Cloud Storage:     " -NoNewline -ForegroundColor White
                 if ($allStorageDisabled) {
-                    Write-Host "All Disabled (✓)" -ForegroundColor Green
+                    Write-Host "All Disabled ([OK])" -ForegroundColor Green
                 } else {
                     $enabledList = @()
                     if ($teamsResults.Status.Settings.CloudStorageCitrix -eq "Enabled") { $enabledList += "Citrix" }
@@ -4862,14 +4826,14 @@ if ($GUI) {
                     if ($teamsResults.Status.Settings.CloudStorageBox -eq "Enabled") { $enabledList += "Box" }
                     if ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq "Enabled") { $enabledList += "Google Drive" }
                     if ($teamsResults.Status.Settings.CloudStorageEgnyte -eq "Enabled") { $enabledList += "Egnyte" }
-                    Write-Host "Enabled: $($enabledList -join ', ') (✗)" -ForegroundColor Yellow
+                    Write-Host "Enabled: $($enabledList -join ', ') ([X])" -ForegroundColor Yellow
                 }
                 
                 Write-Host "    Anonymous Join:    " -NoNewline -ForegroundColor White
-                Write-Host $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Green" } else { "Yellow" })
+                Write-Host $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Disabled ([OK])" } else { "Enabled ([X])" }) -ForegroundColor $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Green" } else { "Yellow" })
                 
                 Write-Host "    Who Can Present:   " -NoNewline -ForegroundColor White
-                Write-Host $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Everyone (✓)" } else { "$($teamsResults.Status.Settings.DefaultPresenterRole) (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Green" } else { "Yellow" })
+                Write-Host $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Everyone ([OK])" } else { "$($teamsResults.Status.Settings.DefaultPresenterRole) ([X])" }) -ForegroundColor $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Green" } else { "Yellow" })
             }
             
             if ($runUserLicense -and $userLicenseResults -and $userLicenseResults.CheckPerformed) {
@@ -5045,6 +5009,7 @@ if (-not $SkipTeams) {
 }
 
 # User and License Check
+$userLicenseResults = $null
 if (-not $SkipUserLicenseCheck) {
     $userLicenseResults = Test-UsersAndLicenses -CompactView $CompactView
 }
@@ -5075,21 +5040,21 @@ if ($entraIDResults -and $entraIDResults.CheckPerformed) {
     Write-Host ""
     Write-Host "  Entra ID Connect:" -ForegroundColor White
     Write-Host "    Sync Enabled:       " -NoNewline -ForegroundColor White
-    Write-Host $(if ($entraIDResults.Status.IsInstalled) { "Yes (✓)" } else { "No (✗)" }) -ForegroundColor $(if ($entraIDResults.Status.IsInstalled) { "Green" } else { "Red" })
+    Write-Host $(if ($entraIDResults.Status.IsInstalled) { "Yes ([OK])" } else { "No ([X])" }) -ForegroundColor $(if ($entraIDResults.Status.IsInstalled) { "Green" } else { "Red" })
     Write-Host "    Sync Active:        " -NoNewline -ForegroundColor White
-    Write-Host $(if ($entraIDResults.Status.IsRunning) { "Yes (✓)" } else { "No (✗)" }) -ForegroundColor $(if ($entraIDResults.Status.IsRunning) { "Green" } else { "Yellow" })
+    Write-Host $(if ($entraIDResults.Status.IsRunning) { "Yes ([OK])" } else { "No ([X])" }) -ForegroundColor $(if ($entraIDResults.Status.IsRunning) { "Green" } else { "Yellow" })
     if ($entraIDResults.Status.PasswordHashSync -ne $null) {
         Write-Host "    Password Hash Sync: " -NoNewline -ForegroundColor White
-        Write-Host $(if ($entraIDResults.Status.PasswordHashSync -eq $true) { "Enabled (✓)" } elseif ($entraIDResults.Status.PasswordHashSync -eq $false) { "Disabled (⚠)" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.PasswordHashSync) { "Green" } else { "Gray" })
+        Write-Host $(if ($entraIDResults.Status.PasswordHashSync -eq $true) { "Enabled ([OK])" } elseif ($entraIDResults.Status.PasswordHashSync -eq $false) { "Disabled ([!])" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.PasswordHashSync) { "Green" } else { "Gray" })
     }
     if ($entraIDResults.Status.DeviceWritebackEnabled -ne $null) {
         Write-Host "    Device Hybrid Sync: " -NoNewline -ForegroundColor White
-        Write-Host $(if ($entraIDResults.Status.DeviceWritebackEnabled -eq $true) { "Active (✓)" } elseif ($entraIDResults.Status.DeviceWritebackEnabled -eq $false) { "No Devices" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.DeviceWritebackEnabled) { "Green" } else { "Gray" })
+        Write-Host $(if ($entraIDResults.Status.DeviceWritebackEnabled -eq $true) { "Active ([OK])" } elseif ($entraIDResults.Status.DeviceWritebackEnabled -eq $false) { "No Devices" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.DeviceWritebackEnabled) { "Green" } else { "Gray" })
     }
     if ($entraIDResults.Status.TotalUsers -gt 0) {
         Write-Host "    Licensed Users:     $($entraIDResults.Status.LicensedUsers)/$($entraIDResults.Status.TotalUsers)" -ForegroundColor $(if ($entraIDResults.Status.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
         if ($entraIDResults.Status.UnlicensedUsers -gt 0) {
-            Write-Host "    Unlicensed Users:   $($entraIDResults.Status.UnlicensedUsers) (⚠)" -ForegroundColor Yellow
+            Write-Host "    Unlicensed Users:   $($entraIDResults.Status.UnlicensedUsers) ([!])" -ForegroundColor Yellow
         }
     }
 }
@@ -5098,13 +5063,13 @@ if ($intuneConnResults -and $intuneConnResults.CheckPerformed) {
     Write-Host ""
     Write-Host "  Hybrid Azure AD Join & Intune Connectors:" -ForegroundColor White
     Write-Host "    NDES Connector:     " -NoNewline -ForegroundColor White
-    Write-Host $(if ($intuneConnResults.Status.IsConnected) { "Active (✓)" } else { "Not Connected (⚠)" }) -ForegroundColor $(if ($intuneConnResults.Status.IsConnected) { "Green" } else { "Yellow" })
+    Write-Host $(if ($intuneConnResults.Status.IsConnected) { "Active ([OK])" } else { "Not Connected ([!])" }) -ForegroundColor $(if ($intuneConnResults.Status.IsConnected) { "Green" } else { "Yellow" })
     if ($intuneConnResults.Status.ADServerName) {
-        Write-Host "    AD Server (Azure):  $($intuneConnResults.Status.ADServerName) (✓)" -ForegroundColor Green
+        Write-Host "    AD Server (Azure):  $($intuneConnResults.Status.ADServerName) ([OK])" -ForegroundColor Green
     } elseif ($intuneConnResults.Status.ADServerReservation -eq $true) {
-        Write-Host "    AD Server (Azure):  Found (✓)" -ForegroundColor Green
+        Write-Host "    AD Server (Azure):  Found ([OK])" -ForegroundColor Green
     } elseif ($intuneConnResults.Status.ADServerReservation -eq $false) {
-        Write-Host "    AD Server (Azure):  Not Detected (⚠)" -ForegroundColor Yellow
+        Write-Host "    AD Server (Azure):  Not Detected ([!])" -ForegroundColor Yellow
     }
     Write-Host "    Active Connectors:  $($intuneConnResults.Status.Connectors.Count)" -ForegroundColor White
     Write-Host "    Errors:             $($intuneConnResults.Status.Errors.Count)" -ForegroundColor $(if ($intuneConnResults.Status.Errors.Count -eq 0) { "Green" } else { "Yellow" })
@@ -5132,25 +5097,25 @@ if ($sharePointResults -and $sharePointResults.CheckPerformed) {
     Write-Host ""
     Write-Host "  SharePoint Configuration:" -ForegroundColor White
     Write-Host "    SP Ext. Sharing:   " -NoNewline -ForegroundColor White
-    Write-Host $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Anyone (✓)" } else { "$($sharePointResults.Status.Settings.SharePointExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Green" } else { "Yellow" })
+    Write-Host $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Anyone ([OK])" } else { "$($sharePointResults.Status.Settings.SharePointExternalSharing) ([X])" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SharePointExternalSharing -eq "Anyone") { "Green" } else { "Yellow" })
     Write-Host "    OD Ext. Sharing:   " -NoNewline -ForegroundColor White
-    Write-Host $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Only Organization (✓)" } else { "$($sharePointResults.Status.Settings.OneDriveExternalSharing) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Green" } else { "Yellow" })
+    Write-Host $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Only Organization ([OK])" } else { "$($sharePointResults.Status.Settings.OneDriveExternalSharing) ([X])" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.OneDriveExternalSharing -eq "Disabled") { "Green" } else { "Yellow" })
     Write-Host "    Site Creation:     " -NoNewline -ForegroundColor White  
-    Write-Host $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Disabled (✓)" } else { "$($sharePointResults.Status.Settings.SiteCreation) (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Green" } else { "Yellow" })
+    Write-Host $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Disabled ([OK])" } else { "$($sharePointResults.Status.Settings.SiteCreation) ([X])" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.SiteCreation -eq "Disabled") { "Green" } else { "Yellow" })
     Write-Host "    Legacy Auth Block: " -NoNewline -ForegroundColor White
-    Write-Host $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { "Yes (✓)" } else { "No (✗)" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked) { "Green" } else { "Yellow" })
+    Write-Host $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked -eq $true) { "Yes ([OK])" } else { "No ([X])" }) -ForegroundColor $(if ($sharePointResults.Status.Settings.LegacyAuthBlocked) { "Green" } else { "Yellow" })
 }
 
 if ($teamsResults -and $teamsResults.CheckPerformed) {
     Write-Host ""
     Write-Host "  Teams Configuration:" -ForegroundColor White
     Write-Host "    Meetings w/ unmanaged MS: " -NoNewline -ForegroundColor White
-    Write-Host $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Green" } else { "Yellow" })
+    Write-Host $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Disabled ([OK])" } else { "Enabled ([X])" }) -ForegroundColor $(if ($teamsResults.Status.Settings.ExternalAccessEnabled -eq $false) { "Green" } else { "Yellow" })
     
     $allStorageDisabled = ($teamsResults.Status.Settings.CloudStorageCitrix -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageDropbox -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageBox -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq "Disabled") -and ($teamsResults.Status.Settings.CloudStorageEgnyte -eq "Disabled")
     Write-Host "    Cloud Storage:     " -NoNewline -ForegroundColor White
     if ($allStorageDisabled) {
-        Write-Host "All Disabled (✓)" -ForegroundColor Green
+        Write-Host "All Disabled ([OK])" -ForegroundColor Green
     } else {
         $enabledList = @()
         if ($teamsResults.Status.Settings.CloudStorageCitrix -eq "Enabled") { $enabledList += "Citrix" }
@@ -5158,14 +5123,14 @@ if ($teamsResults -and $teamsResults.CheckPerformed) {
         if ($teamsResults.Status.Settings.CloudStorageBox -eq "Enabled") { $enabledList += "Box" }
         if ($teamsResults.Status.Settings.CloudStorageGoogleDrive -eq "Enabled") { $enabledList += "Google Drive" }
         if ($teamsResults.Status.Settings.CloudStorageEgnyte -eq "Enabled") { $enabledList += "Egnyte" }
-        Write-Host "Enabled: $($enabledList -join ', ') (✗)" -ForegroundColor Yellow
+        Write-Host "Enabled: $($enabledList -join ', ') ([X])" -ForegroundColor Yellow
     }
     
     Write-Host "    Anonymous Join:    " -NoNewline -ForegroundColor White
-    Write-Host $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Disabled (✓)" } else { "Enabled (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Green" } else { "Yellow" })
+    Write-Host $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Disabled ([OK])" } else { "Enabled ([X])" }) -ForegroundColor $(if ($teamsResults.Status.Settings.AnonymousUsersCanJoin -eq "Disabled") { "Green" } else { "Yellow" })
     
     Write-Host "    Who Can Present:   " -NoNewline -ForegroundColor White
-    Write-Host $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Everyone (✓)" } else { "$($teamsResults.Status.Settings.DefaultPresenterRole) (✗)" }) -ForegroundColor $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Green" } else { "Yellow" })
+    Write-Host $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Everyone ([OK])" } else { "$($teamsResults.Status.Settings.DefaultPresenterRole) ([X])" }) -ForegroundColor $(if ($teamsResults.Status.Settings.DefaultPresenterRole -eq "EveryoneUserOverride") { "Green" } else { "Yellow" })
 }
 
 if ($userLicenseResults -and $userLicenseResults.CheckPerformed) {
@@ -5175,7 +5140,7 @@ if ($userLicenseResults -and $userLicenseResults.CheckPerformed) {
     Write-Host "    Licensed Users:     $($userLicenseResults.Status.LicensedUsers)" -ForegroundColor $(if ($userLicenseResults.Status.LicensedUsers -gt 0) { "Green" } else { "Gray" })
     Write-Host "    Unlicensed Users:   $($userLicenseResults.Status.UnlicensedUsers)" -ForegroundColor $(if ($userLicenseResults.Status.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
     Write-Host "    Privileged Users:   $($userLicenseResults.Status.PrivilegedUsers.Count + $userLicenseResults.Status.InvalidPrivilegedUsers.Count)" -ForegroundColor White
-    Write-Host "    Valid ADM Accounts: $($userLicenseResults.Status.PrivilegedUsers.Count) (✓)" -ForegroundColor Green
+    Write-Host "    Valid ADM Accounts: $($userLicenseResults.Status.PrivilegedUsers.Count) ([OK])" -ForegroundColor Green
     Write-Host "    INVALID Priv Users: $($userLicenseResults.Status.InvalidPrivilegedUsers.Count)" -ForegroundColor $(if ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0) { "Green" } else { "Red" })
 }
 
@@ -5192,9 +5157,9 @@ $overallStatus = ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Co
 
 Write-Host "  Overall Status: " -NoNewline -ForegroundColor White
 if ($overallStatus) {
-    Write-Host "✓ PASSED" -ForegroundColor Green
+    Write-Host "[OK] PASSED" -ForegroundColor Green
 } else {
-    Write-Host "✗ ISSUES FOUND" -ForegroundColor Red
+    Write-Host "[X] ISSUES FOUND" -ForegroundColor Red
 }
 Write-Host "======================================================" -ForegroundColor Cyan
 
@@ -5245,6 +5210,5 @@ if ($ExportReport) {
         }
     }
     
-    Write-Host "HTML Report exported to: $reportPath" -ForegroundColor Green
     Write-Host ""
 }
