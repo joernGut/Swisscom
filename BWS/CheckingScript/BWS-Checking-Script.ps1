@@ -1,3 +1,9 @@
+#Requires -Version 5.1
+#Requires -PSEdition Desktop
+#Requires -Modules @{ ModuleName="Az.Accounts";     ModuleVersion="2.0.0" }
+#Requires -Modules @{ ModuleName="Az.Resources";    ModuleVersion="1.0.0" }
+#Requires -Modules @{ ModuleName="Microsoft.Graph"; ModuleVersion="1.0.0" }
+
 <#
 .SYNOPSIS
     BWS (Business Workplace Service) Checking Script with GUI support
@@ -25,8 +31,12 @@
     Show only summary without detailed tables
 .PARAMETER GUI
     Launch graphical user interface
+.PARAMETER RunAnalyzer
+    Run PSScriptAnalyzer static code analysis before executing checks
+.PARAMETER RunTests
+    Run built-in unit tests (Pester-style) before executing checks
 .NOTES
-    Version: 2.1.1
+    Version: 2.2.0
     Datum: 2025-03-12
     Autor: BWS PowerShell Script
 .EXAMPLE
@@ -40,6 +50,7 @@
 param(
     [Parameter(Mandatory=$false)]
     [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^[0-9A-Za-z]{1,8}$', ErrorMessage = 'BCID must be 1-8 alphanumeric characters (e.g. 1234 or AB12CD).')]
     [string]$BCID = "0000",
     
     [Parameter(Mandatory=$false)]
@@ -70,6 +81,11 @@ param(
     [switch]$SkipSharePoint,
     
     [Parameter(Mandatory=$false)]
+    [ValidateScript({
+        if ([string]::IsNullOrEmpty($_)) { return $true }
+        if ($_ -match '^https://[a-zA-Z0-9-]+\.sharepoint\.com.*$') { return $true }
+        throw "SharePointUrl must be a valid SharePoint URL (e.g. https://contoso-admin.sharepoint.com)"
+    })]
     [string]$SharePointUrl,
     
     [Parameter(Mandatory=$false)]
@@ -89,11 +105,92 @@ param(
     [switch]$CompactView,
     
     [Parameter(Mandatory=$false)]
-    [switch]$GUI
+    [switch]$GUI,
+
+    # Quality Assurance Parameters
+    [Parameter(Mandatory=$false,
+               HelpMessage="Run PSScriptAnalyzer static analysis before executing checks.")]
+    [switch]$RunAnalyzer,
+
+    [Parameter(Mandatory=$false,
+               HelpMessage="Run built-in Pester-style unit tests before executing checks.")]
+    [switch]$RunTests
 )
 
 # Script Version
-$script:Version = "2.1.1"
+$script:Version = "2.2.0"
+
+#============================================================================
+# QUALITY ASSURANCE - Block 1: Strict Mode
+#============================================================================
+# Set-StrictMode -Version Latest catches:
+#   - Uninitialised variable access
+#   - Calling properties on $null
+#   - Out-of-bounds array indexing
+#   - Calling non-existent members
+Set-StrictMode -Version Latest
+
+#============================================================================
+# QUALITY ASSURANCE - Block 2: Self-Syntax Check
+#============================================================================
+# Parse this very file using the PowerShell AST parser.
+# Any syntax error halts execution with a clear message.
+try {
+    $null = [System.Management.Automation.Language.Parser]::ParseFile(
+        $PSCommandPath,
+        [ref]$null,
+        [ref]$parseErrors
+    )
+    if ($parseErrors -and $parseErrors.Count -gt 0) {
+        Write-Host ""
+        Write-Host "  [SYNTAX ERRORS FOUND - Script halted]" -ForegroundColor Red
+        Write-Host "  The following syntax errors were detected in the script file:" -ForegroundColor Red
+        Write-Host ""
+        foreach ($err in $parseErrors) {
+            Write-Host "  Line $($err.Extent.StartLineNumber): $($err.Message)" -ForegroundColor Yellow
+        }
+        Write-Host ""
+        exit 1
+    }
+    Write-Host "  [OK] Syntax check passed" -ForegroundColor Green
+} catch {
+    Write-Host "  [!] Syntax check could not run: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+#============================================================================
+# QUALITY ASSURANCE - Block 3: Execution Policy Check
+#============================================================================
+$currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
+$machinePolicy = Get-ExecutionPolicy -Scope LocalMachine
+$effectivePolicy = Get-ExecutionPolicy
+
+Write-Host "  [i] Execution Policy  - Effective: $effectivePolicy | Machine: $machinePolicy | User: $currentPolicy" -ForegroundColor Gray
+
+$blockedPolicies = @("Restricted", "AllSigned")
+if ($effectivePolicy -in $blockedPolicies) {
+    Write-Host ""
+    Write-Host "  [!] WARNING: Execution Policy '$effectivePolicy' may block this script." -ForegroundColor Yellow
+    Write-Host "      Recommended: Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned" -ForegroundColor Gray
+    Write-Host ""
+}
+
+#============================================================================
+# QUALITY ASSURANCE - Block 4: Parameter Validation (post-param)
+#============================================================================
+# Additional cross-parameter validation that ValidateScript/Pattern cannot do
+if ($ExportReport -and -not $GUI) {
+    if ($ExportFormat -eq "PDF" -or $ExportFormat -eq "Both") {
+        Write-Host "  [i] PDF export requested - requires wkhtmltopdf, Chrome/Edge, or Word installed." -ForegroundColor Gray
+    }
+}
+
+if ($SharePointUrl -and $SkipSharePoint) {
+    Write-Host "  [!] Warning: -SharePointUrl is set but -SkipSharePoint is also set. SharePoint URL will be ignored." -ForegroundColor Yellow
+}
+
+if ($BCID -eq "0000") {
+    Write-Host "  [!] Warning: Using default BCID '0000'. Specify -BCID for a real environment." -ForegroundColor Yellow
+}
 
 #============================================================================
 # Global Variables and Configuration
@@ -157,6 +254,72 @@ if ($psVersion -ge 7 -or $psEdition -eq "Core") {
         Write-Host ""
         Write-Host "Fahre fort ohne SharePoint-Check Unterstuetzung..." -ForegroundColor Yellow
         Write-Host ""
+    }
+}
+
+#============================================================================
+# QUALITY ASSURANCE - Block 5: PSScriptAnalyzer (optional, -RunAnalyzer)
+#============================================================================
+if ($RunAnalyzer) {
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Magenta
+    Write-Host "  PSScriptAnalyzer - Static Code Analysis" -ForegroundColor Magenta
+    Write-Host "======================================================" -ForegroundColor Magenta
+    Write-Host ""
+
+    # Check if PSScriptAnalyzer is installed
+    if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+        Write-Host "  PSScriptAnalyzer not installed. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+            Write-Host "  [OK] PSScriptAnalyzer installed" -ForegroundColor Green
+        } catch {
+            Write-Host "  [!] Could not install PSScriptAnalyzer: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "      Install manually: Install-Module -Name PSScriptAnalyzer -Scope CurrentUser" -ForegroundColor Gray
+        }
+    }
+
+    if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
+        Import-Module PSScriptAnalyzer -ErrorAction SilentlyContinue
+
+        Write-Host "  Analyzing $PSCommandPath ..." -ForegroundColor Gray
+        Write-Host ""
+
+        $analyzerResults = Invoke-ScriptAnalyzer -Path $PSCommandPath -Severity @("Error","Warning") -ErrorAction SilentlyContinue
+
+        if ($analyzerResults -and $analyzerResults.Count -gt 0) {
+            $errors   = $analyzerResults | Where-Object { $_.Severity -eq "Error"   }
+            $warnings = $analyzerResults | Where-Object { $_.Severity -eq "Warning" }
+
+            Write-Host "  Errors:   $($errors.Count)" -ForegroundColor $(if ($errors.Count -gt 0) { "Red" } else { "Green" })
+            Write-Host "  Warnings: $($warnings.Count)" -ForegroundColor $(if ($warnings.Count -gt 0) { "Yellow" } else { "Green" })
+            Write-Host ""
+
+            foreach ($result in $analyzerResults | Sort-Object Severity, Line) {
+                $color = if ($result.Severity -eq "Error") { "Red" } else { "Yellow" }
+                Write-Host "  [$($result.Severity)] Line $($result.Line): $($result.RuleName)" -ForegroundColor $color
+                Write-Host "    $($result.Message)" -ForegroundColor Gray
+                Write-Host ""
+            }
+
+            if ($errors.Count -gt 0) {
+                Write-Host "  [!] Errors found. Review before running in production." -ForegroundColor Red
+            }
+        } else {
+            Write-Host "  [OK] No errors or warnings found by PSScriptAnalyzer." -ForegroundColor Green
+        }
+    }
+
+    Write-Host "======================================================" -ForegroundColor Magenta
+    Write-Host ""
+
+    # Ask whether to continue after analysis
+    if (-not $GUI) {
+        $continueAfterAnalysis = Read-Host "Continue with checks? (J/N)"
+        if ($continueAfterAnalysis -notin @("J","j","Y","y")) {
+            Write-Host "Script stopped after PSScriptAnalyzer run." -ForegroundColor Yellow
+            exit 0
+        }
     }
 }
 
@@ -246,6 +409,225 @@ function Get-BWS-ResourceNames {
 function Normalize-PolicyName {
     param([string]$name)
     return ($name -replace '\s+', ' ' -replace '^\s+|\s+$', '').ToLower()
+}
+
+#============================================================================
+# QUALITY ASSURANCE - Block 6: Built-in Pester-style Unit Tests
+#============================================================================
+function Invoke-BWSSelfTest {
+    <#
+    .SYNOPSIS
+        Built-in unit tests for BWS-Checking-Script helper functions.
+    .DESCRIPTION
+        Runs lightweight Pester-style tests without requiring the Pester module.
+        Tests cover: parameter validation, helper functions, resource name generation.
+        Run with: -RunTests switch or call directly.
+    #>
+
+    $testResults = @{
+        Passed = 0
+        Failed = 0
+        Errors = @()
+    }
+
+    function Assert-Equal {
+        param($Label, $Expected, $Actual)
+        if ($Expected -eq $Actual) {
+            Write-Host "    [OK] $Label" -ForegroundColor Green
+            $script:testResults.Passed++
+        } else {
+            Write-Host "    [FAIL] $Label" -ForegroundColor Red
+            Write-Host "         Expected : $Expected" -ForegroundColor Yellow
+            Write-Host "         Actual   : $Actual" -ForegroundColor Yellow
+            $script:testResults.Failed++
+            $script:testResults.Errors += "[FAIL] $Label (Expected='$Expected', Got='$Actual')"
+        }
+    }
+
+    function Assert-NotNull {
+        param($Label, $Value)
+        if ($null -ne $Value -and $Value -ne '') {
+            Write-Host "    [OK] $Label" -ForegroundColor Green
+            $script:testResults.Passed++
+        } else {
+            Write-Host "    [FAIL] $Label -> value is null or empty" -ForegroundColor Red
+            $script:testResults.Failed++
+            $script:testResults.Errors += "[FAIL] $Label (value is null or empty)"
+        }
+    }
+
+    function Assert-True {
+        param($Label, [bool]$Condition)
+        if ($Condition) {
+            Write-Host "    [OK] $Label" -ForegroundColor Green
+            $script:testResults.Passed++
+        } else {
+            Write-Host "    [FAIL] $Label -> condition is False" -ForegroundColor Red
+            $script:testResults.Failed++
+            $script:testResults.Errors += "[FAIL] $Label (condition was False)"
+        }
+    }
+
+    function Assert-Match {
+        param($Label, $Pattern, $Value)
+        if ($Value -match $Pattern) {
+            Write-Host "    [OK] $Label" -ForegroundColor Green
+            $script:testResults.Passed++
+        } else {
+            Write-Host "    [FAIL] $Label -> '$Value' does not match '$Pattern'" -ForegroundColor Red
+            $script:testResults.Failed++
+            $script:testResults.Errors += "[FAIL] $Label ('$Value' does not match '$Pattern')"
+        }
+    }
+
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Magenta
+    Write-Host "  BWS Self-Test Suite (Built-in Unit Tests)" -ForegroundColor Magenta
+    Write-Host "======================================================" -ForegroundColor Magenta
+    Write-Host ""
+
+    # ------------------------------------------------------------------
+    # TEST GROUP 1: Normalize-PolicyName
+    # ------------------------------------------------------------------
+    Write-Host "  [Group 1] Normalize-PolicyName" -ForegroundColor Cyan
+    Assert-Equal "Lowercase"         "std - windows computers - standard"    (Normalize-PolicyName "STD - Windows Computers - Standard")
+    Assert-Equal "Leading spaces"    "std - windows laps"                    (Normalize-PolicyName "  STD - Windows LAPS  ")
+    Assert-Equal "Multiple spaces"   "std - avd hosts - standard"            (Normalize-PolicyName "STD - AVD Hosts -  Standard")
+    Assert-Equal "Already normal"    "std - windows users - standard"        (Normalize-PolicyName "std - windows users - standard")
+    Assert-Equal "Tab normalised"    "a b c"                                 (Normalize-PolicyName "A`tB`tC")
+    Write-Host ""
+
+    # ------------------------------------------------------------------
+    # TEST GROUP 2: Get-BWS-ResourceNames
+    # ------------------------------------------------------------------
+    Write-Host "  [Group 2] Get-BWS-ResourceNames" -ForegroundColor Cyan
+    $names1234 = Get-BWS-ResourceNames -BCID "1234"
+    Assert-Equal "Storage Account Factory"   "sa1234bwsfactorynch0"            $names1234.StorAccFactory
+    Assert-Equal "Storage Account Inventory" "sa1234inventorynch0"             $names1234.StorAccInventory
+    Assert-Equal "VM Domain Controller"      "1234-S00"                        $names1234.VMDomContrl
+    Assert-Equal "VM OS Disk"               "osdisk-1234-s00-nch-0"           $names1234.VMDomContrlvDisk
+    Assert-Equal "VM NIC"                   "nic-1234-s00-nch-0"              $names1234.VMNicDomContrl
+    Assert-Equal "Key Vault Factory"        "kv-1234-bwsfactory-nch-0"        $names1234.KeyVaultFactory
+    Assert-Equal "Key Vault Partners"       "kv-1234-partners-nch-0"          $names1234.KeyVaultPartner
+    Assert-Equal "vNet Default"             "vnet-1234-bws-nch-0"             $names1234.vNETDefault
+    Assert-Equal "VPN Gateway"              "vpng-1234-bwsbns-nch-0"          $names1234.AzVirtGW
+    Assert-Equal "Local Network Gateway"    "lgw-1234-bwsbns-nch-0"           $names1234.LocNwGW
+    Assert-Equal "NSG ADDS"                 "nsg-1234-snetadds-nch-0"         $names1234.NetAdds
+    Assert-Equal "NSG Workload"             "nsg-1234-snetworkload-nch-0"     $names1234.NetLoad
+    Assert-Equal "BNS Public IP"            "pip-1234-bwsbns-nch-0"           $names1234.BnsPublicIP
+    Assert-Equal "Internet Outbound PIP"    "pip-1234-internet-1234s00-nch-0" $names1234.InetOutboundS00
+    Assert-Equal "S2S Connection"           "s2sp1-1234-bwsbns-nch-0"         $names1234.ConBwsBnsEC
+    Assert-Equal "Automation Account"       "aa-1234-vmautomation-nch-0"      $names1234.AutoAcc
+    Assert-Equal "Managed Identity"         "mi-1234-bwsfactory-nch-0"        $names1234.MI
+    Write-Host ""
+
+    # ------------------------------------------------------------------
+    # TEST GROUP 3: BCID uppercase/lowercase handling
+    # ------------------------------------------------------------------
+    Write-Host "  [Group 3] BCID Case Handling" -ForegroundColor Cyan
+    $namesUpper = Get-BWS-ResourceNames -BCID "ABCD"
+    Assert-Equal "Uppercase BCID -> lowercase in resource name" "saabcdbwsfactorynch0" $namesUpper.StorAccFactory
+    Assert-Equal "Uppercase BCID -> lowercase VM name"          "abcd-S00"             $namesUpper.VMDomContrl
+
+    $namesMixed = Get-BWS-ResourceNames -BCID "Ab12"
+    Assert-Equal "Mixed BCID -> lowercase storage"    "saab12bwsfactorynch0"      $namesMixed.StorAccFactory
+    Assert-Equal "Mixed BCID -> lowercase NIC"        "nic-ab12-s00-nch-0"        $namesMixed.VMNicDomContrl
+    Write-Host ""
+
+    # ------------------------------------------------------------------
+    # TEST GROUP 4: Intune Standard Policies list integrity
+    # ------------------------------------------------------------------
+    Write-Host "  [Group 4] Intune Standard Policies List" -ForegroundColor Cyan
+    Assert-Equal "Policy count is 26"             26     $script:intuneStandardPolicies.Count
+    Assert-True  "No empty entries"               ($script:intuneStandardPolicies | Where-Object { [string]::IsNullOrEmpty($_) }).Count -eq 0
+    Assert-True  "All start with 'STD - '"        ($script:intuneStandardPolicies | Where-Object { -not $_.StartsWith("STD - ") }).Count -eq 0
+    Assert-True  "Contains Autopilot HybridJoin"  ($script:intuneStandardPolicies -contains "STD - Autopilot - Hybrid Domain Join")
+    Assert-True  "Contains Windows LAPS"          ($script:intuneStandardPolicies -contains "STD - Windows LAPS")
+    Assert-True  "Contains WHfB Cloud Trust"      ($script:intuneStandardPolicies -contains "STD - Windows Users - Windows Hello for Business Cloud Trust")
+    Assert-True  "No duplicate policies"          ($script:intuneStandardPolicies | Group-Object | Where-Object { $_.Count -gt 1 }).Count -eq 0
+    Write-Host ""
+
+    # ------------------------------------------------------------------
+    # TEST GROUP 5: Parameter Validation Logic
+    # ------------------------------------------------------------------
+    Write-Host "  [Group 5] BCID Pattern Validation" -ForegroundColor Cyan
+    $validBCIDs   = @("1234","0000","ABCD","Ab12","12345678")
+    $invalidBCIDs = @("","123456789","AB CD","1234!","12-34")
+
+    foreach ($id in $validBCIDs) {
+        Assert-True "BCID '$id' matches valid pattern" ($id -match '^[0-9A-Za-z]{1,8}$')
+    }
+    foreach ($id in $invalidBCIDs) {
+        Assert-True "BCID '$id' correctly rejected" (-not ($id -match '^[0-9A-Za-z]{1,8}$'))
+    }
+    Write-Host ""
+
+    # ------------------------------------------------------------------
+    # TEST GROUP 6: SharePoint URL Validation
+    # ------------------------------------------------------------------
+    Write-Host "  [Group 6] SharePoint URL Validation" -ForegroundColor Cyan
+    $validSPUrls = @(
+        "https://contoso-admin.sharepoint.com",
+        "https://contoso-admin.sharepoint.com/",
+        "https://my-company-admin.sharepoint.com"
+    )
+    $invalidSPUrls = @(
+        "http://contoso.sharepoint.com",
+        "https://contoso.example.com",
+        "ftp://contoso.sharepoint.com",
+        "not-a-url"
+    )
+
+    foreach ($url in $validSPUrls) {
+        Assert-True "URL '$url' is valid"    ($url -match '^https://[a-zA-Z0-9-]+\.sharepoint\.com.*$')
+    }
+    foreach ($url in $invalidSPUrls) {
+        Assert-True "URL '$url' is rejected" (-not ($url -match '^https://[a-zA-Z0-9-]+\.sharepoint\.com.*$'))
+    }
+    Write-Host ""
+
+    # ------------------------------------------------------------------
+    # TEST GROUP 7: Script File Integrity
+    # ------------------------------------------------------------------
+    Write-Host "  [Group 7] Script File Integrity" -ForegroundColor Cyan
+    $scriptContent = Get-Content -Path $PSCommandPath -Raw -Encoding UTF8
+    Assert-True "Script contains Test-AzureResources"     ($scriptContent -match 'function Test-AzureResources')
+    Assert-True "Script contains Test-IntunePolicies"     ($scriptContent -match 'function Test-IntunePolicies')
+    Assert-True "Script contains Test-EntraIDConnect"     ($scriptContent -match 'function Test-EntraIDConnect')
+    Assert-True "Script contains Test-IntuneConnector"    ($scriptContent -match 'function Test-IntuneConnector')
+    Assert-True "Script contains Test-DefenderForEndpoint"($scriptContent -match 'function Test-DefenderForEndpoint')
+    Assert-True "Script contains Test-BWSSoftwarePackages"($scriptContent -match 'function Test-BWSSoftwarePackages')
+    Assert-True "Script contains Test-SharePointConfiguration" ($scriptContent -match 'function Test-SharePointConfiguration')
+    Assert-True "Script contains Test-TeamsConfiguration" ($scriptContent -match 'function Test-TeamsConfiguration')
+    Assert-True "Script contains Test-UsersAndLicenses"   ($scriptContent -match 'function Test-UsersAndLicenses')
+    Assert-True "Script contains Export-HTMLReport"       ($scriptContent -match 'function Export-HTMLReport')
+    Assert-True "Script version is 2.2.0"                 ($scriptContent -match 'script:Version = "2\.2\.0"')
+    Assert-True "No ampersand-backtick-dollar in source"  (-not ($scriptContent -match '&`\$'))
+    Write-Host ""
+
+    # ------------------------------------------------------------------
+    # SUMMARY
+    # ------------------------------------------------------------------
+    Write-Host "======================================================" -ForegroundColor Magenta
+    Write-Host "  TEST RESULTS" -ForegroundColor Magenta
+    Write-Host "======================================================" -ForegroundColor Magenta
+    $total = $testResults.Passed + $testResults.Failed
+    Write-Host "  Total:  $total" -ForegroundColor White
+    Write-Host "  Passed: $($testResults.Passed)" -ForegroundColor Green
+    Write-Host "  Failed: $($testResults.Failed)" -ForegroundColor $(if ($testResults.Failed -gt 0) { "Red" } else { "Green" })
+    Write-Host "======================================================" -ForegroundColor Magenta
+
+    if ($testResults.Failed -gt 0) {
+        Write-Host ""
+        Write-Host "  FAILED TESTS:" -ForegroundColor Red
+        foreach ($err in $testResults.Errors) {
+            Write-Host "  $err" -ForegroundColor Red
+        }
+        Write-Host ""
+    }
+
+    Write-Host ""
+    return $testResults
 }
 
 #============================================================================
@@ -4267,6 +4649,20 @@ function Export-PDFReport {
     return $pdfPath
 }
 
+
+#============================================================================
+# QUALITY ASSURANCE - Block 6: Run Self-Tests if requested
+#============================================================================
+if ($RunTests) {
+    $testSummary = Invoke-BWSSelfTest
+    if (-not $GUI) {
+        $continueAfterTests = Read-Host "Continue with checks? (J/N)"
+        if ($continueAfterTests -notin @("J","j","Y","y")) {
+            Write-Host "Script stopped after self-test run." -ForegroundColor Yellow
+            exit 0
+        }
+    }
+}
 
 #============================================================================
 # GUI Mode
