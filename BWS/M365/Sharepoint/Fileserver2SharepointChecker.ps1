@@ -100,11 +100,11 @@ $script:TempExtensions = [System.Collections.Generic.HashSet[string]]::new(
 )
 
 
-# Rules toggle - all enabled by default; GUI checkboxes update this set
+# All rules enabled by default; GUI checkboxes update this set at runtime
 $script:EnabledRules = [System.Collections.Generic.HashSet[string]]::new(
     [string[]]@(
-        'PATH-SP','PATH-OD','PATH-WIN','PATH-XL','PATH-OFF',
-        'FILE-SIZE','FILE-TEMP','DEPTH',
+        'PATH-SP','PATH-OD','PATH-WIN','PATH-XL','PATH-OFF','DEPTH',
+        'FILE-SIZE','FILE-TEMP',
         'NAME-LEN','NAME-TRIM','NAME-DOT','NAME-TILDE','NAME-TILDE-FOLDER',
         'NAME-VTI','NAME-FORMS','NAME-RESERVED',
         'CHAR-BLOCKED','CHAR-WARN','NAME-SPACES'
@@ -355,6 +355,23 @@ function Test-SharePointItem {
         IssueSummary                = $summary
         IssueDetails                = $details
         RecommendedActions          = $actions
+        MigrationStatus             = $(
+            $blockingCodes = @($issueList | Where-Object { $_.Sev -eq 2 } | ForEach-Object { $_.Code })
+            $warningCodes  = @($issueList | Where-Object { $_.Sev -eq 1 } | ForEach-Object { $_.Code })
+            # SP-blocking codes = hard limits that prevent upload to SharePoint
+            $spBlockers = @('PATH-SP','PATH-OD','FILE-SIZE','NAME-LEN','NAME-TRIM','NAME-DOT','NAME-TILDE','NAME-TILDE-FOLDER','NAME-VTI','NAME-FORMS','NAME-RESERVED','CHAR-BLOCKED')
+            $winOnlyCodes = @($blockingCodes | Where-Object { $_ -in $spBlockers })
+            if ($blockingCodes.Count -eq 0 -and $warningCodes.Count -eq 0) {
+                'SP: Ready'
+            } elseif ($blockingCodes.Count -eq 0) {
+                'SP: Ready (Warnings)'
+            } elseif ($winOnlyCodes.Count -gt 0) {
+                'SP: Blocked'
+            } else {
+                'SP: Blocked'
+            }
+        )
+        WindowsCompatible           = $(if ($issueList.Count -eq 0) { 'Yes' } elseif (@($issueList | Where-Object { $_.Code -notin @('PATH-SP','PATH-OD','PATH-XL','PATH-OFF','CHAR-WARN','NAME-SPACES','FILE-TEMP','DEPTH') }).Count -gt 0) { 'Check Required' } else { 'Yes' })
         BlockingIssue               = [bool]($issueList.Count -gt 0)
     }
 }
@@ -584,119 +601,212 @@ function Export-AnalysisReport {
     $wsDash.Column(6).Width = 16
 
     # ══════════════════════════════════════════════════════════
-    #  SHEET 2 — ISSUES (detailed table)
+    #  SHEET 2 — ISSUES & MIGRATION STATUS (merged)
     # ══════════════════════════════════════════════════════════
 
-    # Select-Object on one line (PS 5.1 parser requirement)
-    $detailData = $Results | Select-Object Severity, ItemType, Name, RelativePath, FullPath, WindowsFullPathLength, DecodedSharePointPathLength, FolderDepth, IssueCount, IssueSummary, IssueDetails, RecommendedActions
+    # Pre-compute per-result values needed for the sheet
+    $spReady    = @($allResults | Where-Object { $_.MigrationStatus -eq 'SP: Ready' }).Count
+    $spWarning  = @($allResults | Where-Object { $_.MigrationStatus -eq 'SP: Ready (Warnings)' }).Count
+    $spBlocked  = @($allResults | Where-Object { $_.MigrationStatus -eq 'SP: Blocked' }).Count
+    $cleanItems = $TotalScanned - $allResults.Count
 
-    $pkg = $detailData | Export-Excel -ExcelPackage $pkg `
-        -WorksheetName "Issues" -TableName "IssueDetails" `
-        -TableStyle "Medium2" -AutoFilter -BoldTopRow -FreezeTopRow `
-        -PassThru
+    $wsIss = $pkg.Workbook.Worksheets.Add("Issues")
 
-    $wsIss     = $pkg.Workbook.Worksheets["Issues"]
-    $lastRow   = $wsIss.Dimension.End.Row
-    $lastCol   = $wsIss.Dimension.End.Column
-    $headerRow = 1
+    # ── Title ────────────────────────────────────────────────────
+    $wsIss.Cells["A1:M1"].Merge = $true
+    $wsIss.Cells["A1"].Value    = "Issues & Migration Status  -  SharePoint Online vs. Windows File Server"
+    $wsIss.Cells["A1"].Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+    $wsIss.Cells["A1"].Style.Fill.BackgroundColor.SetColor($xlBlueDark)
+    $wsIss.Cells["A1"].Style.Font.Color.SetColor($xlWhite)
+    $wsIss.Cells["A1"].Style.Font.Bold = $true
+    $wsIss.Cells["A1"].Style.Font.Size = 13
+    $wsIss.Row(1).Height = 28
 
-    # ── Style header row ─────────────────────────────────────────
-    for ($c = 1; $c -le $lastCol; $c++) {
-        $cell = $wsIss.Cells[$headerRow,$c]
+    # ── Legend ────────────────────────────────────────────────────
+    $legend = "SP: Ready = migrierbar ohne Einschraenkungen.   SP: Ready (Warnings) = Migration moeglich, aber Probleme im Alltag moeglich (z.B. aeltere Office-Clients).   SP: Blocked = Item KANN NICHT zu SharePoint migriert werden - Behebung erforderlich.   Windows Only = Funktioniert auf dem Fileserver, ist aber mit SharePoint nicht kompatibel.   Severity: Blocking = Upload schlaegt fehl | Warning = Upload moeglich, aber Einschraenkungen"
+    $wsIss.Cells["A2:M2"].Merge = $true
+    $wsIss.Cells["A2"].Value    = $legend
+    $wsIss.Cells["A2"].Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+    $wsIss.Cells["A2"].Style.Fill.BackgroundColor.SetColor($xlBlueLight)
+    $wsIss.Cells["A2"].Style.Font.Color.SetColor($xlBlueDark)
+    $wsIss.Cells["A2"].Style.Font.Italic = $true
+    $wsIss.Cells["A2"].Style.WrapText = $true
+    $wsIss.Row(2).Height = 48
+
+    # ── Summary block ─────────────────────────────────────────────
+    $wsIss.Cells["A3:M3"].Merge = $true
+    $wsIss.Cells["A3"].Value    = "ZUSAMMENFASSUNG"
+    $wsIss.Cells["A3"].Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+    $wsIss.Cells["A3"].Style.Fill.BackgroundColor.SetColor($xlBlueDark)
+    $wsIss.Cells["A3"].Style.Font.Color.SetColor($xlWhite)
+    $wsIss.Cells["A3"].Style.Font.Bold = $true
+    $wsIss.Row(3).Height = 18
+
+    $sumDefs = [ordered]@{
+        "Gescannte Items total"                          = $TotalScanned
+        "Bereit fuer SharePoint Online (gesamt)"         = "$($cleanItems + $spReady + $spWarning) von $TotalScanned ($([Math]::Round(($cleanItems+$spReady+$spWarning)/$TotalScanned*100,1))%)"
+        "  davon: Vollstaendig kompatibel (keine Issues)" = "$cleanItems Items - keine Massnahmen noetig"
+        "  davon: Kompatibel mit Warnungen"              = "$spWarning Items - Nutzung pruefen (z.B. aeltere Office-Clients, URL-Laenge)"
+        "Geblockt - Behebung erforderlich"               = "$spBlocked Items ($([Math]::Round($spBlocked/$TotalScanned*100,1))%) - koennen NICHT migriert werden"
+        "Nur Fileserver-kompatibel (Windows Only)"       = "$(@($allResults | Where-Object { $_.WindowsCompatible -eq 'Check Required' }).Count) Items benoetigen Pruefung"
+    }
+    $bgMap = @{
+        "Bereit fuer SharePoint Online (gesamt)"          = $xlGreenLight
+        "  davon: Vollstaendig kompatibel (keine Issues)" = $xlGreenLight
+        "  davon: Kompatibel mit Warnungen"               = $xlOrangeLight
+        "Geblockt - Behebung erforderlich"                = $xlRedLight
+    }
+    $sr = 4
+    foreach ($kv in $sumDefs.GetEnumerator()) {
+        $bg = if ($bgMap.ContainsKey($kv.Key)) { $bgMap[$kv.Key] } else { $xlWhite }
+        $bold = -not $kv.Key.StartsWith(' ')
+        foreach ($c in 1..13) {
+            $wsIss.Cells[$sr,$c].Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+            $wsIss.Cells[$sr,$c].Style.Fill.BackgroundColor.SetColor($bg)
+        }
+        $wsIss.Cells[$sr,1].Value = $kv.Key
+        $wsIss.Cells[$sr,1].Style.Font.Bold = $bold
+        $wsIss.Cells["B${sr}:M${sr}"].Merge = $true
+        $wsIss.Cells[$sr,2].Value = $kv.Value
+        $wsIss.Cells[$sr,2].Style.Font.Bold = $bold
+        $wsIss.Row($sr).Height = 16
+        $sr++
+    }
+
+    # ── Section header: item detail ───────────────────────────────
+    $wsIss.Cells["A${sr}:M${sr}"].Merge = $true
+    $wsIss.Cells["A${sr}"].Value    = "ITEM DETAIL  -  Alle Items mit Problemen (sortiert nach Schwere)"
+    $wsIss.Cells["A${sr}"].Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+    $wsIss.Cells["A${sr}"].Style.Fill.BackgroundColor.SetColor($xlBlueDark)
+    $wsIss.Cells["A${sr}"].Style.Font.Color.SetColor($xlWhite)
+    $wsIss.Cells["A${sr}"].Style.Font.Bold = $true
+    $wsIss.Row($sr).Height = 18
+    $sr++
+
+    # ── Column headers ────────────────────────────────────────────
+    # Group A: Migration status (cols 1-3)   Group B: Location (cols 4-6)
+    # Group C: Technical (cols 7-9)           Group D: Issue detail (cols 10-13)
+    $colHeaders = @(
+        @{ H='SP Migration Status';      W=26; Bg=$xlBlueDark  }
+        @{ H='Windows Fileserver';       W=20; Bg=$xlBlueDark  }
+        @{ H='Severity';                 W=11; Bg=$xlBlueDark  }
+        @{ H='Item Type';                W=10; Bg=$xlBlue      }
+        @{ H='Name';                     W=36; Bg=$xlBlue      }
+        @{ H='Relative Path';            W=60; Bg=$xlBlue      }
+        @{ H='SP Path Length (decoded)'; W=14; Bg=$xlBlue      }
+        @{ H='Windows Path Length';      W=14; Bg=$xlBlue      }
+        @{ H='Folder Depth';             W=12; Bg=$xlBlue      }
+        @{ H='Issue Summary';            W=55; Bg=$xlOrange    }
+        @{ H='What is the problem?';     W=70; Bg=$xlRed       }
+        @{ H='Why does it matter?';      W=70; Bg=$xlRed       }
+        @{ H='How to fix it?';           W=70; Bg=$xlGreen     }
+    )
+    for ($c = 1; $c -le $colHeaders.Count; $c++) {
+        $hdr  = $colHeaders[$c-1]
+        $cell = $wsIss.Cells[$sr,$c]
+        $cell.Value = $hdr.H
         $cell.Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
-        $cell.Style.Fill.BackgroundColor.SetColor($xlBlueDark)
+        $cell.Style.Fill.BackgroundColor.SetColor($hdr.Bg)
         $cell.Style.Font.Color.SetColor($xlWhite)
         $cell.Style.Font.Bold = $true
-        $cell.Style.Font.Size = 10
+        $cell.Style.Font.Size = 9
         $cell.Style.HorizontalAlignment = [OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center
+        $cell.Style.WrapText = $true
+        $wsIss.Column($c).Width = $hdr.W
     }
-    $wsIss.Row($headerRow).Height = 20
+    $wsIss.Row($sr).Height = 30
+    $dataStartRow = $sr + 1
+    $sr++
 
-    # ── Build column map ─────────────────────────────────────────
-    $colMap = @{}
-    for ($c = 1; $c -le $lastCol; $c++) {
-        $h = $wsIss.Cells[$headerRow,$c].Text
-        if (-not [string]::IsNullOrEmpty($h)) { $colMap[$h] = $c }
-    }
-    $dataStart = $headerRow + 1
+    # ── Data rows ─────────────────────────────────────────────────
+    # Sort: Blocking first, then Warning; within each: by SP path length desc
+    $sortedResults = @($allResults | Sort-Object @{E={if($_.Severity -eq 'Blocking'){0}else{1}}},@{E={-$_.DecodedSharePointPathLength}})
 
-    # ── Row-level background highlight by severity ───────────────
-    for ($r = $dataStart; $r -le $lastRow; $r++) {
-        $sev = $wsIss.Cells[$r, $colMap['Severity']].Text
-        $rowBg = switch ($sev) {
+    foreach ($r in $sortedResults) {
+        # Parse IssueDetails into What/Why/Fix per finding, then join
+        $whatList = @(); $whyList = @(); $fixList = @()
+        $findings = $r.IssueDetails -split '--- Finding \d+' | Where-Object { $_ -match 'ISSUE:' }
+        foreach ($f in $findings) {
+            $issue = if ($f -match 'ISSUE:\s*(.+?)(\n|WHY:)') { $Matches[1].Trim() } else { '' }
+            $why   = if ($f -match 'WHY:\s*(.+?)(\n|FIX:)')   { $Matches[1].Trim() } else { '' }
+            $fix   = if ($f -match 'FIX:\s*(.+)$')            { $Matches[1].Trim() } else { '' }
+            if ($issue) { $whatList += $issue }
+            if ($why)   { $whyList  += $why   }
+            if ($fix)   { $fixList  += $fix   }
+        }
+        $whatText = $whatList -join "`n"
+        $whyText  = $whyList  -join "`n"
+        $fixText  = $fixList  -join "`n"
+
+        $rowBg = switch ($r.Severity) {
             'Blocking' { $xlRedLight    }
             'Warning'  { $xlOrangeLight }
             default    { $xlWhite       }
         }
-        for ($c = 1; $c -le $lastCol; $c++) {
-            $cell = $wsIss.Cells[$r,$c]
+
+        $vals = @(
+            $r.MigrationStatus,
+            $r.WindowsCompatible,
+            $r.Severity,
+            $r.ItemType,
+            $r.Name,
+            $r.RelativePath,
+            $r.DecodedSharePointPathLength,
+            $r.WindowsFullPathLength,
+            $r.FolderDepth,
+            $r.IssueSummary,
+            $whatText,
+            $whyText,
+            $fixText
+        )
+        for ($c = 1; $c -le $vals.Count; $c++) {
+            $cell = $wsIss.Cells[$sr,$c]
+            $cell.Value = $vals[$c-1]
             $cell.Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
             $cell.Style.Fill.BackgroundColor.SetColor($rowBg)
+            $cell.Style.WrapText = ($c -ge 10)
         }
-        $wsIss.Row($r).Height = 15
-    }
-
-    # ── Bold + colour the Severity cell text ────────────────────
-    if ($colMap['Severity']) {
-        for ($r = $dataStart; $r -le $lastRow; $r++) {
-            $cell = $wsIss.Cells[$r, $colMap['Severity']]
-            $sev  = $cell.Text
-            $cell.Style.Font.Bold = $true
-            switch ($sev) {
-                'Blocking' { $cell.Style.Font.Color.SetColor($xlRed)    }
-                'Warning'  { $cell.Style.Font.Color.SetColor($xlOrange) }
-            }
+        # Colour SP Migration Status cell
+        $statusCell = $wsIss.Cells[$sr,1]
+        $statusCell.Style.Font.Bold = $true
+        switch ($r.MigrationStatus) {
+            'SP: Blocked'          { $statusCell.Style.Font.Color.SetColor($xlRed)    }
+            'SP: Ready (Warnings)' { $statusCell.Style.Font.Color.SetColor($xlOrange) }
+            default                { $statusCell.Style.Font.Color.SetColor($xlGreen)  }
         }
-    }
-
-    # ── Conditional formatting: over-limit path lengths ──────────
-    foreach ($entry in @(
-        @{ Col='WindowsFullPathLength';       Limit=$script:Config.MaxWindowsLegacyPathLength     }
-        @{ Col='DecodedSharePointPathLength'; Limit=$script:Config.MaxDecodedSharePointPathLength }
-        @{ Col='DecodedSharePointPathLength'; Limit=$script:Config.MaxDecodedSharePointPathLength }
-    )) {
-        if ($colMap[$entry.Col]) {
-            $col = ColLetter $colMap[$entry.Col]
-            Add-ConditionalFormatting -Worksheet $wsIss `
-                -Address "${col}${dataStart}:${col}${lastRow}" `
-                -RuleType GreaterThan -ConditionValue $entry.Limit `
-                -ForeGroundColor $xlRed -Bold
+        # Colour Severity cell
+        $sevCell = $wsIss.Cells[$sr,3]
+        $sevCell.Style.Font.Bold = $true
+        switch ($r.Severity) {
+            'Blocking' { $sevCell.Style.Font.Color.SetColor($xlRed)    }
+            'Warning'  { $sevCell.Style.Font.Color.SetColor($xlOrange) }
         }
-    }
-
-    # ── Column widths (Issues sheet) ────────────────────────────
-    $colWidths = @{
-        'Severity'                    = 11
-        'ItemType'                    = 9
-        'Name'                        = 36
-        'RelativePath'                = 60
-        'FullPath'                    = 70
-        'WindowsFullPathLength'       = 14
-        'DecodedSharePointPathLength' = 14
-        'FolderDepth'                 = 11
-        'IssueCount'                  = 9
-        'IssueSummary'                = 55
-
-        'IssueDetails'                = 90
-
-        'RecommendedActions'          = 80
-    }
-    foreach ($kv in $colWidths.GetEnumerator()) {
-        if ($colMap[$kv.Key]) {
-            $wsIss.Column($colMap[$kv.Key]).Width = $kv.Value
+        # Conditional: SP path length red if over limit
+        if ($r.DecodedSharePointPathLength -gt $script:Config.MaxDecodedSharePointPathLength) {
+            $wsIss.Cells[$sr,7].Style.Font.Color.SetColor($xlRed)
+            $wsIss.Cells[$sr,7].Style.Font.Bold = $true
         }
-    }
-
-    # Wrap text for multi-line columns
-    foreach ($wrapCol in @('IssueSummary','IssueDetails','RecommendedActions')) {
-        if ($colMap[$wrapCol]) {
-            $col = ColLetter $colMap[$wrapCol]
-            $wsIss.Cells["${col}${dataStart}:${col}${lastRow}"].Style.WrapText = $true
+        if ($r.WindowsFullPathLength -gt $script:Config.MaxWindowsLegacyPathLength) {
+            $wsIss.Cells[$sr,8].Style.Font.Color.SetColor($xlOrange)
+            $wsIss.Cells[$sr,8].Style.Font.Bold = $true
         }
+        $wsIss.Row($sr).Height = 15
+        $sr++
     }
 
-    # Freeze header row
-    $wsIss.View.FreezePanes($dataStart, 1)
+    # ── Auto row height for wrapping text rows ────────────────────
+    # Set taller rows for the detail columns
+    for ($r2 = $dataStartRow; $r2 -lt $sr; $r2++) {
+        $wsIss.Row($r2).Height = 60
+    }
+
+    # ── AutoFilter on header row (sort + filter dropdowns on all 13 columns) ───
+    $lastDataRow  = $sr - 1
+    $filterRange  = "A$($dataStartRow-1):M${lastDataRow}"
+    $wsIss.Cells[$filterRange].AutoFilter = $true
+
+    # ── Freeze panes: rows above data + first 3 status columns ────────────────
+    $wsIss.View.FreezePanes($dataStartRow, 4)
 
     # ══════════════════════════════════════════════════════════
     #  SHEET 3 — LIMITS & INFO
@@ -783,6 +893,7 @@ function Export-AnalysisReport {
     $wsInfo.Column(3).Width = 52
 
     # ── Sheet order: Dashboard first ────────────────────────────
+    $pkg.Workbook.Worksheets.MoveToStart("Limits and Rules")
     $pkg.Workbook.Worksheets.MoveToStart("Issues")
     $pkg.Workbook.Worksheets.MoveToStart("Dashboard")
 
@@ -792,35 +903,61 @@ function Export-AnalysisReport {
 }
 
 # ==============================================================
-#  GUI - FLUENT 2 / M365 COLOUR TOKENS
+#  GUI - DESIGN TOKENS
 # ==============================================================
 
 function hex ([string]$h) { [System.Drawing.ColorTranslator]::FromHtml($h) }
 
-$clrAppBg        = hex '#f3f2f1'
+# Neutrals
+$clrAppBg        = hex '#f0f2f5'
 $clrSurface      = hex '#ffffff'
-$clrSurfaceAlt   = hex '#faf9f8'
-$clrBorder       = hex '#edebe9'
-$clrBorderInput  = hex '#c8c6c4'
-$clrText         = hex '#323130'
-$clrTextSub      = hex '#605e5c'
-$clrTextDisabled = hex '#a19f9d'
+$clrSurfaceAlt   = hex '#f8f9fa'
+$clrSurfaceHover = hex '#f3f4f6'
+$clrBorder       = hex '#e1e4e8'
+$clrBorderInput  = hex '#d0d7de'
+$clrBorderFocus  = hex '#0078d4'
+# Text
+$clrText         = hex '#1a1a2e'
+$clrTextSub      = hex '#57606a'
+$clrTextDisabled = hex '#8c959f'
+# Accent (Microsoft Blue)
 $clrAccent       = hex '#0078d4'
-$clrAccentHover  = hex '#106ebe'
-$clrAccentLight  = hex '#deecf9'
+$clrAccentDark   = hex '#005a9e'
+$clrAccentLight  = hex '#e8f4fd'
+$clrAccentMid    = hex '#b3d7f5'
 $clrOnAccent     = hex '#ffffff'
-$clrSuccess      = hex '#107c10'
-$clrWarning      = hex '#d83b01'
-$clrError        = hex '#a4262c'
+# Semantic
+$clrSuccess      = hex '#1a7f37'
+$clrSuccessBg    = hex '#dafbe1'
+$clrWarning      = hex '#bf4b08'
+$clrWarningBg    = hex '#fff8e1'
+$clrError        = hex '#cf222e'
+$clrErrorBg      = hex '#ffebe9'
+# Category colours for rules panel
+$clrCatPath      = hex '#e8f4fd'
+$clrCatName      = hex '#f0f8e8'
+$clrCatChar      = hex '#fff4e8'
+$clrCatFile      = hex '#f5e8ff'
+$clrCatPathBdr   = hex '#b3d7f5'
+$clrCatNameBdr   = hex '#b8e0a0'
+$clrCatCharBdr   = hex '#f5c87a'
+$clrCatFileBdr   = hex '#d4a8f0'
+$clrCatPathTxt   = hex '#005a9e'
+$clrCatNameTxt   = hex '#2d6a0a'
+$clrCatCharTxt   = hex '#7d4200'
+$clrCatFileTxt   = hex '#5a1e8c'
 
 # ==============================================================
 #  GUI - TYPOGRAPHY
 # ==============================================================
 
+$fntH1      = New-Object System.Drawing.Font("Segoe UI", 13, [System.Drawing.FontStyle]::Bold)
 $fntH2      = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$fntH3      = New-Object System.Drawing.Font("Segoe UI",  9, [System.Drawing.FontStyle]::Bold)
 $fntBody    = New-Object System.Drawing.Font("Segoe UI",  9, [System.Drawing.FontStyle]::Regular)
 $fntBold    = New-Object System.Drawing.Font("Segoe UI",  9, [System.Drawing.FontStyle]::Bold)
 $fntSmall   = New-Object System.Drawing.Font("Segoe UI",  8, [System.Drawing.FontStyle]::Regular)
+$fntSmallB  = New-Object System.Drawing.Font("Segoe UI",  8, [System.Drawing.FontStyle]::Bold)
 $fntCaption = New-Object System.Drawing.Font("Segoe UI",  7, [System.Drawing.FontStyle]::Bold)
 $fntMono    = New-Object System.Drawing.Font("Consolas",  8, [System.Drawing.FontStyle]::Regular)
 
@@ -834,18 +971,18 @@ function New-FLabel {
         [System.Drawing.Font]$Font   = $fntBody,
         [System.Drawing.Color]$Color = $clrTextSub
     )
-    $l            = New-Object System.Windows.Forms.Label
-    $l.Text       = $Text
-    $l.AutoSize   = $true
-    $l.Location   = New-Object System.Drawing.Point($X,$Y)
-    $l.Font       = $Font
-    $l.ForeColor  = $Color
-    $l.BackColor  = [System.Drawing.Color]::Transparent
+    $l           = New-Object System.Windows.Forms.Label
+    $l.Text      = $Text
+    $l.AutoSize  = $true
+    $l.Location  = New-Object System.Drawing.Point($X,$Y)
+    $l.Font      = $Font
+    $l.ForeColor = $Color
+    $l.BackColor = [System.Drawing.Color]::Transparent
     $l
 }
 
 function New-FTextBox {
-    param([int]$X,[int]$Y,[int]$W,[int]$H=28)
+    param([int]$X,[int]$Y,[int]$W,[int]$H=26)
     $t             = New-Object System.Windows.Forms.TextBox
     $t.Location    = New-Object System.Drawing.Point($X,$Y)
     $t.Size        = New-Object System.Drawing.Size($W,$H)
@@ -858,25 +995,25 @@ function New-FTextBox {
 
 function New-FButton {
     param([string]$Text,[int]$X,[int]$Y,[int]$W,[int]$H=30,[bool]$Primary=$false)
-    $b          = New-Object System.Windows.Forms.Button
-    $b.Text     = $Text
-    $b.Location = New-Object System.Drawing.Point($X,$Y)
-    $b.Size     = New-Object System.Drawing.Size($W,$H)
-    $b.Font     = $fntBold
-    $b.FlatStyle= 'Flat'
-    $b.Cursor   = [System.Windows.Forms.Cursors]::Hand
+    $b           = New-Object System.Windows.Forms.Button
+    $b.Text      = $Text
+    $b.Location  = New-Object System.Drawing.Point($X,$Y)
+    $b.Size      = New-Object System.Drawing.Size($W,$H)
+    $b.Font      = $fntBold
+    $b.FlatStyle = 'Flat'
+    $b.Cursor    = [System.Windows.Forms.Cursors]::Hand
     if ($Primary) {
-        $b.BackColor                    = $clrAccent
-        $b.ForeColor                    = $clrOnAccent
-        $b.FlatAppearance.BorderSize    = 0
-        $b.Add_MouseEnter({ $this.BackColor = $clrAccentHover })
+        $b.BackColor                  = $clrAccent
+        $b.ForeColor                  = $clrOnAccent
+        $b.FlatAppearance.BorderSize  = 0
+        $b.Add_MouseEnter({ $this.BackColor = $clrAccentDark })
         $b.Add_MouseLeave({ $this.BackColor = $clrAccent })
     } else {
-        $b.BackColor                    = $clrSurface
-        $b.ForeColor                    = $clrText
-        $b.FlatAppearance.BorderSize    = 1
-        $b.FlatAppearance.BorderColor   = $clrBorderInput
-        $b.Add_MouseEnter({ $this.BackColor = $clrSurfaceAlt })
+        $b.BackColor                  = $clrSurface
+        $b.ForeColor                  = $clrText
+        $b.FlatAppearance.BorderSize  = 1
+        $b.FlatAppearance.BorderColor = $clrBorderInput
+        $b.Add_MouseEnter({ $this.BackColor = $clrSurfaceHover })
         $b.Add_MouseLeave({ $this.BackColor = $clrSurface })
     }
     $b
@@ -892,87 +1029,156 @@ function New-HDivider {
 }
 
 # ==============================================================
+#  GUI - TOOLTIP
+# ==============================================================
+
+$tip                = New-Object System.Windows.Forms.ToolTip
+$tip.AutoPopDelay   = 9000
+$tip.InitialDelay   = 500
+$tip.ReshowDelay    = 200
+$tip.ShowAlways     = $true
+
+function Set-Tip ([System.Windows.Forms.Control]$ctrl,[string]$text) {
+    $tip.SetToolTip($ctrl, $text)
+}
+
+# ==============================================================
 #  GUI - MAIN FORM
 # ==============================================================
 
 $form                 = New-Object System.Windows.Forms.Form
 $form.Text            = "SharePoint Migration Analyzer"
 $form.StartPosition   = "CenterScreen"
-$form.Size            = New-Object System.Drawing.Size(880, 780)
-$form.MinimumSize     = New-Object System.Drawing.Size(880, 780)
+$form.Size            = New-Object System.Drawing.Size(960, 918)
+$form.MinimumSize     = New-Object System.Drawing.Size(960, 918)
 $form.MaximizeBox     = $false
 $form.BackColor       = $clrAppBg
 $form.ForeColor       = $clrText
 $form.Font            = $fntBody
 $form.FormBorderStyle = "FixedSingle"
 
-# Navigation bar
+# ── Navigation bar ────────────────────────────────────────────
 $pnlNav           = New-Object System.Windows.Forms.Panel
-$pnlNav.Size      = New-Object System.Drawing.Size(880, 56)
+$pnlNav.Size      = New-Object System.Drawing.Size(960, 64)
 $pnlNav.Location  = New-Object System.Drawing.Point(0, 0)
 $pnlNav.BackColor = $clrSurface
-
-# SP icon tile
-$pnlIcon           = New-Object System.Windows.Forms.Panel
-$pnlIcon.Size      = New-Object System.Drawing.Size(32, 32)
-$pnlIcon.Location  = New-Object System.Drawing.Point(16, 12)
-$pnlIcon.BackColor = $clrAccent
-$pnlIcon.Add_Paint({
+$pnlNav.add_Paint({
     param($s,$e)
-    $g   = $e.Graphics
-    $g.SmoothingMode        = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.TextRenderingHint    = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
-    $fnt = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $pen = New-Object System.Drawing.Pen($clrBorder, 1)
+    $e.Graphics.DrawLine($pen, 0, $s.Height-1, $s.Width, $s.Height-1)
+    $pen.Dispose()
+})
+
+# SP icon — rounded square with gradient
+$pnlIcon           = New-Object System.Windows.Forms.Panel
+$pnlIcon.Size      = New-Object System.Drawing.Size(40, 40)
+$pnlIcon.Location  = New-Object System.Drawing.Point(20, 12)
+$pnlIcon.BackColor = $clrAccent
+$pnlIcon.add_Paint({
+    param($s,$e)
+    $g  = $e.Graphics
+    $g.SmoothingMode     = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
+    # Gradient background
+    $rect = New-Object System.Drawing.Rectangle(0,0,$s.Width,$s.Height)
+    $grad = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
+        $rect,
+        (hex '#0091ff'),
+        (hex '#0050a0'),
+        [System.Drawing.Drawing2D.LinearGradientMode]::ForwardDiagonal
+    )
+    $g.FillRectangle($grad, $rect)
+    $grad.Dispose()
+    # SP text
+    $fnt = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
     $br  = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
     $sf  = New-Object System.Drawing.StringFormat
     $sf.Alignment     = [System.Drawing.StringAlignment]::Center
     $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
-    $g.DrawString("SP", $fnt, $br, (New-Object System.Drawing.RectangleF(0,0,32,32)), $sf)
+    $g.DrawString("SP", $fnt, $br, (New-Object System.Drawing.RectangleF(0,0,40,40)), $sf)
     $fnt.Dispose(); $br.Dispose(); $sf.Dispose()
 })
 
-$lblAppTitle = New-FLabel "SharePoint Migration Analyzer" 58 9  $fntH2    $clrText
-$lblAppSub   = New-FLabel "File server path compatibility check for SharePoint Online" 60 31 $fntSmall $clrTextSub
+$lblAppTitle = New-FLabel "SharePoint Migration Analyzer" 72 10 $fntH2 $clrText
+$lblAppSub   = New-FLabel "Analyzes file server folder structures for SharePoint Online / OneDrive migration compatibility" 72 34 $fntSmall $clrTextSub
 $pnlNav.Controls.AddRange(@($pnlIcon, $lblAppTitle, $lblAppSub))
 
 # Blue accent stripe
 $pnlStripe           = New-Object System.Windows.Forms.Panel
-$pnlStripe.Size      = New-Object System.Drawing.Size(880, 3)
-$pnlStripe.Location  = New-Object System.Drawing.Point(0, 56)
+$pnlStripe.Size      = New-Object System.Drawing.Size(960, 3)
+$pnlStripe.Location  = New-Object System.Drawing.Point(0, 64)
 $pnlStripe.BackColor = $clrAccent
 
-# Configuration card
+# ── Scan Configuration card ───────────────────────────────────
+# Layout:
+#   Y= 0   card border
+#   Y= 0   pnlCardHead (36px)
+#   Y= 48  Row 1 label
+#   Y= 64  Row 1 sub-label
+#   Y= 82  Row 1 textbox
+#   Y=118  Row 2 label
+#   Y=134  Row 2 sub-label
+#   Y=152  Row 2 textbox
+#   Y=190  Row 3 label
+#   Y=206  Row 3 sub-label
+#   Y=224  Row 3 textbox
+#   Y=262  Info banner (30px)
+#   total card height = 300
+
 $pnlCard           = New-Object System.Windows.Forms.Panel
-$pnlCard.Size      = New-Object System.Drawing.Size(840, 238)
-$pnlCard.Location  = New-Object System.Drawing.Point(20, 72)
+$pnlCard.Size      = New-Object System.Drawing.Size(900, 318)
+$pnlCard.Location  = New-Object System.Drawing.Point(20, 76)
 $pnlCard.BackColor = $clrSurface
 $pnlCard.add_Paint({
     param($s,$e)
-    $pen  = New-Object System.Drawing.Pen($clrBorder, 1)
-    $rect = New-Object System.Drawing.Rectangle(0, 0, ($s.Width-1), ($s.Height-1))
-    $e.Graphics.DrawRectangle($pen, $rect)
+    $g = $e.Graphics
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    # Shadow-like outer border
+    $pen1 = New-Object System.Drawing.Pen($clrBorder, 1)
+    $g.DrawRectangle($pen1, 0, 0, $s.Width-1, $s.Height-1)
+    $pen1.Dispose()
+    # Top accent line (3px inside card at top)
+    $pen2 = New-Object System.Drawing.Pen($clrAccent, 3)
+    $g.DrawLine($pen2, 0, 0, $s.Width, 0)
+    $pen2.Dispose()
+})
+
+# Card header
+$pnlCardHead           = New-Object System.Windows.Forms.Panel
+$pnlCardHead.Size      = New-Object System.Drawing.Size(900, 36)
+$pnlCardHead.Location  = New-Object System.Drawing.Point(0, 0)
+$pnlCardHead.BackColor = $clrAccentLight
+$pnlCardHead.add_Paint({
+    param($s,$e)
+    $pen = New-Object System.Drawing.Pen($clrAccentMid, 1)
+    $e.Graphics.DrawLine($pen, 0, $s.Height-1, $s.Width, $s.Height-1)
     $pen.Dispose()
 })
 
-$pnlCardHead           = New-Object System.Windows.Forms.Panel
-$pnlCardHead.Size      = New-Object System.Drawing.Size(840, 30)
-$pnlCardHead.Location  = New-Object System.Drawing.Point(0, 0)
-$pnlCardHead.BackColor = $clrAccentLight
-
-$lblCardTitle          = New-FLabel "  Scan Configuration" 0 7 $fntBold $clrAccent
-$lblCardTitle.AutoSize = $false
-$lblCardTitle.Size     = New-Object System.Drawing.Size(840, 20)
-$pnlCardHead.Controls.Add($lblCardTitle)
+$lblCardIcon          = New-FLabel "   [1]  Scan Configuration" 0 9 $fntBold $clrAccent
+$lblCardIcon.AutoSize = $false
+$lblCardIcon.Size     = New-Object System.Drawing.Size(500, 20)
+$lblCardHint          = New-FLabel "Enter paths below, then click Run Analysis" 510 11 $fntSmall $clrAccent
+$pnlCardHead.Controls.AddRange(@($lblCardIcon, $lblCardHint))
 
 # Row 1: Root folder
-$lblRoot = New-FLabel "File server root folder" 14 44 $fntBold $clrText
-$txtRoot = New-FTextBox 14 63 698
-$btnRoot = New-FButton "Browse..." 718 62 108 28
+$lblRoot           = New-FLabel "File server root folder" 16 44 $fntBold $clrText
+$lblRoot.AutoSize  = $false
+$lblRoot.Size      = New-Object System.Drawing.Size(600, 18)
+$lblRootSub            = New-FLabel "Top-level folder on the file server - all subfolders and files will be scanned recursively." 16 66 $fntSmall $clrTextSub
+$lblRootSub.AutoSize   = $false
+$lblRootSub.Size       = New-Object System.Drawing.Size(856, 14)
+$txtRoot    = New-FTextBox 16 88 756 26
+$btnRoot    = New-FButton "  Browse..." 780 87 104 28
 
 # Row 2: SharePoint URL
-$lblUrl      = New-FLabel "SharePoint library URL prefix" 14 102 $fntBold $clrText
-$txtUrl      = New-FTextBox 14 121 812
-$placeholder = "https://tenant.sharepoint.com/sites/YourSite/Shared%20Documents"
+$lblUrl           = New-FLabel "SharePoint Online / OneDrive library URL prefix" 16 124 $fntBold $clrText
+$lblUrl.AutoSize  = $false
+$lblUrl.Size      = New-Object System.Drawing.Size(700, 18)
+$lblUrlSub            = New-FLabel "Used to calculate the decoded SharePoint path length per item. Example: https://contoso.sharepoint.com/sites/IT/Shared%20Documents" 16 144 $fntSmall $clrTextSub
+$lblUrlSub.AutoSize   = $false
+$lblUrlSub.Size       = New-Object System.Drawing.Size(856, 14)
+$txtUrl      = New-FTextBox 16 164 868 26
 $txtUrl.Text      = $placeholder
 $txtUrl.ForeColor = $clrTextDisabled
 $txtUrl.Add_Enter({
@@ -986,62 +1192,130 @@ $txtUrl.Add_Leave({
 })
 
 # Row 3: Output file
-$lblOut = New-FLabel "Report output file (.xlsx)" 14 160 $fntBold $clrText
-$txtOut = New-FTextBox 14 179 698
-$btnOut = New-FButton "Browse..." 718 178 108 28
-
+$lblOut           = New-FLabel "Report output file (.xlsx)" 16 196 $fntBold $clrText
+$lblOut.AutoSize  = $false
+$lblOut.Size      = New-Object System.Drawing.Size(500, 18)
+$lblOutSub            = New-FLabel "Excel workbook with Dashboard, Issues list and Limits reference sheets. Existing file will be overwritten on re-scan." 16 216 $fntSmall $clrTextSub
+$lblOutSub.AutoSize   = $false
+$lblOutSub.Size       = New-Object System.Drawing.Size(856, 14)
+$txtOut    = New-FTextBox 16 232 756 26
+$btnOut    = New-FButton "  Browse..." 780 231 104 28
 # Info banner
 $pnlInfoBanner           = New-Object System.Windows.Forms.Panel
-$pnlInfoBanner.Size      = New-Object System.Drawing.Size(812, 22)
-$pnlInfoBanner.Location  = New-Object System.Drawing.Point(14, 213)
+$pnlInfoBanner.Size      = New-Object System.Drawing.Size(868, 30)
+$pnlInfoBanner.Location  = New-Object System.Drawing.Point(16, 278)
 $pnlInfoBanner.BackColor = $clrAccentLight
-
-$lblInfoText          = New-FLabel "  Checks: blocked chars (* : < > ? | ...), reserved names, _vti_ / ~$ prefixes, path lengths, Excel 218 limit, folder depth, temp files" 0 3 $fntSmall $clrAccent
+$pnlInfoBanner.add_Paint({
+    param($s,$e)
+    $pen = New-Object System.Drawing.Pen($clrAccentMid, 1)
+    $e.Graphics.DrawRectangle($pen, 0, 0, $s.Width-1, $s.Height-1)
+    $pen.Dispose()
+})
+$lblInfoText          = New-FLabel "  i   All 19 rules enabled by default. Use the Rules panel below to skip individual checks. [B] = Blocking (upload fails)   [W] = Warning (issues expected in use)" 0 7 $fntSmall $clrAccentDark
 $lblInfoText.AutoSize = $false
-$lblInfoText.Size     = New-Object System.Drawing.Size(812, 18)
+$lblInfoText.Size     = New-Object System.Drawing.Size(868, 18)
 $pnlInfoBanner.Controls.Add($lblInfoText)
 
 $pnlCard.Controls.AddRange(@(
     $pnlCardHead,
-    $lblRoot, $txtRoot, $btnRoot,
-    $lblUrl,  $txtUrl,
-    $lblOut,  $txtOut,  $btnOut,
+    $lblRoot, $lblRootSub, $txtRoot, $btnRoot,
+    $lblUrl,  $lblUrlSub,  $txtUrl,
+    $lblOut,  $lblOutSub,  $txtOut,  $btnOut,
     $pnlInfoBanner
 ))
 
-# Rules panel
+# ── Rules panel ───────────────────────────────────────────────
+# Layout inside panel (H=258):
+#   Y=  0  pnlRulesHead (42px)
+#   Y= 50  category headers row 1
+#   Y= 66  checkbox rows (3x @ 22px = 66px)
+#   Y=132  separator (14px)
+#   Y=146  category headers row 2
+#   Y=162  checkbox rows (3x @ 22px = 66px for chars+names, file rows fit in col2)
+#   Y=248  bottom padding
+
 $pnlRules           = New-Object System.Windows.Forms.Panel
-$pnlRules.Size      = New-Object System.Drawing.Size(840, 140)
-$pnlRules.Location  = New-Object System.Drawing.Point(20, 318)
+$pnlRules.Size      = New-Object System.Drawing.Size(900, 232)
+$pnlRules.Location  = New-Object System.Drawing.Point(20, 388)
 $pnlRules.BackColor = $clrSurface
 $pnlRules.add_Paint({
     param($s,$e)
-    $pen  = New-Object System.Drawing.Pen($clrBorder, 1)
-    $rect = New-Object System.Drawing.Rectangle(0, 0, ($s.Width-1), ($s.Height-1))
-    $e.Graphics.DrawRectangle($pen, $rect)
-    $pen.Dispose()
+    $g = $e.Graphics
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $pen1 = New-Object System.Drawing.Pen($clrBorder, 1)
+    $g.DrawRectangle($pen1, 0, 0, $s.Width-1, $s.Height-1)
+    $pen1.Dispose()
+    $pen2 = New-Object System.Drawing.Pen($clrWarning, 3)
+    $g.DrawLine($pen2, 0, 0, $s.Width, 0)
+    $pen2.Dispose()
 })
 
 $pnlRulesHead           = New-Object System.Windows.Forms.Panel
-$pnlRulesHead.Size      = New-Object System.Drawing.Size(840, 24)
+$pnlRulesHead.Size      = New-Object System.Drawing.Size(900, 42)
 $pnlRulesHead.Location  = New-Object System.Drawing.Point(0, 0)
-$pnlRulesHead.BackColor = $clrAccentLight
-
-$lblRulesTitle          = New-FLabel "  Active Rules  (uncheck to skip a check)" 0 5 $fntBold $clrAccent
+$pnlRulesHead.BackColor = $clrWarningBg
+$pnlRulesHead.add_Paint({
+    param($s,$e)
+    $pen = New-Object System.Drawing.Pen((hex '#f5d5b8'), 1)
+    $e.Graphics.DrawLine($pen, 0, $s.Height-1, $s.Width, $s.Height-1)
+    $pen.Dispose()
+})
+$lblRulesTitle          = New-FLabel "  [2]  Active Rules  -  Uncheck to skip individual checks before running the scan." 0 5 $fntBold $clrWarning
 $lblRulesTitle.AutoSize = $false
-$lblRulesTitle.Size     = New-Object System.Drawing.Size(840, 18)
-$pnlRulesHead.Controls.Add($lblRulesTitle)
+$lblRulesTitle.Size     = New-Object System.Drawing.Size(900, 18)
+$lblRulesSub            = New-FLabel "  [B] Blocking = item cannot be uploaded to SharePoint.     [W] Warning = upload succeeds but daily use may be affected." 0 24 $fntSmall $clrWarning
+$lblRulesSub.AutoSize   = $false
+$lblRulesSub.Size       = New-Object System.Drawing.Size(900, 16)
+$pnlRulesHead.Controls.AddRange(@($lblRulesTitle, $lblRulesSub))
 
-function New-RuleCheck ([string]$text,[int]$x,[int]$y,[string]$tag) {
+# ── Category card helper ──────────────────────────────────────
+function New-CatPanel ([int]$x,[int]$y,[int]$w,[int]$h,[string]$title,[System.Drawing.Color]$bg,[System.Drawing.Color]$bdr,[System.Drawing.Color]$fg) {
+    $p           = New-Object System.Windows.Forms.Panel
+    $p.Size      = New-Object System.Drawing.Size($w, $h)
+    $p.Location  = New-Object System.Drawing.Point($x, $y)
+    $p.BackColor = $bg
+    $p.Tag       = $bdr   # store border color in Tag - accessible in Paint handler via $s.Tag
+    $p.add_Paint({
+        param($s,$e)
+        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]$s.Tag, 1)
+        $e.Graphics.DrawRectangle($pen, 0, 0, $s.Width-1, $s.Height-1)
+        $pen.Dispose()
+    })
+    $lbl           = New-Object System.Windows.Forms.Label
+    $lbl.Text      = "  $title"
+    $lbl.Font      = $fntSmallB
+    $lbl.ForeColor = $fg
+    $lbl.BackColor = [System.Drawing.Color]::Transparent
+    $lbl.AutoSize  = $false
+    $lbl.Size      = New-Object System.Drawing.Size($w, 18)
+    $lbl.Location  = New-Object System.Drawing.Point(0, 3)
+    $p.Controls.Add($lbl)
+    $p
+}
+
+# Category headers - one wide header spans both columns of each group
+# Left half  X=8   W=440  covers col1(X=8)   + col2(X=232)  = path / chars+files
+# Right half X=456 W=436  covers col3(X=456)  + col4(X=680)  = name / prefix
+$catPath = New-CatPanel   8 50 440 22 "PATH LENGTH CHECKS"    $clrCatPath $clrCatPathBdr $clrCatPathTxt
+$catName = New-CatPanel 456 50 436 22 "NAME / PREFIX CHECKS"  $clrCatName $clrCatNameBdr $clrCatNameTxt
+
+# Divider between group 1 and 2
+
+# Row 2 headers - chars+files on left, name cont. on right
+$catChar = New-CatPanel   8 138 220 22 "CHARACTER CHECKS"         $clrCatChar $clrCatCharBdr $clrCatCharTxt
+$catFile = New-CatPanel 236 138 212 22 "FILE CHECKS"              $clrCatFile $clrCatFileBdr $clrCatFileTxt
+
+# ── Checkbox factory ──────────────────────────────────────────
+function New-RuleCheck ([string]$text,[int]$x,[int]$y,[string]$tag,[bool]$checked=$true) {
     $cb           = New-Object System.Windows.Forms.CheckBox
     $cb.Text      = $text
     $cb.Tag       = $tag
-    $cb.Checked   = $true
+    $cb.Checked   = $checked
     $cb.Font      = $fntSmall
     $cb.ForeColor = $clrText
     $cb.BackColor = [System.Drawing.Color]::Transparent
     $cb.AutoSize  = $false
-    $cb.Size      = New-Object System.Drawing.Size(196, 18)
+    $cb.Size      = New-Object System.Drawing.Size(216, 20)
     $cb.Location  = New-Object System.Drawing.Point($x, $y)
     $cb.FlatStyle = 'System'
     $cb.Add_CheckedChanged({
@@ -1051,141 +1325,157 @@ function New-RuleCheck ([string]$text,[int]$x,[int]$y,[string]$tag) {
     $cb
 }
 
-$cbPathSP   = New-RuleCheck "SP path >400 chars [B]"         8  32 'PATH-SP'
-$cbPathOD   = New-RuleCheck "OneDrive path >400 [B]"       208  32 'PATH-OD'
-$cbPathWin  = New-RuleCheck "Windows MAX_PATH [W]"          408  32 'PATH-WIN'
-$cbPathXL   = New-RuleCheck "Excel 218 limit [W]"           608  32 'PATH-XL'
-$cbPathOff  = New-RuleCheck "Office 259 limit [W]"            8  54 'PATH-OFF'
-$cbDepth    = New-RuleCheck "Folder depth >10 [W]"          208  54 'DEPTH'
-$cbFileSize = New-RuleCheck "File size >250 GB [B]"         408  54 'FILE-SIZE'
-$cbFileTemp = New-RuleCheck "Temp file extensions [W]"      608  54 'FILE-TEMP'
-$cbNameLen  = New-RuleCheck "Name >255 chars [B]"             8  76 'NAME-LEN'
-$cbNameTrim = New-RuleCheck "Lead/trail spaces [B]"         208  76 'NAME-TRIM'
-$cbNameDot  = New-RuleCheck "Lead/trail dot [B]"            408  76 'NAME-DOT'
-$cbTilde    = New-RuleCheck "~dollar lock prefix [B]"       608  76 'NAME-TILDE'
-$cbVti      = New-RuleCheck "_vti_ prefix [B]"                8  98 'NAME-VTI'
-$cbForms    = New-RuleCheck "forms folder [B]"              208  98 'NAME-FORMS'
-$cbReserved = New-RuleCheck "Reserved names [B]"            408  98 'NAME-RESERVED'
-$cbTildeF   = New-RuleCheck "Tilde folder prefix [B]"       608  98 'NAME-TILDE-FOLDER'
-$cbCharBlk  = New-RuleCheck "Blocked chars *:<>? [B]"         8 118 'CHAR-BLOCKED'
-$cbCharWarn = New-RuleCheck "Hash/percent chars [W]"        208 118 'CHAR-WARN'
-$cbSpaces   = New-RuleCheck "Spaces in names [W]"           408 118 'NAME-SPACES'
+# Col 1  X=8    Col 2  X=232    Col 3  X=456    Col 4  X=680
+# Row A  Y=74   Row B  Y=96     Row C  Y=118
+# Row D  Y=172  Row E  Y=194    Row F  Y=216
+
+# PATH LENGTH (col 1+2) — 3 rows at 20px spacing
+$cbPathSP   = New-RuleCheck "SharePoint path >400 ch. [B]"       8  74 'PATH-SP'   $true
+$cbPathOD   = New-RuleCheck "OneDrive sync path >400 [B]"        8  94 'PATH-OD'   $true
+$cbPathWin  = New-RuleCheck "Windows MAX_PATH >260 [W]"          8 114 'PATH-WIN'  $true
+$cbPathXL   = New-RuleCheck "Excel desktop >218 chars [W]"     232  74 'PATH-XL'   $true
+$cbPathOff  = New-RuleCheck "Office desktop >259 chars [W]"    232  94 'PATH-OFF'  $true
+$cbDepth    = New-RuleCheck "Folder nesting depth >10 [W]"     232 114 'DEPTH'     $true
+
+# NAME / PREFIX (col 3+4) — 8 items at 16px spacing, no gap between row1 and cont.
+$cbNameLen  = New-RuleCheck "Name segment >255 chars [B]"      456  74 'NAME-LEN'          $true
+$cbNameTrim = New-RuleCheck "Leading/trailing spaces [B]"      456  90 'NAME-TRIM'         $true
+$cbNameDot  = New-RuleCheck "Leading/trailing dot (.) [B]"     456 106 'NAME-DOT'          $true
+$cbForms    = New-RuleCheck "Folder 'forms' at root [B]"       456 122 'NAME-FORMS'        $true
+$cbTilde    = New-RuleCheck "~$ Office lock prefix [B]"        680  74 'NAME-TILDE'        $true
+$cbVti      = New-RuleCheck "_vti_ reserved prefix [B]"        680  90 'NAME-VTI'          $true
+$cbReserved = New-RuleCheck "Reserved names CON NUL [B]"       680 106 'NAME-RESERVED'     $true
+$cbTildeF   = New-RuleCheck "Tilde (~) folder prefix [B]"      680 122 'NAME-TILDE-FOLDER' $true
+
+# CHARACTERS (col 1+2) — below PATH rows, 20px spacing
+$cbCharBlk  = New-RuleCheck "Blocked chars * : < > ? [B]"       8 164 'CHAR-BLOCKED' $true
+$cbCharWarn = New-RuleCheck "Hash/percent (# %) [W]"             8 184 'CHAR-WARN'   $true
+$cbSpaces   = New-RuleCheck "Spaces in names [W]"              232 164 'NAME-SPACES' $true
+
+# FILES (col 1+2 continued)
+$cbFileSize = New-RuleCheck "File size exceeds 250 GB [B]"     232 184 'FILE-SIZE'   $true
+$cbFileTemp = New-RuleCheck "Temp files (.tmp .bak) [W]"       232 204 'FILE-TEMP'   $true
 
 $pnlRules.Controls.AddRange(@(
     $pnlRulesHead,
-    $cbPathSP,$cbPathOD,$cbPathWin,$cbPathXL,
-    $cbPathOff,$cbDepth,$cbFileSize,$cbFileTemp,
-    $cbNameLen,$cbNameTrim,$cbNameDot,$cbTilde,
-    $cbVti,$cbForms,$cbReserved,$cbTildeF,
-    $cbCharBlk,$cbCharWarn,$cbSpaces
+    $catPath,$catName,
+    $cbPathSP,$cbPathOD,$cbPathWin,$cbPathXL,$cbPathOff,$cbDepth,
+    $cbNameLen,$cbNameTrim,$cbNameDot,$cbTilde,$cbVti,$cbForms,
+    $catChar,$catFile,
+    $cbCharBlk,$cbCharWarn,$cbSpaces,
+    $cbFileSize,$cbFileTemp,
+    $cbReserved,$cbTildeF
 ))
 
-
-# Action row
+# ── Action row ────────────────────────────────────────────────
 $pnlActions           = New-Object System.Windows.Forms.Panel
-$pnlActions.Size      = New-Object System.Drawing.Size(840, 46)
-$pnlActions.Location  = New-Object System.Drawing.Point(20, 465)
+$pnlActions.Size      = New-Object System.Drawing.Size(900, 50)
+$pnlActions.Location  = New-Object System.Drawing.Point(20, 628)
 $pnlActions.BackColor = $clrAppBg
 
-$btnRun    = New-FButton "> Run Analysis" 0   8 154 30 $true
-$btnCancel = New-FButton "x Cancel"       162 8 106 30
+$btnRun    = New-FButton "  Run Analysis" 0   10 160 32 $true
+$btnCancel = New-FButton "  Cancel"       168 10 110 32
 $btnCancel.Enabled   = $false
 $btnCancel.ForeColor = $clrTextDisabled
 $btnCancel.FlatAppearance.BorderColor = $clrBorder
 
 # Stat chips
-function New-StatChip ([string]$label,[int]$x,[System.Drawing.Color]$dotColor) {
+function New-StatChip ([string]$label,[int]$x,[System.Drawing.Color]$dotColor,[System.Drawing.Color]$bg) {
     $panel           = New-Object System.Windows.Forms.Panel
-    $panel.Size      = New-Object System.Drawing.Size(138, 30)
-    $panel.Location  = New-Object System.Drawing.Point($x, 8)
-    $panel.BackColor = $clrSurface
+    $panel.Size      = New-Object System.Drawing.Size(152, 32)
+    $panel.Location  = New-Object System.Drawing.Point($x, 9)
+    $panel.BackColor = $bg
+    $panel.Tag       = $dotColor   # store border color in Tag - accessible in Paint handler via $s.Tag
     $panel.add_Paint({
         param($s,$e)
-        $pen = New-Object System.Drawing.Pen($clrBorder,1)
-        $e.Graphics.DrawRectangle($pen,0,0,$s.Width-1,$s.Height-1)
+        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]$s.Tag, 1)
+        $e.Graphics.DrawRectangle($pen, 0, 0, $s.Width-1, $s.Height-1)
         $pen.Dispose()
     })
     $dot           = New-Object System.Windows.Forms.Panel
-    $dot.Size      = New-Object System.Drawing.Size(8,8)
-    $dot.Location  = New-Object System.Drawing.Point(10,11)
+    $dot.Size      = New-Object System.Drawing.Size(8, 8)
+    $dot.Location  = New-Object System.Drawing.Point(10, 12)
     $dot.BackColor = $dotColor
     $lbl           = New-Object System.Windows.Forms.Label
     $lbl.Text      = $label
-    $lbl.Font      = $fntSmall
+    $lbl.Font      = $fntSmallB
     $lbl.ForeColor = $clrText
     $lbl.BackColor = [System.Drawing.Color]::Transparent
     $lbl.AutoSize  = $false
-    $lbl.Size      = New-Object System.Drawing.Size(116,28)
-    $lbl.Location  = New-Object System.Drawing.Point(22,0)
+    $lbl.Size      = New-Object System.Drawing.Size(130, 30)
+    $lbl.Location  = New-Object System.Drawing.Point(24, 0)
     $lbl.TextAlign = "MiddleLeft"
     $panel.Controls.AddRange(@($dot,$lbl))
     @{ Panel=$panel; Label=$lbl }
 }
 
-$chipScanned  = New-StatChip "Scanned: -"  430 $clrTextSub
-$chipIssues   = New-StatChip "Issues: -"   576 $clrWarning
-$chipBlocking = New-StatChip "Blocking: -" 722 $clrError
+$chipScanned  = New-StatChip "Scanned: -"   440 $clrBorderInput $clrSurface
+$chipIssues   = New-StatChip "Issues: -"    600 $clrWarning     $clrWarningBg
+$chipBlocking = New-StatChip "Blocking: -"  760 $clrError       $clrErrorBg
 
 $pnlActions.Controls.AddRange(@(
     $btnRun, $btnCancel,
     $chipScanned.Panel, $chipIssues.Panel, $chipBlocking.Panel
 ))
 
-# Progress area
+# ── Progress area ─────────────────────────────────────────────
 $pnlProgressArea           = New-Object System.Windows.Forms.Panel
-$pnlProgressArea.Size      = New-Object System.Drawing.Size(840, 38)
-$pnlProgressArea.Location  = New-Object System.Drawing.Point(20, 517)
+$pnlProgressArea.Size      = New-Object System.Drawing.Size(900, 42)
+$pnlProgressArea.Location  = New-Object System.Drawing.Point(20, 684)
 $pnlProgressArea.BackColor = $clrAppBg
 
 $progress          = New-Object System.Windows.Forms.ProgressBar
 $progress.Location = New-Object System.Drawing.Point(0, 0)
-$progress.Size     = New-Object System.Drawing.Size(840, 10)
+$progress.Size     = New-Object System.Drawing.Size(900, 8)
 $progress.Style    = 'Continuous'
 $progress.Minimum  = 0
 $progress.Maximum  = 1000
 $progress.BackColor= $clrBorder
 $progress.ForeColor= $clrAccent
 
-$lblProgressText          = New-FLabel "Ready - select a folder and click Run Analysis." 0 14 $fntSmall $clrTextSub
+$lblProgressText          = New-FLabel "Ready - select a folder and click Run Analysis." 0 12 $fntSmall $clrTextSub
 $lblProgressText.AutoSize = $false
-$lblProgressText.Size     = New-Object System.Drawing.Size(840, 18)
-
+$lblProgressText.Size     = New-Object System.Drawing.Size(900, 18)
 $pnlProgressArea.Controls.AddRange(@($progress, $lblProgressText))
 
-# Divider
-$div2 = New-HDivider 20 561 840
+# ── Divider ───────────────────────────────────────────────────
+$div2 = New-HDivider 20 730 900
 
-# Log panel
+# ── Activity Log panel ────────────────────────────────────────
 $pnlLog           = New-Object System.Windows.Forms.Panel
-$pnlLog.Size      = New-Object System.Drawing.Size(840, 168)
-$pnlLog.Location  = New-Object System.Drawing.Point(20, 565)
+$pnlLog.Size      = New-Object System.Drawing.Size(900, 148)
+$pnlLog.Location  = New-Object System.Drawing.Point(20, 734)
 $pnlLog.BackColor = $clrSurface
 $pnlLog.add_Paint({
     param($s,$e)
-    $pen = New-Object System.Drawing.Pen($clrBorder,1)
-    $e.Graphics.DrawRectangle($pen,0,0,$s.Width-1,$s.Height-1)
-    $pen.Dispose()
+    $g = $e.Graphics
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $pen1 = New-Object System.Drawing.Pen($clrBorder, 1)
+    $g.DrawRectangle($pen1, 0, 0, $s.Width-1, $s.Height-1)
+    $pen1.Dispose()
+    $pen2 = New-Object System.Drawing.Pen($clrSuccess, 3)
+    $g.DrawLine($pen2, 0, 0, $s.Width, 0)
+    $pen2.Dispose()
 })
 
 $pnlLogHead           = New-Object System.Windows.Forms.Panel
-$pnlLogHead.Size      = New-Object System.Drawing.Size(840, 24)
+$pnlLogHead.Size      = New-Object System.Drawing.Size(900, 26)
 $pnlLogHead.Location  = New-Object System.Drawing.Point(0, 0)
-$pnlLogHead.BackColor = $clrSurfaceAlt
+$pnlLogHead.BackColor = $clrSuccessBg
 $pnlLogHead.add_Paint({
     param($s,$e)
-    $pen = New-Object System.Drawing.Pen($clrBorder,1)
-    $e.Graphics.DrawLine($pen,0,$s.Height-1,$s.Width,$s.Height-1)
+    $pen = New-Object System.Drawing.Pen((hex '#a0ddb0'), 1)
+    $e.Graphics.DrawLine($pen, 0, $s.Height-1, $s.Width, $s.Height-1)
     $pen.Dispose()
 })
-
-$lblLogHead          = New-FLabel "  Activity Log" 0 5 $fntCaption $clrTextSub
+$lblLogHead          = New-FLabel "  [3]  Activity Log" 0 5 $fntBold $clrSuccess
 $lblLogHead.AutoSize = $false
-$lblLogHead.Size     = New-Object System.Drawing.Size(840,18)
+$lblLogHead.Size     = New-Object System.Drawing.Size(900, 18)
 $pnlLogHead.Controls.Add($lblLogHead)
 
 $rtLog             = New-Object System.Windows.Forms.RichTextBox
-$rtLog.Location    = New-Object System.Drawing.Point(1, 25)
-$rtLog.Size        = New-Object System.Drawing.Size(838, 142)
+$rtLog.Location    = New-Object System.Drawing.Point(1, 28)
+$rtLog.Size        = New-Object System.Drawing.Size(898, 118)
 $rtLog.BackColor   = $clrSurface
 $rtLog.ForeColor   = $clrText
 $rtLog.Font        = $fntMono
@@ -1193,24 +1483,25 @@ $rtLog.ReadOnly    = $true
 $rtLog.BorderStyle = 'None'
 $rtLog.ScrollBars  = 'Vertical'
 $rtLog.WordWrap    = $false
-
 $pnlLog.Controls.AddRange(@($pnlLogHead, $rtLog))
 
-# Status bar
+# ── Status bar ────────────────────────────────────────────────
 $pnlStatusBar           = New-Object System.Windows.Forms.Panel
 $pnlStatusBar.Dock      = 'Bottom'
-$pnlStatusBar.Size      = New-Object System.Drawing.Size(880, 24)
+$pnlStatusBar.Size      = New-Object System.Drawing.Size(960, 26)
 $pnlStatusBar.BackColor = $clrSurface
 $pnlStatusBar.add_Paint({
     param($s,$e)
-    $pen = New-Object System.Drawing.Pen($clrBorder,1)
-    $e.Graphics.DrawLine($pen,0,0,$s.Width,0)
+    $pen = New-Object System.Drawing.Pen($clrBorder, 1)
+    $e.Graphics.DrawLine($pen, 0, 0, $s.Width, 0)
     $pen.Dispose()
 })
-$lblStatus = New-FLabel "Ready" 10 4 $fntSmall $clrTextSub
+$lblStatus = New-FLabel "  Ready" 0 5 $fntSmall $clrTextSub
+$lblStatus.AutoSize = $false
+$lblStatus.Size     = New-Object System.Drawing.Size(700, 18)
 $pnlStatusBar.Controls.Add($lblStatus)
 
-# Assemble form
+# ── Assemble form ─────────────────────────────────────────────
 $form.Controls.AddRange(@(
     $pnlNav, $pnlStripe,
     $pnlCard,
@@ -1221,6 +1512,37 @@ $form.Controls.AddRange(@(
     $pnlLog,
     $pnlStatusBar
 ))
+
+# ==============================================================
+#  GUI - TOOLTIPS
+# ==============================================================
+
+Set-Tip $txtRoot   "Enter or browse to the root folder on the file server. All subfolders and files will be scanned recursively."
+Set-Tip $btnRoot   "Open folder browser to select the file server root folder."
+Set-Tip $txtUrl    "Enter the full SharePoint Online library URL including the document library path. Used to calculate the decoded SharePoint path length for each item. Example: https://contoso.sharepoint.com/sites/IT/Shared%20Documents"
+Set-Tip $txtOut    "Enter or browse to the output path for the Excel report (.xlsx). If the file already exists it will be overwritten."
+Set-Tip $btnOut    "Open save dialog to choose the Excel report output file location."
+Set-Tip $btnRun    "Start the migration readiness scan. All files and folders under the root folder will be checked against the active rules."
+Set-Tip $btnCancel "Cancel the running scan. Items already scanned will appear in the report."
+Set-Tip $cbPathSP   "PATH-SP [Blocking] SharePoint Online hard limit: 400 chars for the decoded server-relative path (library base + folders + filename). Items exceeding this cannot be uploaded."
+Set-Tip $cbPathOD   "PATH-OD [Blocking] OneDrive sync client limit: 400 chars relative path. The local OneDrive root folder adds 80-120 chars on top - items may sync-fail even if under SP limit."
+Set-Tip $cbPathWin  "PATH-WIN [Warning] Windows legacy MAX_PATH: 260 chars. Apps without long-path awareness fail above this. Mitigable via LongPathsEnabled registry key (Win10 1607+)."
+Set-Tip $cbPathXL   "PATH-XL [Warning] Excel Win32 hard limit: 218 chars (KB 325573). Cannot be changed. Applies when files are opened from a synced OneDrive folder."
+Set-Tip $cbPathOff  "PATH-OFF [Warning] Word / PowerPoint / Access Win32 limit: 259 chars (KB 325573). Applies when opening synced files from a local OneDrive or mapped SharePoint folder."
+Set-Tip $cbDepth    "DEPTH [Warning] Microsoft recommends max 10 folder levels. Deeper nesting increases path-length risk, reduces usability and degrades SharePoint search performance."
+Set-Tip $cbNameLen  "NAME-LEN [Blocking] Each individual name segment is limited to 255 chars in SharePoint Online. Items exceeding this cannot be created or synced."
+Set-Tip $cbNameTrim "NAME-TRIM [Blocking] SharePoint silently strips leading/trailing spaces during upload, causing name mismatches and sync conflicts."
+Set-Tip $cbNameDot  "NAME-DOT [Blocking] SharePoint does not support names beginning or ending with a dot. Items like .gitignore or folder. cannot be uploaded."
+Set-Tip $cbTilde    "NAME-TILDE [Blocking] Names starting with ~$ are Office temporary lock files (created while a document is open). These are blocked by OneDrive and SharePoint."
+Set-Tip $cbVti      "NAME-VTI [Blocking] Names starting with _vti_ are reserved for SharePoint internal system use and are blocked in all SharePoint versions."
+Set-Tip $cbForms    "NAME-FORMS [Blocking] SharePoint uses a forms folder internally at root of every library. A user folder with this name at root level conflicts with SharePoint internals."
+Set-Tip $cbCharBlk  "CHAR-BLOCKED [Blocking] Characters not allowed in SharePoint / OneDrive names: `" * : < > ? / \ |. Items containing these cannot be uploaded."
+Set-Tip $cbCharWarn "CHAR-WARN [Warning] # and % are officially supported in SharePoint Online since 2017 but cause problems with older Office desktop apps (pre-2016) and some migration tools."
+Set-Tip $cbSpaces   "NAME-SPACES [Warning] Spaces are encoded as %20 in URLs (+2 chars each). Paths that look short can exceed limits when encoded. Best practice: use underscores or hyphens."
+Set-Tip $cbFileSize "FILE-SIZE [Blocking] SharePoint Online and OneDrive max single-file upload size: 250 GB. Files exceeding this cannot be uploaded by any method."
+Set-Tip $cbFileTemp "FILE-TEMP [Warning] Temp/system files (.tmp .bak .temp .ds_store .thumbs.db) have no business value in SharePoint. Some are silently dropped or blocked by OneDrive."
+Set-Tip $cbReserved "NAME-RESERVED [Blocking] Windows device names (CON PRN AUX NUL COM0-9 LPT0-9) and system files (desktop.ini .lock) cannot be used as file or folder names."
+Set-Tip $cbTildeF   "NAME-TILDE-FOLDER [Blocking] SharePoint does not allow folder names beginning with a tilde (~) character."
 
 # ==============================================================
 #  GUI - LOG & STATUS HELPERS
