@@ -1,5 +1,6 @@
 #Requires -Version 5.1
-#Requires -PSEdition Desktop
+# PS edition check is done at runtime (see below) - no #Requires directive so the
+# script can be launched from pwsh/Core terminals while still targeting PS 5.1 Desktop.
 # NOTE: Module requirements are handled at runtime by Install-BWSDependencies
 #       to allow automatic installation of missing modules with visual progress.
 
@@ -28,6 +29,10 @@
     Show all found Intune policies (debug mode)
 .PARAMETER CompactView
     Show only summary without detailed tables
+.PARAMETER Full
+    Run module installation/import and login checks first, then run all selected
+    checks. Without -Full (or without clicking "Prerequisites" in the GUI),
+    only the checks themselves are executed - no module setup, no login checks.
 .PARAMETER GUI
     Launch graphical user interface
 .PARAMETER RunAnalyzer
@@ -112,9 +117,42 @@ param(
     [switch]$RunAnalyzer,
 
     [Parameter(Mandatory=$false,
+               HelpMessage="Check, install and display all required PowerShell modules without running any checks.")]
+    [switch]$Full,
+
+    [Parameter(Mandatory=$false,
                HelpMessage="Run built-in Pester-style unit tests before executing checks.")]
-    [switch]$RunTests
+    [switch]$RunTests,
+
+    [Parameter(Mandatory=$false,
+               HelpMessage="Show diagnostics: logged-in user, tenant, subscription, module versions, PS version.")]
+    [switch]$Diagnostics
 )
+
+# Runtime PS edition / version guard
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    Write-Warning "This script is designed for Windows PowerShell 5.1 (Desktop edition)."
+    Write-Warning "You are running PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))."
+    Write-Warning "SharePoint checks require the Desktop edition and will be skipped automatically."
+    Write-Warning "All other checks will continue."
+    Write-Host ""
+}
+if ($PSVersionTable.PSVersion.Major -lt 5 -or
+    ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -lt 1)) {
+    if ($GUI) {
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.MessageBox]::Show(
+            "PowerShell 5.1 or higher is required.`nCurrent: $($PSVersionTable.PSVersion)",
+            "BWS Checking Script - Version Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    } else {
+        Write-Host "[X] PowerShell 5.1 or higher is required. Current: $($PSVersionTable.PSVersion)" -ForegroundColor Red
+    }
+    exit 1
+}
+
 
 # Script Version
 $script:Version = "2.3.0"
@@ -128,12 +166,7 @@ $script:Version = "2.3.0"
 # (e.g. from a previous script run). Microsoft.Graph SDK v2.x cannot load in PS 5.1
 # and causes a GetTokenAsync / .NET Framework incompatibility error if left in session.
 $null = Get-Module -Name 'Microsoft.Graph*' -ErrorAction SilentlyContinue |
-        Remove-Module -Force -ErrorAction SilentlyContinue catches:
-#   - Uninitialised variable access
-#   - Calling properties on $null
-#   - Out-of-bounds array indexing
-#   - Calling non-existent members
-Set-StrictMode -Version Latest
+        Remove-Module -Force -ErrorAction SilentlyContinue
 
 #============================================================================
 # QUALITY ASSURANCE - Block 2: Self-Syntax Check
@@ -247,18 +280,25 @@ if ($psVersion -ge 7 -or $psEdition -eq "Core") {
     Write-Host "======================================================" -ForegroundColor Yellow
     Write-Host ""
     
-    # Frage ob fortfahren
+    # In GUI mode: auto-disable SharePoint (no Read-Host possible without console)
+    # In console mode: ask user
     if (-not $SkipSharePoint) {
-        $continue = Read-Host "Trotzdem fortfahren? SharePoint-Check wird fehlschlagen. (J/N)"
-        if ($continue -ne "J" -and $continue -ne "j" -and $continue -ne "Y" -and $continue -ne "y") {
+        if ($GUI) {
+            $script:SkipSharePoint = $true
+            $SkipSharePoint        = $true
+            Write-Host "SharePoint-Check automatisch deaktiviert (PS Core + GUI-Modus)." -ForegroundColor Yellow
+        } else {
+            $continue = Read-Host "Trotzdem fortfahren? SharePoint-Check wird fehlschlagen. (J/N)"
+            if ($continue -ne "J" -and $continue -ne "j" -and $continue -ne "Y" -and $continue -ne "y") {
+                Write-Host ""
+                Write-Host "Script abgebrochen. Bitte verwenden Sie PowerShell 5.1." -ForegroundColor Yellow
+                Write-Host ""
+                exit
+            }
             Write-Host ""
-            Write-Host "Script abgebrochen. Bitte verwenden Sie PowerShell 5.1." -ForegroundColor Yellow
+            Write-Host "Fahre fort ohne SharePoint-Check Unterstuetzung..." -ForegroundColor Yellow
             Write-Host ""
-            exit
         }
-        Write-Host ""
-        Write-Host "Fahre fort ohne SharePoint-Check Unterstuetzung..." -ForegroundColor Yellow
-        Write-Host ""
     }
 }
 
@@ -269,20 +309,44 @@ if ($psVersion -ge 7 -or $psEdition -eq "Core") {
 #============================================================================
 
 $script:RequiredModules = @(
-    # MaxVersion="" = no upper bound.
-    # Microsoft.Graph.Authentication is pinned to v1.x (MaxVersion="1.99.99"):
-    #   Graph SDK v2.x requires .NET 6+ and will NOT load in PS 5.1 on .NET Framework 4.x.
-    #   v1.x uses Invoke-BWsGraphRequest for all API calls (v1.0 and /beta/ endpoints).
-    #   Sub-modules (DeviceManagement, Users etc.) are NOT needed - all calls go through
-    #   Invoke-BWsGraphRequest REST calls which only require Authentication.
-    @{ Name="Az.Accounts";                           MinVersion="2.0.0";  MaxVersion="";       Description="Azure Authentication";        Scope="CurrentUser"; Required=$true;  SkipParam="" },
-    @{ Name="Az.Resources";                          MinVersion="1.0.0";  MaxVersion="";       Description="Azure Resource Management";   Scope="CurrentUser"; Required=$true;  SkipParam="" },
-    @{ Name="Az.Storage";                            MinVersion="3.0.0";  MaxVersion="";       Description="Azure Storage (Defender)";    Scope="CurrentUser"; Required=$false; SkipParam="SkipDefender" },
-    # Microsoft.Graph.Authentication is NOT required - we use Az.Accounts token + Invoke-RestMethod.
-    # This avoids ALL Graph SDK version conflicts with PS 5.1 / .NET Framework 4.x.
-    @{ Name="Microsoft.Online.SharePoint.PowerShell";MinVersion="16.0.0"; MaxVersion="";       Description="SharePoint Online Admin";     Scope="CurrentUser"; Required=$false; SkipParam="SkipSharePoint" },
-    @{ Name="MicrosoftTeams";                        MinVersion="4.0.0";  MaxVersion="";       Description="Microsoft Teams Admin";       Scope="CurrentUser"; Required=$false; SkipParam="SkipTeams" },
-    @{ Name="PSScriptAnalyzer";                      MinVersion="1.20.0"; MaxVersion="";       Description="PS Static Code Analysis";     Scope="CurrentUser"; Required=$false; SkipParam="" }
+    #
+    # COMPATIBILITY NOTE - PS 5.1 / .NET Framework 4.x
+    # -------------------------------------------------
+    # Az.Resources v9+ and Microsoft.Graph SDK v2+ require .NET 5/6+ and cannot
+    # be imported in Windows PowerShell 5.1. They are therefore:
+    #   * Listed below as "Informational" (Required=$false, SkipParam="AlwaysSkip")
+    #     so they appear in the prerequisites table with their installed version.
+    #   * NOT imported: their functionality is provided by direct REST calls via
+    #     Invoke-AzRestMethod (Az.Accounts) and Invoke-BWsGraphPagedRequest.
+    # Graph Beta APIs use the same REST pattern against /beta/ endpoints.
+    # MaxVersion="1.99.99" on Graph entries = install v1.x if nothing is present.
+    #
+
+    # -- Az Core --------------------------------------------------------------
+    @{ Name="Az.Accounts";                                MinVersion="2.0.0";  MaxVersion="";       Description="Azure Authentication";         Scope="CurrentUser"; Required=$true;  SkipParam="" },
+    @{ Name="Az.Resources";                               MinVersion="1.0.0";  MaxVersion="";       Description="Azure Resources (info only)";  Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+    @{ Name="Az.Storage";                                 MinVersion="3.0.0";  MaxVersion="";       Description="Azure Storage / Defender";     Scope="CurrentUser"; Required=$false; SkipParam="SkipDefender" },
+
+    # -- Microsoft Graph SDK v1.x (PS 5.1 compatible) -------------------------
+    # v2.x is .NET 6+ only. MaxVersion pins install to last v1.x release.
+    # Runtime calls go through Invoke-BWsGraphPagedRequest (REST, no SDK needed).
+    @{ Name="Microsoft.Graph.Authentication";             MinVersion="1.0.0";  MaxVersion="1.99.99"; Description="Graph SDK Auth (v1.x)";       Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+    @{ Name="Microsoft.Graph.DeviceManagement";           MinVersion="1.0.0";  MaxVersion="1.99.99"; Description="Graph SDK Device Mgmt (v1.x)";Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+    @{ Name="Microsoft.Graph.Devices.CorporateManagement";MinVersion="1.0.0";  MaxVersion="1.99.99"; Description="Graph SDK App Mgmt (v1.x)";   Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+    @{ Name="Microsoft.Graph.Users";                      MinVersion="1.0.0";  MaxVersion="1.99.99"; Description="Graph SDK Users (v1.x)";      Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+    @{ Name="Microsoft.Graph.Identity.DirectoryManagement";MinVersion="1.0.0"; MaxVersion="1.99.99"; Description="Graph SDK Directory (v1.x)";  Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+    @{ Name="Microsoft.Graph.Groups";                     MinVersion="1.0.0";  MaxVersion="1.99.99"; Description="Graph SDK Groups (v1.x)";     Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+
+    # -- Microsoft Graph Beta SDK (informational, .NET 6+ only) ---------------
+    # Beta REST calls go through Invoke-BWsBetaGraphRequest (/beta/ endpoint).
+    @{ Name="Microsoft.Graph.Beta.DeviceManagement";      MinVersion="0.1.0";  MaxVersion="";        Description="Graph Beta Device Mgmt";      Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+    @{ Name="Microsoft.Graph.Beta.Users";                 MinVersion="0.1.0";  MaxVersion="";        Description="Graph Beta Users";            Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+    @{ Name="Microsoft.Graph.Beta.Identity.DirectoryManagement";MinVersion="0.1.0";MaxVersion="";    Description="Graph Beta Directory";        Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+
+    # -- Other -----------------------------------------------------------------
+    @{ Name="Microsoft.Online.SharePoint.PowerShell";     MinVersion="16.0.0"; MaxVersion="";        Description="SharePoint Online Admin";     Scope="CurrentUser"; Required=$false; SkipParam="SkipSharePoint" },
+    @{ Name="MicrosoftTeams";                             MinVersion="4.0.0";  MaxVersion="";        Description="Microsoft Teams Admin";       Scope="CurrentUser"; Required=$false; SkipParam="SkipTeams" },
+    @{ Name="PSScriptAnalyzer";                           MinVersion="1.20.0"; MaxVersion="";        Description="PS Static Code Analysis";     Scope="CurrentUser"; Required=$false; SkipParam="" }
 )
 
 
@@ -387,23 +451,30 @@ function Invoke-BWsGraphPagedRequest {
     <#
     .SYNOPSIS
         Calls a Graph endpoint and follows @odata.nextLink pages.
-        Returns a flat array of all items.
+        Returns a flat array of all items. Max 200 pages (safety guard).
     #>
     param(
         [Parameter(Mandatory=$true)][string]$Uri,
-        [string]$Method = "GET"
+        [string]$Method  = "GET",
+        [int]   $MaxPages = 200
     )
     if ($Uri -notmatch '^https://') {
         $Uri = "https://graph.microsoft.com/v1.0/$($Uri.TrimStart('/'))"
     }
     $allItems = [System.Collections.Generic.List[object]]::new()
     $nextUri  = $Uri
+    $page     = 0
     do {
+        $page++
+        if ($page -gt $MaxPages) {
+            Write-Host "  [!] Paged request exceeded $MaxPages pages, stopping early." -ForegroundColor Yellow
+            break
+        }
         $resp = Invoke-BWsGraphRequest -Uri $nextUri -Method $Method -ErrorAction Stop
         if ($null -eq $resp) { break }
-        if ($resp.value) {
+        if ($resp.PSObject.Properties['value'] -and $resp.value) {
             foreach ($item in $resp.value) { $allItems.Add($item) }
-        } elseif ($null -ne $resp) {
+        } elseif (-not $resp.PSObject.Properties['value']) {
             $allItems.Add($resp)
         }
         $nextUri = if ($resp.PSObject.Properties['@odata.nextLink']) { $resp.'@odata.nextLink' } else { $null }
@@ -433,6 +504,175 @@ function Invoke-MgBetaGraphRequest {
         [hashtable]$Body   = $null
     )
     return Invoke-BWsBetaGraphRequest -Uri $Uri -Method $Method -Body $Body
+}
+
+
+#============================================================================
+# Azure REST Helpers - replaces Az.Resources / Az.Accounts PS 5.1 compat
+#============================================================================
+
+function Get-BWsAzContext {
+    <#
+    .SYNOPSIS
+        Returns the current Azure context via Get-BWsAzContext (Az.Accounts only).
+        Az.Accounts itself IS PS 5.1 compatible; only Az.Resources is not.
+    #>
+    $ctx = Get-BWsAzContext -ErrorAction SilentlyContinue
+    return $ctx
+}
+function Get-BWsDiagnostics {
+    <#
+    .SYNOPSIS Collects environment diagnostics. Used by -Diagnostics and GUI Diagnostics button.#>
+    param([switch]$AsObject)
+
+    $d = [ordered]@{}
+    $d['PS_Version']  = $PSVersionTable.PSVersion.ToString()
+    $d['PS_Edition']  = $PSVersionTable.PSEdition
+    $d['PS_Host']     = $Host.Name
+    $d['OS']          = if ($PSVersionTable.OS) { $PSVersionTable.OS } else {
+                            "$([System.Environment]::OSVersion.Version)" }
+
+    $azCtx = $null
+    try { $azCtx = Get-AzContext -ErrorAction SilentlyContinue } catch {}
+
+    if ($azCtx) {
+        $d['AZ_LoggedIn']         = "Yes"
+        $d['AZ_Account']          = if ($azCtx.Account)      { $azCtx.Account.Id }      else { "(unknown)" }
+        $d['AZ_AccountType']      = if ($azCtx.Account)      { $azCtx.Account.Type }    else { "(unknown)" }
+        $d['AZ_TenantId']         = if ($azCtx.Tenant)       { $azCtx.Tenant.Id }       else { "(unknown)" }
+        $d['AZ_SubscriptionId']   = if ($azCtx.Subscription) { $azCtx.Subscription.Id }   else { "(none)" }
+        $d['AZ_SubscriptionName'] = if ($azCtx.Subscription) { $azCtx.Subscription.Name } else { "(none)" }
+        $d['AZ_Environment']      = if ($azCtx.Environment)  { $azCtx.Environment.Name }  else { "(unknown)" }
+
+        try {
+            $orgResp = Invoke-AzRestMethod -Uri 'https://graph.microsoft.com/v1.0/organization?$select=displayName,verifiedDomains' -Method GET -ErrorAction Stop
+            if ($orgResp.StatusCode -eq 200) {
+                $org = ($orgResp.Content | ConvertFrom-Json).value | Select-Object -First 1
+                $d['AZ_TenantName']   = if ($org.displayName) { $org.displayName } else { "(unknown)" }
+                $primary = ($org.verifiedDomains | Where-Object { $_.isDefault -eq $true } | Select-Object -First 1).name
+                if ($primary) { $d['AZ_PrimaryDomain'] = $primary }
+            }
+        } catch { $d['AZ_TenantName'] = "(Graph REST not available)" }
+
+        try {
+            $meResp = Invoke-AzRestMethod -Uri 'https://graph.microsoft.com/v1.0/me?$select=displayName,userPrincipalName,jobTitle,mail' -Method GET -ErrorAction Stop
+            if ($meResp.StatusCode -eq 200) {
+                $me = $meResp.Content | ConvertFrom-Json
+                $d['USER_DisplayName'] = if ($me.displayName)      { $me.displayName }       else { "(unknown)" }
+                $d['USER_UPN']         = if ($me.userPrincipalName) { $me.userPrincipalName } else { "(unknown)" }
+                $d['USER_JobTitle']    = if ($me.jobTitle)          { $me.jobTitle }          else { "(not set)" }
+                $d['USER_Mail']        = if ($me.mail)              { $me.mail }              else { "(not set)" }
+            }
+        } catch { $d['USER_DisplayName'] = "(Graph /me not available)" }
+    } else {
+        $d['AZ_LoggedIn'] = "No - run Connect-AzAccount"
+    }
+
+    foreach ($m in @('Az.Accounts','Az.Storage','Microsoft.Online.SharePoint.PowerShell','MicrosoftTeams','PSScriptAnalyzer')) {
+        $loaded = Get-Module -Name $m -ErrorAction SilentlyContinue
+        $avail  = Get-Module -Name $m -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+        $d["MOD_$m"] = if ($loaded) { "Loaded v$($loaded.Version)" }
+                       elseif ($avail) { "Available v$($avail.Version) (not imported)" }
+                       else { "Not installed" }
+    }
+
+    if ($AsObject) { return $d }
+
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  DIAGNOSTICS" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+
+    $sections = [ordered]@{
+        "PowerShell"       = @('PS_Version','PS_Edition','PS_Host','OS')
+        "Azure / Entra ID" = @('AZ_LoggedIn','AZ_Account','AZ_AccountType','AZ_TenantId','AZ_TenantName','AZ_PrimaryDomain','AZ_SubscriptionId','AZ_SubscriptionName','AZ_Environment')
+        "Signed-in User"   = @('USER_DisplayName','USER_UPN','USER_JobTitle','USER_Mail')
+        "Modules"          = ($d.Keys | Where-Object { $_ -like 'MOD_*' })
+    }
+    foreach ($sec in $sections.Keys) {
+        Write-Host ""
+        Write-Host "  [$sec]" -ForegroundColor Yellow
+        foreach ($key in $sections[$sec]) {
+            if ($d.ContainsKey($key)) {
+                $lbl = ($key -replace '^(PS_|AZ_|USER_|MOD_)','').PadRight(22)
+                $val = $d[$key]
+                $col = if ($val -like "*No -*" -or $val -like "*not installed*") { "Yellow" }
+                       elseif ($val -like "*Loaded*" -or $val -like "*Yes*") { "Green" }
+                       else { "White" }
+                Write-Host "    $lbl : $val" -ForegroundColor $col
+            }
+        }
+    }
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+
+function Set-BWsAzSubscription {
+    <#
+    .SYNOPSIS
+        Sets the subscription context using Invoke-AzRestMethod probe
+        instead of Set-AzContext (which loads Az.Resources ResourceManagementClient).
+    .PARAMETER SubscriptionId
+        The Azure subscription GUID to switch to.
+    #>
+    param([Parameter(Mandatory=$true)][string]$SubscriptionId)
+
+    # Set-AzContext from Az.Accounts alone works fine - it's Az.Resources that
+    # triggers get_SerializationSettings. We load Az.Accounts only, so Set-AzContext
+    # is safe as long as Az.Resources is NOT loaded.
+    # Unload Az.Resources if it somehow ended up in session
+    Get-Module -Name 'Az.Resources' -ErrorAction SilentlyContinue |
+        Remove-Module -Force -ErrorAction SilentlyContinue 2>$null 3>$null
+
+    try {
+        # Az.Accounts' Set-AzContext is safe without Az.Resources loaded
+        $null = Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop 2>$null 3>$null
+        return $true
+    } catch {
+        throw "Could not switch to subscription $SubscriptionId`: $($_.Exception.Message)"
+    }
+}
+
+function Find-BWsAzResource {
+    <#
+    .SYNOPSIS
+        Finds an Azure resource by name and type using the ARM REST API.
+        Replaces Get-AzResource (Az.Resources) which is not PS 5.1 compatible.
+    .PARAMETER Name
+        Resource display name
+    .PARAMETER ResourceType
+        ARM resource type, e.g. "Microsoft.Storage/storageAccounts"
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter(Mandatory=$true)][string]$ResourceType
+    )
+
+    try {
+        $ctx  = Get-BWsAzContext -ErrorAction Stop
+        $subId = $ctx.Subscription.Id
+        # ARM REST: list all resources of given type, filter by name client-side
+        $uri = "https://management.azure.com/subscriptions/$subId/resources" +
+               "?`$filter=resourceType eq '$ResourceType'&`$top=1000&api-version=2021-04-01"
+        $resp = Invoke-AzRestMethod -Uri $uri -Method GET -ErrorAction Stop
+        if ($resp.StatusCode -ne 200) { return $null }
+        $data = $resp.Content | ConvertFrom-Json
+        $match = $data.value | Where-Object { $_.name -eq $Name } | Select-Object -First 1
+        if (-not $match) { return $null }
+        # Return object mimicking Get-AzResource output
+        return [PSCustomObject]@{
+            Name              = $match.name
+            ResourceType      = $match.type
+            Location          = $match.location
+            ResourceGroupName = ($match.id -split '/')[4]
+            ResourceId        = $match.id
+            Tags              = $match.tags
+        }
+    } catch {
+        return $null
+    }
 }
 
 
@@ -493,6 +733,7 @@ function Install-BWSDependencies {
         $ln = "  | $n | $d | $ss | $ii | $mm |"
         if     ($s -like "*[OK]*")   { $c = "Green"    }
         elseif ($s -like "*SKIP*")   { $c = "DarkGray" }
+        elseif ($s -like "*INFO*")   { $c = "Cyan"     }
         elseif ($s -like "*[X]*")    { $c = "Red"      }
         elseif ($s -like "*[!]*")    { $c = "Yellow"   }
         elseif ($s -like "*...*")    { $c = "Cyan"     }
@@ -537,14 +778,29 @@ function Install-BWSDependencies {
 
         # Skip check
         $doSkip = $false
-        if ($mod['SkipParam'] -and $SkipParams.ContainsKey($mod['SkipParam']) -and $SkipParams[$mod['SkipParam']] -eq $true) { $doSkip = $true }
+        # "AlwaysSkip" = show installed version info but never try to import
+        if ($mod['SkipParam'] -eq 'AlwaysSkip') {
+            $doSkip = $true
+        } elseif ($mod['SkipParam'] -and $SkipParams.ContainsKey($mod['SkipParam']) -and $SkipParams[$mod['SkipParam']] -eq $true) {
+            $doSkip = $true
+        }
 
         Write-Progress -Activity "BWS Module Setup" `
             -Status "[$modCount/$($script:RequiredModules.Count)] $($mod.Name)" `
             -PercentComplete ([int](($modCount-1) / $script:RequiredModules.Count * 100))
 
         if ($doSkip) {
-            $row.Status = "SKIP"; $row.InstallTime = "n/a"; $row.ImportTime = "n/a"; $row.Skipped = $true
+            # For AlwaysSkip modules: show the installed version number if present,
+            # otherwise show "not installed" - so admins can see what is on the system
+            if ($mod['SkipParam'] -eq 'AlwaysSkip') {
+                $stSkip = Get-ModuleStatus -Name $mod.Name -MinVersion $mod.MinVersion
+                $row.Status      = if ($stSkip.InstalledVer) { "INFO v$($stSkip.InstalledVer)" } else { "INFO not installed" }
+                $row.InstallTime = "n/a"
+                $row.ImportTime  = "n/a (REST)"
+            } else {
+                $row.Status = "SKIP"; $row.InstallTime = "n/a"; $row.ImportTime = "n/a"
+            }
+            $row.Skipped = $true
             $allResults.Add($row); Write-MRow $row
             if ($GUICallback) { & $GUICallback $row }
             continue
@@ -797,6 +1053,7 @@ function Show-ModuleSetupDialog {
         $s = $Row.Status
         if     ($s -like "*[OK]*")    { $c = [System.Drawing.Color]::FromArgb( 90,210, 90) }
         elseif ($s -like "*SKIP*")    { $c = [System.Drawing.Color]::FromArgb(110,110,120) }
+        elseif ($s -like "*INFO*")    { $c = [System.Drawing.Color]::FromArgb( 80,160,200) }
         elseif ($s -like "*[X]*")     { $c = [System.Drawing.Color]::FromArgb(240, 80, 80) }
         elseif ($s -like "*[!]*")     { $c = [System.Drawing.Color]::FromArgb(240,190, 60) }
         elseif ($s -like "*Install*") { $c = [System.Drawing.Color]::FromArgb( 80,170,255) }
@@ -854,12 +1111,12 @@ function Show-ModuleSetupDialog {
 }
 
 #============================================================================
-# MODULE PREREQUISITES CHECK (console mode)
+# PREREQUISITES + STARTUP FLOW
+# -Full  : install/import modules, verify login, then run checks
+# (none) : skip all setup - run checks only (modules must already be loaded)
+# -GUI   : handled inside Show-BWSGUI; "Prerequisites" button = Full flow,
+#          "Run Check" button = checks only
 #============================================================================
-Write-Host ""
-Write-Host "======================================================" -ForegroundColor Cyan
-Write-Host "  MODULE PREREQUISITES CHECK" -ForegroundColor Cyan
-Write-Host "======================================================" -ForegroundColor Cyan
 
 $_skipParams = @{
     SkipSharePoint = [bool]$SkipSharePoint
@@ -867,7 +1124,24 @@ $_skipParams = @{
     SkipDefender   = [bool]$SkipDefender
 }
 
-if (-not $GUI) {
+# -Diagnostics: print diagnostics and exit (console) or open dialog (GUI)
+if ($Diagnostics -and -not $GUI) {
+    Get-BWsDiagnostics
+    exit 0
+}
+
+if ($Full -and $GUI) {
+    # GUI + Full: open Prerequisites dialog, then continue to launch the main form
+    Add-Type -AssemblyName System.Windows.Forms
+    $null = Show-ModuleSetupDialog -SkipParams $_skipParams
+}
+
+if ($Full -and -not $GUI) {
+    # Console + Full: run module table, then fall through to checks below
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  PREREQUISITES - MODULE SETUP" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
     $script:moduleSetupResult = Install-BWSDependencies -SkipParams $_skipParams
     if (-not $script:moduleSetupResult.AllReady) {
         Write-Host "  [!] One or more required modules could not be installed." -ForegroundColor Yellow
@@ -1301,7 +1575,7 @@ function Test-AzureResources {
         Write-Host "$($resource.Name)" -NoNewline
         
         try {
-            $azResource = Get-AzResource -Name $resource.Name -ResourceType $resource.Type -ErrorAction SilentlyContinue
+            $azResource = Find-BWsAzResource -Name $resource.Name -ResourceType $resource.Type
             
             if ($azResource) {
                 Write-Host " [OK]" -ForegroundColor Green
@@ -2095,7 +2369,7 @@ function Test-IntuneConnector {
             Write-Host "Checking AD Server Azure presence..." -NoNewline
             
             # Check if Azure connection exists
-            $azContext = Get-AzContext -ErrorAction SilentlyContinue
+            $azContext = Get-BWsAzContext -ErrorAction SilentlyContinue
             
             if ($azContext) {
                 # Look for VMs that might be the AD/Sync server
@@ -5518,12 +5792,33 @@ if ($GUI) {
     $btnRun.Font = New-Object System.Drawing.Font("Arial", 10, [System.Drawing.FontStyle]::Bold)
     $form.Controls.Add($btnRun)
     
+    # Prerequisites Button
+    $btnPrereq = New-Object System.Windows.Forms.Button
+    $btnPrereq.Location = New-Object System.Drawing.Point(660, 180)
+    $btnPrereq.Size     = New-Object System.Drawing.Size(150, 44)
+    $btnPrereq.Text     = "Prerequisites"
+    $btnPrereq.BackColor = [System.Drawing.Color]::FromArgb(60, 120, 200)
+    $btnPrereq.ForeColor = [System.Drawing.Color]::White
+    $btnPrereq.Font     = New-Object System.Drawing.Font("Arial", 9, [System.Drawing.FontStyle]::Bold)
+    $btnPrereq.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $form.Controls.Add($btnPrereq)
+
     # Clear Button
     $btnClear = New-Object System.Windows.Forms.Button
-    $btnClear.Location = New-Object System.Drawing.Point(660, 230)
+    $btnClear.Location = New-Object System.Drawing.Point(660, 232)
     $btnClear.Size = New-Object System.Drawing.Size(150, 30)
     $btnClear.Text = "Clear Output"
     $form.Controls.Add($btnClear)
+
+    $btnDiag = New-Object System.Windows.Forms.Button
+    $btnDiag.Location  = New-Object System.Drawing.Point(660, 271)
+    $btnDiag.Size      = New-Object System.Drawing.Size(150, 44)
+    $btnDiag.Text      = "Diagnostics"
+    $btnDiag.BackColor = [System.Drawing.Color]::FromArgb(80, 60, 140)
+    $btnDiag.ForeColor = [System.Drawing.Color]::White
+    $btnDiag.Font      = New-Object System.Drawing.Font("Arial", 9, [System.Drawing.FontStyle]::Bold)
+    $btnDiag.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $form.Controls.Add($btnDiag)
     
     # Status Label
     $labelStatus = New-Object System.Windows.Forms.Label
@@ -5553,6 +5848,74 @@ if ($GUI) {
     $textOutput.WordWrap = $false
     $form.Controls.Add($textOutput)
     
+    # Prerequisites Button Click  (Full flow: modules + login verification)
+    $btnPrereq.Add_Click({
+        $btnPrereq.Enabled = $false
+        $btnRun.Enabled    = $false
+        $labelStatus.Text  = "Running prerequisites..."
+        $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(60,120,200)
+        $form.Refresh()
+        try {
+            # Step 1: Module setup dialog
+            $labelStatus.Text = "Step 1/2 - Checking modules..."
+            $form.Refresh()
+            $_preSkipParams = @{
+                SkipSharePoint = (-not $chkSharePoint.Checked)
+                SkipTeams      = (-not $chkTeams.Checked)
+                SkipDefender   = (-not $chkDefender.Checked)
+            }
+            $preModResult = Show-ModuleSetupDialog -SkipParams $_preSkipParams
+
+            # Step 2: Login / subscription verification
+            $labelStatus.Text = "Step 2/2 - Verifying login..."
+            $form.Refresh()
+            $preSubId = $textSubID.Text.Trim()
+            $loginOK  = $false
+            $loginMsg = ""
+            try {
+                if ($preSubId) {
+                    Set-BWsAzSubscription -SubscriptionId $preSubId
+                    $preCtx  = Get-BWsAzContext
+                    $loginOK = $true
+                    $loginMsg = "[OK] Azure login verified - Subscription: $($preCtx.Subscription.Name)"
+                } else {
+                    $preCtx = Get-BWsAzContext
+                    if ($preCtx) {
+                        $loginOK = $true
+                        $loginMsg = "[OK] Azure login verified - Subscription: $($preCtx.Subscription.Name)"
+                    } else {
+                        $loginMsg = "[!] Not logged in - run Connect-AzAccount in a PS window first"
+                    }
+                }
+            } catch {
+                $loginMsg = "[X] Login check failed: $($_.Exception.Message)"
+            }
+
+            # Show result in status label
+            $allOK = $preModResult.AllReady -and $loginOK
+            $statusText  = if ($allOK) { "[OK] Prerequisites complete - Ready to run checks" } `
+                           else { "[!] Prerequisites complete with warnings - see details above" }
+            $statusColor = if ($allOK) { [System.Drawing.Color]::FromArgb(60,200,80) } `
+                           else { [System.Drawing.Color]::FromArgb(240,160,40) }
+            $labelStatus.Text      = $statusText
+            $labelStatus.ForeColor = $statusColor
+
+            # Show login result in output box
+            $textOutput.AppendText("`r`n--- Prerequisites ---`r`n")
+            $textOutput.AppendText("Modules  : $($preModResult.OK) OK / $($preModResult.Failed) failed / $($preModResult.Warnings) warnings`r`n")
+            $textOutput.AppendText("Login    : $loginMsg`r`n")
+            $textOutput.AppendText("---------------------`r`n")
+            $textOutput.ScrollToCaret()
+            $form.Refresh()
+        } catch {
+            $labelStatus.Text      = "[X] Prerequisites failed: $($_.Exception.Message)"
+            $labelStatus.ForeColor = [System.Drawing.Color]::Red
+        } finally {
+            $btnPrereq.Enabled = $true
+            $btnRun.Enabled    = $true
+        }
+    })
+
     # Clear Button Click
     $btnClear.Add_Click({
         $textOutput.Clear()
@@ -5560,14 +5923,121 @@ if ($GUI) {
         $labelStatus.ForeColor = [System.Drawing.Color]::Blue
         $progressBar.Value = 0
     })
-    
+
+    # Diagnostics Button Click
+    $btnDiag.Add_Click({
+        $btnDiag.Enabled   = $false
+        $btnRun.Enabled    = $false
+        $btnPrereq.Enabled = $false
+        $labelStatus.Text      = "Collecting diagnostics..."
+        $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(80,60,140)
+        $form.Refresh()
+        try {
+            $diagData = Get-BWsDiagnostics -AsObject
+
+            # Build dialog
+            Add-Type -AssemblyName System.Windows.Forms
+            $dlgDiag = New-Object System.Windows.Forms.Form
+            $dlgDiag.Text            = "BWS Diagnostics"
+            $dlgDiag.Size            = New-Object System.Drawing.Size(640, 560)
+            $dlgDiag.StartPosition   = "CenterParent"
+            $dlgDiag.FormBorderStyle = "FixedDialog"
+            $dlgDiag.MaximizeBox     = $false
+            $dlgDiag.BackColor       = [System.Drawing.Color]::FromArgb(28, 28, 40)
+
+            $lTitle = New-Object System.Windows.Forms.Label
+            $lTitle.Text      = "Environment Diagnostics"
+            $lTitle.Font      = New-Object System.Drawing.Font("Arial", 13, [System.Drawing.FontStyle]::Bold)
+            $lTitle.ForeColor = [System.Drawing.Color]::FromArgb(180, 160, 255)
+            $lTitle.Location  = New-Object System.Drawing.Point(16, 12)
+            $lTitle.Size      = New-Object System.Drawing.Size(590, 28)
+            $dlgDiag.Controls.Add($lTitle)
+
+            $tv = New-Object System.Windows.Forms.RichTextBox
+            $tv.Location   = New-Object System.Drawing.Point(12, 50)
+            $tv.Size       = New-Object System.Drawing.Size(600, 440)
+            $tv.ReadOnly   = $true
+            $tv.BackColor  = [System.Drawing.Color]::FromArgb(22, 22, 35)
+            $tv.ForeColor  = [System.Drawing.Color]::FromArgb(210, 210, 210)
+            $tv.Font       = New-Object System.Drawing.Font("Consolas", 9)
+            $tv.ScrollBars = "Vertical"
+            $tv.WordWrap   = $false
+            $dlgDiag.Controls.Add($tv)
+
+            $btnClose = New-Object System.Windows.Forms.Button
+            $btnClose.Text      = "Close"
+            $btnClose.Location  = New-Object System.Drawing.Point(510, 500)
+            $btnClose.Size      = New-Object System.Drawing.Size(100, 28)
+            $btnClose.BackColor = [System.Drawing.Color]::FromArgb(60,60,80)
+            $btnClose.ForeColor = [System.Drawing.Color]::White
+            $btnClose.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+            $btnClose.Add_Click({ $dlgDiag.Close() })
+            $dlgDiag.Controls.Add($btnClose)
+
+            # Populate RichTextBox
+            $sections = [ordered]@{
+                "POWERSHELL"       = @('PS_Version','PS_Edition','PS_Host','OS')
+                "AZURE / ENTRA ID" = @('AZ_LoggedIn','AZ_Account','AZ_AccountType','AZ_TenantId','AZ_TenantName','AZ_TenantDomain','AZ_PrimaryDomain','AZ_SubscriptionId','AZ_SubscriptionName','AZ_Environment')
+                "SIGNED-IN USER"   = @('USER_DisplayName','USER_UPN','USER_JobTitle','USER_Mail')
+                "MODULES"          = ($diagData.Keys | Where-Object { $_ -like 'MOD_*' } | Sort-Object)
+            }
+
+            foreach ($section in $sections.Keys) {
+                # Section header
+                $tv.SelectionStart  = $tv.TextLength
+                $tv.SelectionLength = 0
+                $tv.SelectionColor  = [System.Drawing.Color]::FromArgb(180,160,255)
+                $tv.SelectionFont   = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
+                $tv.AppendText("`r`n  [ $section ]`r`n")
+
+                foreach ($key in $sections[$section]) {
+                    if ($diagData.ContainsKey($key)) {
+                        $label = ($key -replace '^(PS_|AZ_|USER_|MOD_)','' -replace '_',' ').PadRight(22)
+                        $val   = $diagData[$key]
+                        $valColor = if ($val -like "*No -*" -or $val -like "*not installed*" -or $val -like "*Not installed*") {
+                                        [System.Drawing.Color]::FromArgb(255,160,80)
+                                    } elseif ($val -like "*Loaded*" -or $val -like "*Yes*" -or $val -like "*loaded*") {
+                                        [System.Drawing.Color]::FromArgb(100,220,100)
+                                    } else {
+                                        [System.Drawing.Color]::FromArgb(210,210,210)
+                                    }
+                        $tv.SelectionColor = [System.Drawing.Color]::FromArgb(140,140,160)
+                        $tv.SelectionFont  = New-Object System.Drawing.Font("Consolas", 9)
+                        $tv.AppendText("    $label : ")
+                        $tv.SelectionColor = $valColor
+                        $tv.AppendText("$val`r`n")
+                    }
+                }
+            }
+            $tv.SelectionStart = 0
+            $tv.ScrollToCaret()
+
+            $labelStatus.Text      = "[OK] Diagnostics collected"
+            $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(100,180,255)
+            $dlgDiag.ShowDialog() | Out-Null
+            $dlgDiag.Dispose()
+        } catch {
+            $labelStatus.Text      = "[X] Diagnostics failed: $($_.Exception.Message)"
+            $labelStatus.ForeColor = [System.Drawing.Color]::Red
+        } finally {
+            $btnDiag.Enabled   = $true
+            $btnRun.Enabled    = $true
+            $btnPrereq.Enabled = $true
+        }
+    })
+
     # Run Button Click
     $btnRun.Add_Click({
+        # Clean up any leftover Write-Host override from a previous failed run
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
         $textOutput.Clear()
         $progressBar.Value = 0
         $labelStatus.Text = "Initializing check..."
         $labelStatus.ForeColor = [System.Drawing.Color]::Orange
-        $btnRun.Enabled = $false
+        $btnRun.Enabled   = $false
+        $btnPrereq.Enabled = $false
+        $btnClear.Enabled  = $false
+        $btnDiag.Enabled   = $false
         $form.Refresh()
         
         $bcid = $textBCID.Text
@@ -5597,51 +6067,8 @@ if ($GUI) {
         $labelStatus.ForeColor = [System.Drawing.Color]::Orange
         $form.Refresh()
 
-        $_guiSkipParams = @{
-            SkipSharePoint = (-not $runSharePoint)
-            SkipTeams      = (-not $runTeams)
-            SkipDefender   = (-not $runDefender)
-        }
-        $guiModResult = Show-ModuleSetupDialog -SkipParams $_guiSkipParams
-
-        if (-not $guiModResult.AllReady) {
-            $labelStatus.Text      = "[!] Some modules failed - checks may be incomplete"
-            $labelStatus.ForeColor = [System.Drawing.Color]::Orange
-        } else {
-            $labelStatus.Text      = "[OK] Modules ready ($($guiModResult.TotalSecs)s)"
-            $labelStatus.ForeColor = [System.Drawing.Color]::LightGreen
-        }
-        $form.Refresh()
-
         try {
-            # Set subscription context if provided
-            if ($subId) {
-                $textOutput.AppendText("Setting subscription context to: $subId`r`n")
-                $textOutput.Refresh()
-                try {
-                    Set-AzContext -SubscriptionId $subId -ErrorAction Stop | Out-Null
-                    $textOutput.AppendText("Subscription context set successfully`r`n`r`n")
-                } catch {
-                    $textOutput.AppendText("ERROR: Could not set subscription context: $($_.Exception.Message)`r`n`r`n")
-                    $labelStatus.Text = "Error setting subscription context"
-                    $labelStatus.ForeColor = [System.Drawing.Color]::Red
-                    $btnRun.Enabled = $true
-                    return
-                }
-            } else {
-                $currentContext = Get-AzContext
-                if ($currentContext) {
-                    $textOutput.AppendText("Using current subscription: $($currentContext.Subscription.Name)`r`n`r`n")
-                } else {
-                    $textOutput.AppendText("ERROR: No subscription context found`r`n`r`n")
-                    $labelStatus.Text = "Error: No subscription context"
-                    $labelStatus.ForeColor = [System.Drawing.Color]::Red
-                    $btnRun.Enabled = $true
-                    return
-                }
-            }
-            
-            $progressBar.Value = 10
+            $progressBar.Value = 5
             
             # Redirect Write-Host
             $originalWriteHost = Get-Command Write-Host
@@ -5662,6 +6089,8 @@ if ($GUI) {
                 }
                 $script:textOutput.SelectionStart = $script:textOutput.Text.Length
                 $script:textOutput.ScrollToCaret()
+                # DoEvents allows UI to repaint but is re-entrant safe here because
+                # $btnRun, $btnPrereq and $btnClear are all disabled during this block
                 [System.Windows.Forms.Application]::DoEvents()
             }
             
@@ -5675,105 +6104,105 @@ if ($GUI) {
             
             $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int]) + ($runSharePoint -as [int]) + ($runTeams -as [int]) + ($runUserLicense -as [int])
             $currentCheck = 0
-            $progressIncrement = if ($totalChecks -gt 0) { 80 / $totalChecks } else { 0 }
+            $progressIncrement = if ($totalChecks -gt 0) { [Math]::Floor(80 / $totalChecks) } else { 0 }
             
             # Run Azure Check
             if ($runAzure) {
                 $labelStatus.Text = "Running Azure Resources Check..."
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
                 $form.Refresh()
                 
                 $azureResults = Test-AzureResources -BCID $bcid -CompactView $compact
                 $currentCheck++
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
             
             # Run Intune Check
             if ($runIntune) {
                 $labelStatus.Text = "Running Intune Policies Check..."
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
                 $form.Refresh()
                 
                 $intuneResults = Test-IntunePolicies -ShowAllPolicies $showAll -CompactView $compact
                 $currentCheck++
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
             
             # Run Entra ID Connect Check
             if ($runEntraID) {
                 $labelStatus.Text = "Running Entra ID Connect Check..."
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
                 $form.Refresh()
                 
                 $entraIDResults = Test-EntraIDConnect -CompactView $compact
                 $currentCheck++
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
             
             # Run Hybrid Join Check
             if ($runIntuneConn) {
                 $labelStatus.Text = "Running Hybrid Azure AD Join Check..."
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
                 $form.Refresh()
                 
                 $intuneConnResults = Test-IntuneConnector -CompactView $compact
                 $currentCheck++
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
             
             # Run Defender for Endpoint Check
             if ($runDefender) {
                 $labelStatus.Text = "Running Defender for Endpoint Check..."
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
                 $form.Refresh()
                 
                 $defenderResults = Test-DefenderForEndpoint -BCID $bcid -CompactView $compact
                 $currentCheck++
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
             
             # Run BWS Software Packages Check
             if ($runSoftware) {
                 $labelStatus.Text = "Running BWS Software Packages Check..."
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
                 $form.Refresh()
                 
                 $softwareResults = Test-BWSSoftwarePackages -CompactView $compact
                 $currentCheck++
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
             
             # Run SharePoint Configuration Check
             if ($runSharePoint) {
                 $labelStatus.Text = "Running SharePoint Configuration Check..."
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
                 $form.Refresh()
                 
                 $sharePointResults = Test-SharePointConfiguration -CompactView $compact -SharePointUrl $SharePointUrl
                 $currentCheck++
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
             
             # Run Teams Configuration Check
             if ($runTeams) {
                 $labelStatus.Text = "Running Teams Configuration Check..."
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
                 $form.Refresh()
                 
                 $teamsResults = Test-TeamsConfiguration -CompactView $compact
                 $currentCheck++
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
             
             # Run User and License Check
             if ($runUserLicense) {
                 $labelStatus.Text = "Running User & License Check..."
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
                 $form.Refresh()
                 
                 $userLicenseResults = Test-UsersAndLicenses -CompactView $compact
                 $currentCheck++
-                $progressBar.Value = 10 + ($currentCheck * $progressIncrement)
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
             
             # Overall Summary
@@ -5910,7 +6339,7 @@ if ($GUI) {
             if ($export) {
                 Write-Host ""
                 
-                $currentContext = Get-AzContext
+                $currentContext = Get-BWsAzContext
                 $subName = if ($currentContext) { $currentContext.Subscription.Name } else { "Unknown" }
                 
                 $overallStatus = ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Count -eq 0) -and 
@@ -5970,9 +6399,12 @@ if ($GUI) {
             $labelStatus.Text = "Error occurred during check"
             $labelStatus.ForeColor = [System.Drawing.Color]::Red
         } finally {
-            # Restore Write-Host
+            # Restore Write-Host and re-enable all buttons
             Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
-            $btnRun.Enabled = $true
+            $btnRun.Enabled    = $true
+            $btnPrereq.Enabled = $true
+            $btnClear.Enabled  = $true
+            $btnDiag.Enabled   = $true
         }
     })
     
@@ -5996,24 +6428,23 @@ if (-not $PSBoundParameters.ContainsKey('CompactView')) {
     $CompactView = $true
 }
 
-# Set Subscription Context
+# Subscription context: set if -SubscriptionId provided, otherwise use current
+# (If running with -Full this was already handled above; this is a lightweight
+# fallback so that -Full is not mandatory for quick re-runs after initial setup)
 if ($SubscriptionId) {
-    Write-Host "Setting subscription context to: $SubscriptionId" -ForegroundColor Yellow
     try {
-        Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop | Out-Null
-        Write-Host "Subscription context set successfully" -ForegroundColor Green
+        Set-BWsAzSubscription -SubscriptionId $SubscriptionId
+        Write-Host "Subscription: $SubscriptionId" -ForegroundColor Gray
     } catch {
-        Write-Host "Error setting subscription context: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "[!] Could not set subscription: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+} elseif ($Full) {
+    $currentContext = Get-BWsAzContext
+    if (-not $currentContext) {
+        Write-Host "[X] Not logged in. Run Connect-AzAccount or use -SubscriptionId" -ForegroundColor Red
         return
     }
-} else {
-    $currentContext = Get-AzContext
-    if ($currentContext) {
-        Write-Host "Using current subscription: $($currentContext.Subscription.Name) ($($currentContext.Subscription.Id))" -ForegroundColor Yellow
-    } else {
-        Write-Host "No subscription context found. Please login with Connect-AzAccount or specify -SubscriptionId" -ForegroundColor Red
-        return
-    }
+    Write-Host "Subscription: $($currentContext.Subscription.Name)" -ForegroundColor Gray
 }
 
 # Run Azure Check
@@ -6068,7 +6499,7 @@ if (-not $SkipUserLicenseCheck) {
 }
 
 # Overall Summary
-$currentContext = Get-AzContext
+$currentContext = Get-BWsAzContext
 Write-Host ""
 Write-Host "======================================================" -ForegroundColor Cyan
 Write-Host "  OVERALL SUMMARY" -ForegroundColor Cyan
