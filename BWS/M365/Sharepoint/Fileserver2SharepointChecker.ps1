@@ -1178,15 +1178,16 @@ $lblUrl.Size      = New-Object System.Drawing.Size(700, 18)
 $lblUrlSub            = New-FLabel "Used to calculate the decoded SharePoint path length per item. Example: https://contoso.sharepoint.com/sites/IT/Shared%20Documents" 16 144 $fntSmall $clrTextSub
 $lblUrlSub.AutoSize   = $false
 $lblUrlSub.Size       = New-Object System.Drawing.Size(856, 14)
+$script:UrlPlaceholder = "https://tenant.sharepoint.com/sites/YourSite/Shared%20Documents"
 $txtUrl      = New-FTextBox 16 164 868 26
-$txtUrl.Text      = $placeholder
+$txtUrl.Text      = $script:UrlPlaceholder
 $txtUrl.ForeColor = $clrTextDisabled
 $txtUrl.Add_Enter({
     if ($txtUrl.ForeColor -eq $clrTextDisabled) { $txtUrl.Text = ""; $txtUrl.ForeColor = $clrText }
 })
 $txtUrl.Add_Leave({
     if ([string]::IsNullOrWhiteSpace($txtUrl.Text)) {
-        $txtUrl.Text      = $placeholder
+        $txtUrl.Text      = $script:UrlPlaceholder
         $txtUrl.ForeColor = $clrTextDisabled
     }
 })
@@ -1614,7 +1615,7 @@ $btnRun.Add_Click({
     if ([string]::IsNullOrWhiteSpace($rootPath) -or -not (Test-Path -LiteralPath $rootPath)) {
         Show-MsgWarn "Please select a valid file server root folder." "Input Required"; return
     }
-    if ([string]::IsNullOrWhiteSpace($urlPrefix) -or $urlPrefix -eq $placeholder) {
+    if ([string]::IsNullOrWhiteSpace($urlPrefix) -or $urlPrefix -eq $script:UrlPlaceholder) {
         Show-MsgWarn "Please enter the target SharePoint library URL prefix." "Input Required"; return
     }
     try { $null = [System.Uri]$urlPrefix } catch {
