@@ -2,11 +2,179 @@
 ================================================================================
   Author:  Jörn Gutting (optimised by Claude)
   Script:  BWS AVD Sizing - Swisscom Branded Edition (WPF GUI) - PowerShell 7
-  Version: 2.1.0
-  Date:    2025-02-20
+  Version: 2.8.2
+  Date:    2025-02-21
 
   CHANGELOG
   =========
+
+  v2.8.2 (2025-02-21)
+  --------------------
+  - ENHANCED: Dual VM Series recommendation with reasoning
+    * When RAM bottleneck detected (StePaT or Assess): shows BOTH D-series
+      and E-series options with individual reasoning
+    * Warnings show "Option A — D-series" and "Option B — E-series" with
+      explanation why each is suitable or not
+    * ResultsGrid shows Recommended VM + Alternative VM with reason
+    * HTML Report VM section shows both options with reasoning
+    * New $script:AssessAlternativeVm / BwsAlternativeVm for dual tracking
+
+  v2.8.1 (2025-02-21)
+  --------------------
+  - NEW: Memory Optimized (E-series) auto-detection for RAM bottleneck
+    * StePaT mode: if CPU P95 < 70% and RAM P95 > 85% → E-series preferred
+    * If both CPU and RAM high (P95 > 85%) → E-series also recommended
+    * E-series provides 8 GB/vCPU (vs D-series 4 GB/vCPU)
+    * Warnings section shows "MEMORY OPTIMIZED RECOMMENDATION" with reasoning
+
+  v2.8.0 (2025-02-21)
+  --------------------
+  - NEW: StePaT Report Import — third Sizing Mode
+    * New ComboBox option "StePaT Report Import" alongside New/Assess
+    * Import-StepatReport parser function extracts metrics from StePaT HTML:
+      Hostname, Azure VM size, vCPU, RAM, CPU (Avg/Peak/P95),
+      RAM (Avg/Peak/P95), IOPS (Peak/Avg), Defender CPU Peak,
+      Critical event counts (CPU>=90%, RAM>=90%, IOPS>=1000, DiskQueue>2)
+    * Import panel with File Dialog, status display, parsed metrics preview
+    * Auto-selects matching VM in BWS catalog from report VM size
+    * Calculate handler: uses imported VM as fixed config (like Assess)
+    * PickVm handler: finds VM in catalog, shows recommendation
+    * ResultsGrid: dedicated "STEPAT METRICS" section with all parsed data
+    * Report: shows "StePaT Report Import" as sizing mode
+    * Get-AvdSizing: accepts 'Stepat' mode (treated like Assess internally)
+    * Reset: clears imported data and resets StePaT panel
+    * All existing New/Assess functionality completely unchanged
+
+  v2.7.0 (2025-02-21)
+  --------------------
+  - ENHANCED: Assessment details integrated into ResultsGrid
+    * Assess/StePaT mode: "CURRENT VM TEMPLATE" section with VM details
+    * "ASSESSMENT" section with capacity analysis (current vs required)
+    * "RECOMMENDATION" section with recommended VM + target hosts
+    * New mode: shows "VM TEMPLATE" section as before
+    * Disks (OS Disk, Additional Disks) shown in both modes
+
+  v2.6.2 (2025-02-21)
+  --------------------
+  - FIX: Consistent VM recommendation across GUI and Report
+    * PickVm handler no longer runs separate Select-BwsVm for recommendation
+    * $script:AssessRecommendedVm stored by Get-AvdSizing, reused by PickVm
+    * GUI status bar, ResultsGrid, and Report all show identical VM
+    * Report VM Section: shows "Recommended VM" row with series info
+
+  v2.6.1 (2025-02-21)
+  --------------------
+  - FIX: Assess mode PickVm uses selected VM directly (no search)
+    * Previously: PickVm searched with wrong constraints → different VM than Report
+    * Now: PickVm uses $CmbAssessVm.SelectedItem directly as $bwsVm
+    * Recommendation extracted from warnings (Suggested VM line) for consistency
+    * BwsRecommendedVm stored on LastVmPick for Report to use
+    * Report VM section shows "Current VM" label + "Recommended VM" row
+
+  v2.6.0 (2025-02-21)
+  --------------------
+  - MAJOR: Assessment uses VM Template ComboBox instead of manual vCPU/RAM
+    * Removed TxtFixedVcpu and TxtFixedRam text fields
+    * New CmbAssessVm ComboBox populated with all 33 BWS VM templates
+    * Format: "D4s v5 — 4 vCPU, 16 GB RAM"
+    * Calculate + PickVm both read from same ComboBox → consistent
+    * Mode toggle: hides vCPU/RAM range labels, shows VM ComboBox
+    * AssessedVmName stored in sizing output for Report
+    * Report + ResultsGrid show "Assessed VM Template: D4s v5"
+    * Default selection: D8s v5 (index 2)
+
+  v2.5.5 (2025-02-21)
+  --------------------
+  - FIX: Sizing Mode ComboBox items translated on language switch
+    * EN: New Infrastructure / Assess Existing
+    * DE: Neue Infrastruktur / Bestehende bewerten
+    * FR/IT: corresponding translations
+    * ResultsGrid and HTML Report also use localized mode names
+
+  v2.5.4 (2025-02-21)
+  --------------------
+  - FIX: Language switch crash — "Set-LblText is not recognized"
+    * Root cause: inner function Set-LblText defined AFTER first calls
+    * Fix: moved function definition to top of Apply-Language
+
+  v2.5.3 (2025-02-21)
+  --------------------
+  - FIX: Language switch crash — subexpression in Set-LblText argument
+    * $(if ...) in function call not parsed correctly by PowerShell
+    * Fix: extract to variable before passing to Set-LblText
+
+  v2.5.2 (2025-02-21)
+  --------------------
+  - ENHANCED: Assessment context-aware labels and summary
+    * GUI label switches dynamically: "Target hosts" (New) / "Current hosts" (Assess)
+    * New localization: wl.currenthosts / wl.currenthosts.desc (4 languages)
+    * Assessment summary rewritten with proper context:
+      "Current hosts: 2 / Current config: 4 vCPU, 16 GB / Max capacity: 6 users
+       Status: INSUFFICIENT — can serve 6 of 16 / Hosts needed: 6"
+    * Recommendation shows required specs for target host count
+
+  v2.5.1 (2025-02-21)
+  --------------------
+  - FIX: Assessment vCPU recommendation too low (was 3, should be 11+)
+    * Root cause: App CPU overhead not included, workload baseline ignored
+    * Fix: scale app overhead to recommended user count (not assessed count)
+    * Enforce workload baseline minimum (e.g. 8 for Medium)
+    * Suggested VM now searched from BWS catalog and shown in warnings
+
+  v2.5.0 (2025-02-21)
+  --------------------
+  - NEW: "Target number of hosts" field (default: 2)
+    * User specifies desired host count
+    * New mode: VM Template sized to fit all users across target hosts
+      (1 host → larger VM, 4 hosts → smaller VMs)
+    * Assess mode: shows how many hosts needed with current config
+    * TargetHosts parameter in Get-AvdSizing
+    * Assessment summary with capacity analysis + recommendation
+    * Localization: wl.targethosts / wl.targethosts.desc (4 languages)
+
+  v2.4.0 (2025-02-21)
+  --------------------
+  - NEW: Sizing Mode toggle — "New Infrastructure" / "Assess Existing"
+    * ComboBox at top of Workload tab
+    * New mode: vCPU/RAM range (min/max) for optimal sizing
+    * Assess mode: fixed vCPU + fixed RAM to validate existing setup
+    * Mode-dependent panels: PnlVcpuRange/PnlRamRange vs PnlVcpuFixed/PnlRamFixed
+    * Button text changes: "Suggest VM Template" / "Validate Configuration"
+    * Get-AvdSizing: SizingMode parameter, Assess skips filters with warnings
+    * Assessment warnings: RAM insufficient, vCPU below baseline
+    * ResultsGrid shows sizing mode
+    * Report shows sizing mode in Executive Summary
+    * Localization: mode.new, mode.assess, mode.title, mode.desc, btn.validate
+
+  v2.3.0 (2025-02-20)
+  --------------------
+  - NEW: RAM capacity check with detailed breakdown
+    * Sizing output includes RamGB_VmCapacity, RamSufficient flag
+    * RAM breakdown: OS + Users + Apps = total needed vs VM capacity
+    * Warnings when provisioned RAM > VM capacity
+    * ResultsGrid shows RAM status + breakdown
+    * Report highlights insufficient RAM
+    * Calculation does NOT abort — runs with warnings
+
+  v2.2.1 (2025-02-20)
+  --------------------
+  - FIX: "No suitable pooled sizing found" when vCPU=4-4, RAM=16-16
+    * User-defined range now takes priority over workload baseline MinVcpu
+    * Warning added when range is below baseline
+    * Candidates list extended: 2..24 even numbers
+
+  v2.2.0 (2025-02-20)
+  --------------------
+  - NEW: RAM range per host (16-128 GB)
+    * GUI: TxtMinRamHost + TxtMaxRamHost in Tuning tab
+    * Get-AvdSizing: MinRamPerHost/MaxRamPerHost parameters
+    * Select-BwsVm: MaxRamGB filter
+    * ResultsGrid shows RAM range
+    * Localization: tune.ramrange / tune.ramrange.desc
+
+  v2.1.1 (2025-02-20)
+  --------------------
+  - Min vCPU changed from 8 to 4 everywhere (XAML, Calculate, PickVm, Reset)
 
   v2.1.0 (2025-02-20)
   --------------------
@@ -313,8 +481,8 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion  = '2.7.0'
-$ScriptBuildUtc = '2025-02-21T05:00:00Z'
+$ScriptVersion  = '2.8.2'
+$ScriptBuildUtc = '2025-02-21T08:00:00Z'
 
 #region Ensure STA for WPF
 if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
@@ -529,6 +697,101 @@ $script:ApplicationCatalog = [ordered]@{
     DiskGBPerUser=100; RequiresGPU=$true; RequiresDataDisk=$true
     Notes='Heavy GPU + storage. NV-series + Premium SSD v2 data disks. Personal pool only.'
     PreferredVmSeries='NV'; DataDiskType='Premium SSD v2'; DataDiskMinIOPS=10000; DataDiskMinMBps=400
+  }
+}
+
+function Import-StepatReport {
+  <#
+  .SYNOPSIS
+    Parses a StePaT Inspector HTML report and extracts key performance metrics.
+  .PARAMETER Path
+    Path to the StePaT HTML report file.
+  .OUTPUTS
+    PSCustomObject with extracted metrics or $null on failure.
+  #>
+  param([Parameter(Mandatory)][string]$Path)
+
+  if (-not (Test-Path $Path)) { throw "File not found: $Path" }
+  $html = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+
+  # Server hostname
+  $hostname = ''
+  if ($html -match 'Server:\s*<strong>([^<]+)</strong>') { $hostname = $Matches[1].Trim() }
+
+  # Azure VM size, vCPU, RAM from header
+  $vmSize = ''; $vcpu = 0; $ramGB = 0
+  if ($html -match 'Azure:\s*<strong>([^<]+)</strong>') { $vmSize = $Matches[1].Trim() }
+  if ($html -match '<strong>(\d+)\s*vCPUs</strong>') { $vcpu = [int]$Matches[1] }
+  if ($html -match '<strong>(\d+)\s*GB\s*RAM</strong>') { $ramGB = [int]$Matches[1] }
+
+  # CPU summary: Avg, Peak, P95
+  $cpuAvg = 0; $cpuPeak = 0; $cpuP95 = 0
+  if ($html -match 'CPU Durchschnitt.*?<div class="cv"[^>]*>([\d.]+)%.*?Peak:\s*(\d+)%.*?P95:\s*([\d.]+)%') {
+    $cpuAvg = [double]$Matches[1]; $cpuPeak = [int]$Matches[2]; $cpuP95 = [double]$Matches[3]
+  }
+
+  # RAM summary: Avg, Peak, P95
+  $ramAvg = 0; $ramPeak = 0; $ramP95 = 0
+  if ($html -match 'RAM Durchschnitt.*?<div class="cv"[^>]*>([\d.]+)%.*?Peak:\s*(\d+)%.*?P95:\s*([\d.]+)%') {
+    $ramAvg = [double]$Matches[1]; $ramPeak = [int]$Matches[2]; $ramP95 = [double]$Matches[3]
+  }
+
+  # IOPS: Peak, Avg
+  $iopsPeak = 0; $iopsAvg = 0
+  if ($html -match 'IOPS Peak.*?<div class="cv"[^>]*>(\d+)') { $iopsPeak = [int]$Matches[1] }
+  if ($html -match 'IOPS Peak.*?&#216;\s*(\d+)') { $iopsAvg = [int]$Matches[1] }
+
+  # Defender CPU Peak
+  $defenderPeak = 0
+  if ($html -match 'Defender CPU Peak.*?<div class="cv"[^>]*>([\d.]+)%') { $defenderPeak = [double]$Matches[1] }
+
+  # Peak event counts
+  $cpuCritCount = 0; $ramCritCount = 0; $iopsCritCount = 0; $diskQueueCount = 0
+  if ($html -match 'CPU\s*(?:&ge;|>=)\s*90%.*?(\d+)\s*Mal') { $cpuCritCount = [int]$Matches[1] }
+  if ($html -match 'RAM\s*(?:&ge;|>=)\s*90%.*?(\d+)\s*Mal') { $ramCritCount = [int]$Matches[1] }
+  if ($html -match 'IOPS\s*(?:&ge;|>=)\s*1000.*?(\d+)\s*Mal') { $iopsCritCount = [int]$Matches[1] }
+  if ($html -match 'Disk Queue\s*(?:&gt;|>)\s*2.*?(\d+)\s*Mal') { $diskQueueCount = [int]$Matches[1] }
+
+  # Measurement interval/duration
+  $interval = ''; $dataPoints = 0
+  if ($html -match 'Intervall.*?(\d+s).*?(\d+)\s*Messpunkte') {
+    $interval = $Matches[1]; $dataPoints = [int]$Matches[2]
+  }
+
+  # StePaT version
+  $stepatVersion = ''
+  if ($html -match 'StePat Inspector\s*(v[\d.]+)') { $stepatVersion = $Matches[1] }
+
+  # Validate minimum required data
+  if ($vcpu -eq 0 -or $ramGB -eq 0) { throw "Could not parse VM specs (vCPU/RAM) from report." }
+  if ($cpuAvg -eq 0 -and $ramAvg -eq 0) { throw "Could not parse performance metrics from report." }
+
+  # Map VM size to BWS catalog name (e.g. "Standard_D4s_v5" -> "D4s v5")
+  $bwsVmName = $vmSize -replace 'Standard_', '' -replace '_', ' '
+
+  [pscustomobject]@{
+    Hostname       = $hostname
+    VmSize         = $vmSize
+    BwsVmName      = $bwsVmName
+    VCpu           = $vcpu
+    RamGB          = $ramGB
+    CpuAvgPct      = $cpuAvg
+    CpuPeakPct     = $cpuPeak
+    CpuP95Pct      = $cpuP95
+    RamAvgPct      = $ramAvg
+    RamPeakPct     = $ramPeak
+    RamP95Pct      = $ramP95
+    IopsPeak       = $iopsPeak
+    IopsAvg        = $iopsAvg
+    DefenderCpuPeak = $defenderPeak
+    CpuCritEvents  = $cpuCritCount
+    RamCritEvents  = $ramCritCount
+    IopsCritEvents = $iopsCritCount
+    DiskQueueEvents = $diskQueueCount
+    Interval       = $interval
+    DataPoints     = $dataPoints
+    StepatVersion  = $stepatVersion
+    SourceFile     = [System.IO.Path]::GetFileName($Path)
   }
 }
 
@@ -1123,7 +1386,7 @@ function Get-AvdSizing {
     [double]$ProfileContainerGB=30, [double]$ProfileGrowthPercent=20, [double]$ProfileOverheadPercent=10,
     [ValidateSet('BreadthFirst','DepthFirst')][string]$LoadBalancing='BreadthFirst',
     [int]$MaxSessionLimit=0,
-    [ValidateSet('New','Assess')][string]$SizingMode='New',
+    [ValidateSet('New','Assess','Stepat')][string]$SizingMode='New',
     $AppOverhead = $null   # output of Get-ApplicationOverhead
   )
 
@@ -1280,13 +1543,13 @@ function Get-AvdSizing {
       $ramBreakdown = "RAM breakdown: OS=$($best.RamGB_OS) GB + Users=$($best.RamGB_Users) GB ($($best.UsersPerHost) x $($best.RamGB_PerUser) GB)"
       if ($best.RamGB_AppOverhead -gt 0) { $ramBreakdown += " + Apps=$($best.RamGB_AppOverhead) GB" }
       $ramBreakdown += " = $($best.RamGB_Estimated) GB needed (provisioned: $($best.RamGB_Provisioned) GB)"
-      if ($SizingMode -eq 'Assess') {
+      if ($SizingMode -in 'Assess','Stepat') {
         $warnings.Add("ASSESSMENT: RAM INSUFFICIENT — existing host has $($best.RamGB_VmCapacity) GB but $($best.RamGB_Provisioned) GB required.")
       } else {
         $warnings.Add("WARNING: RAM insufficient — VM has $($best.RamGB_VmCapacity) GB but $($best.RamGB_Provisioned) GB required.")
       }
       $warnings.Add("  $ramBreakdown")
-      if ($SizingMode -eq 'Assess') {
+      if ($SizingMode -in 'Assess','Stepat') {
         $warnings.Add("  Recommendation: increase RAM to at least $([Math]::Ceiling($best.RamGB_Provisioned)) GB per host.")
       } else {
         $warnings.Add("  Consider increasing the max RAM range or reducing users/applications.")
@@ -1294,14 +1557,15 @@ function Get-AvdSizing {
     }
 
     # vCPU capacity warning (Assess mode)
-    if ($SizingMode -eq 'Assess' -and $best.VcpuPerHost -lt $minVcpuBP) {
+    if ($SizingMode -in 'Assess','Stepat' -and $best.VcpuPerHost -lt $minVcpuBP) {
       $warnings.Add("ASSESSMENT: vCPU BELOW BASELINE — existing host has $($best.VcpuPerHost) vCPU, $Workload workload recommends minimum $minVcpuBP vCPU.")
       $warnings.Add("  Recommendation: increase vCPU to at least $minVcpuBP per host for $Workload workload.")
     }
 
     # Assessment: hosts needed with current config + target host warning
     $script:AssessRecommendedVm = $null
-    if ($SizingMode -eq 'Assess') {
+    $script:AssessAlternativeVm = $null
+    if ($SizingMode -in 'Assess','Stepat') {
       $maxCapacity = $best.UsersPerHost * $TargetHosts
       $warnings.Add("")
       $warnings.Add("ASSESSMENT SUMMARY — EXISTING INFRASTRUCTURE:")
@@ -1333,20 +1597,93 @@ function Get-AvdSizing {
           $appRamForReq = [Math]::Round($ramPerUser * $reqUsersPerHost, 2)
         }
         $reqRam = [Math]::Ceiling($best.RamGB_OS + ($reqUsersPerHost * $best.RamGB_PerUser) + $appRamForReq)
+
+        # StePaT: detect RAM bottleneck → prefer E-series (Memory Optimized, 8 GB/vCPU)
+        # Condition: CPU headroom available (P95 < 70%) but RAM critically high (P95 > 85%)
+        $recSeries = $null  # null = no preference, use cheapest
+        $seriesReason = ''
+        if ($SizingMode -eq 'Stepat' -and $script:StepatData) {
+          $sd = $script:StepatData
+          $cpuHasHeadroom = $sd.CpuP95Pct -lt 70
+          $ramIsBottleneck = $sd.RamP95Pct -gt 85
+          if ($cpuHasHeadroom -and $ramIsBottleneck) {
+            $recSeries = 'E'
+            $seriesReason = "CPU has headroom (P95=$($sd.CpuP95Pct)%) but RAM is bottleneck (P95=$($sd.RamP95Pct)%)"
+            $warnings.Add("")
+            $warnings.Add("  MEMORY OPTIMIZED RECOMMENDATION:")
+            $warnings.Add("    $seriesReason")
+            $warnings.Add("    Switching to E-series (8 GB/vCPU) instead of D-series (4 GB/vCPU).")
+          } elseif (-not $cpuHasHeadroom -and $ramIsBottleneck) {
+            $recSeries = 'E'
+            $seriesReason = "Both CPU (P95=$($sd.CpuP95Pct)%) and RAM (P95=$($sd.RamP95Pct)%) are high"
+            $warnings.Add("")
+            $warnings.Add("  MEMORY OPTIMIZED RECOMMENDATION:")
+            $warnings.Add("    $seriesReason")
+            $warnings.Add("    E-series (8 GB/vCPU) recommended for better RAM/vCPU ratio.")
+          }
+        }
+
+        # Find recommended VM(s)
+        # When RAM bottleneck detected: show BOTH current series AND memory-optimized option
+        $recVmDSeries = $null
+        $recVmESeries = $null
         $recVmForReport = $null
         if ($script:BwsVmCatalog) {
-          $recVmForReport = $script:BwsVmCatalog | Where-Object {
-            $_.vCPU -ge $reqVcpu -and $_.RamGB -ge $reqRam
+          # Always find D-series option
+          $recVmDSeries = $script:BwsVmCatalog | Where-Object {
+            $_.vCPU -ge $reqVcpu -and $_.RamGB -ge $reqRam -and $_.Series -eq 'D'
           } | Sort-Object PriceCHF | Select-Object -First 1
+          # Always find E-series option
+          $recVmESeries = $script:BwsVmCatalog | Where-Object {
+            $_.vCPU -ge $reqVcpu -and $_.RamGB -ge $reqRam -and $_.Series -eq 'E'
+          } | Sort-Object PriceCHF | Select-Object -First 1
+          # Primary recommendation based on analysis
+          if ($recSeries -eq 'E' -and $recVmESeries) {
+            $recVmForReport = $recVmESeries
+          } elseif ($recVmDSeries) {
+            $recVmForReport = $recVmDSeries
+          } elseif ($recVmESeries) {
+            $recVmForReport = $recVmESeries
+          } else {
+            # Fallback: any series
+            $recVmForReport = $script:BwsVmCatalog | Where-Object {
+              $_.vCPU -ge $reqVcpu -and $_.RamGB -ge $reqRam
+            } | Sort-Object PriceCHF | Select-Object -First 1
+          }
         }
         $warnings.Add("")
         $warnings.Add("  RECOMMENDATION to serve $peakConcurrent users on $TargetHosts host(s):")
         $warnings.Add("    Users per host:    $reqUsersPerHost")
         $warnings.Add("    Min vCPU per host: $reqVcpu (workload: $baseVcpuForUsers + apps: $appCpuForReq)")
         $warnings.Add("    Min RAM per host:  $reqRam GB (OS: $($best.RamGB_OS) + users: $($reqUsersPerHost * $best.RamGB_PerUser) + apps: $appRamForReq)")
-        if ($recVmForReport) {
+
+        if ($recSeries -and $recVmDSeries -and $recVmESeries) {
+          # Series switch recommended — show both options with reasoning
           $script:AssessRecommendedVm = $recVmForReport
-          $warnings.Add("    Suggested VM:      $($recVmForReport.Name) ($($recVmForReport.vCPU) vCPU, $($recVmForReport.RamGB) GB RAM)")
+          $script:AssessAlternativeVm = if ($recSeries -eq 'E') { $recVmDSeries } else { $recVmESeries }
+          $warnings.Add("")
+          $warnings.Add("    Option A — D-series (General Purpose, 4 GB/vCPU):")
+          $warnings.Add("      $($recVmDSeries.Name) ($($recVmDSeries.vCPU) vCPU, $($recVmDSeries.RamGB) GB RAM)")
+          if ($recSeries -eq 'E') {
+            $warnings.Add("      More vCPU needed to get sufficient RAM. Higher CPU capacity but less cost-efficient for RAM-heavy workloads.")
+          } else {
+            $warnings.Add("      Best price/performance for balanced workloads.")
+          }
+          $warnings.Add("    Option B — E-series (Memory Optimized, 8 GB/vCPU):")
+          $warnings.Add("      $($recVmESeries.Name) ($($recVmESeries.vCPU) vCPU, $($recVmESeries.RamGB) GB RAM)")
+          if ($recSeries -eq 'E') {
+            $warnings.Add("      RECOMMENDED — Provides more RAM per vCPU. Fewer vCPU needed to meet RAM requirements.")
+          } else {
+            $warnings.Add("      Alternative if RAM usage grows further.")
+          }
+          $recLabel = if ($recSeries -eq 'E') { 'B (E-series)' } else { 'A (D-series)' }
+          $warnings.Add("")
+          $warnings.Add("    Suggested: Option $recLabel — $($recVmForReport.Name) ($($recVmForReport.vCPU) vCPU, $($recVmForReport.RamGB) GB RAM, $($recVmForReport.Series)-series)")
+        } elseif ($recVmForReport) {
+          $script:AssessRecommendedVm = $recVmForReport
+          $script:AssessAlternativeVm = $null
+          $vmDesc = "$($recVmForReport.Name) ($($recVmForReport.vCPU) vCPU, $($recVmForReport.RamGB) GB RAM, $($recVmForReport.Series)-series)"
+          $warnings.Add("    Suggested VM:      $vmDesc")
         } else {
           $warnings.Add("    Suggested VM:      No single VM in catalog meets requirements — consider more hosts.")
         }
@@ -1499,8 +1836,8 @@ function Set-ResultsGrid {
   $r = $Sizing.Recommended
 
   $rows.Add([pscustomobject]@{ Key='HostPoolType'; Value=$Sizing.HostPoolType })
-  $rows.Add([pscustomobject]@{ Key='Sizing Mode'; Value=$(if($Sizing.SizingMode -eq 'Assess'){Get-Str 'mode.assess'}else{Get-Str 'mode.new'}) })
-  if ($Sizing.SizingMode -eq 'Assess' -and $Sizing.AssessedVmName) {
+  $rows.Add([pscustomobject]@{ Key='Sizing Mode'; Value=$(if($Sizing.SizingMode -eq 'Assess'){Get-Str 'mode.assess'}elseif($Sizing.SizingMode -eq 'Stepat'){Get-Str 'mode.stepat'}else{Get-Str 'mode.new'}) })
+  if ($Sizing.SizingMode -in 'Assess','Stepat' -and $Sizing.AssessedVmName) {
     $rows.Add([pscustomobject]@{ Key='Assessed VM Template'; Value=$Sizing.AssessedVmName })
   }
   $rows.Add([pscustomobject]@{ Key='Mode'; Value=$Sizing.Mode })
@@ -1584,7 +1921,7 @@ function Set-ResultsGrid {
 
   if ($VmPick) {
     # In Assess mode: show current config, assessment, and recommendation
-    if ($Sizing.SizingMode -eq 'Assess') {
+    if ($Sizing.SizingMode -in 'Assess','Stepat') {
       $rows.Add([pscustomobject]@{ Key='--- CURRENT VM TEMPLATE ---'; Value='' })
       if ($VmPick.PSObject.Properties.Name -contains 'BwsName') {
         $rows.Add([pscustomobject]@{ Key='Current VM'; Value=$VmPick.BwsName })
@@ -1612,11 +1949,35 @@ function Set-ResultsGrid {
       if ($VmPick.BwsRecommendedVm) {
         $rv = $VmPick.BwsRecommendedVm
         if ($rv.Name -ne $VmPick.BwsName) {
-          $rows.Add([pscustomobject]@{ Key='Recommended VM'; Value="$($rv.Name) ($($rv.vCPU) vCPU, $($rv.RamGB) GB RAM)" })
+          $rows.Add([pscustomobject]@{ Key='Recommended VM'; Value="$($rv.Name) ($($rv.vCPU) vCPU, $($rv.RamGB) GB RAM, $($rv.Series)-series)" })
           $rows.Add([pscustomobject]@{ Key='Target Hosts'; Value="$($Sizing.TargetHosts) host(s) with $($rv.Name)" })
         } else {
           $rows.Add([pscustomobject]@{ Key='Recommended VM'; Value="Current template ($($VmPick.BwsName)) is sufficient." })
         }
+        # Show alternative option if available
+        if ($VmPick.PSObject.Properties.Name -contains 'BwsAlternativeVm' -and $VmPick.BwsAlternativeVm) {
+          $alt = $VmPick.BwsAlternativeVm
+          $rows.Add([pscustomobject]@{ Key='Alternative VM'; Value="$($alt.Name) ($($alt.vCPU) vCPU, $($alt.RamGB) GB RAM, $($alt.Series)-series)" })
+          if ($rv.Series -eq 'E') {
+            $rows.Add([pscustomobject]@{ Key='Reason'; Value="RAM bottleneck detected — E-series (8 GB/vCPU) primary, D-series (4 GB/vCPU) as alternative" })
+          } else {
+            $rows.Add([pscustomobject]@{ Key='Reason'; Value="D-series (4 GB/vCPU) primary — E-series (8 GB/vCPU) as fallback if RAM grows" })
+          }
+        }
+      }
+
+      # StePaT performance metrics
+      if ($Sizing.SizingMode -eq 'Stepat' -and $Sizing.StepatData) {
+        $sd = $Sizing.StepatData
+        $rows.Add([pscustomobject]@{ Key='--- STEPAT METRICS ---'; Value='' })
+        $rows.Add([pscustomobject]@{ Key='Source'; Value="$($sd.Hostname) — $($sd.SourceFile)" })
+        $rows.Add([pscustomobject]@{ Key='StePaT Version'; Value=$sd.StepatVersion })
+        $rows.Add([pscustomobject]@{ Key='Measurement'; Value="$($sd.DataPoints) data points @ $($sd.Interval)" })
+        $rows.Add([pscustomobject]@{ Key='CPU'; Value="Avg $($sd.CpuAvgPct)% | Peak $($sd.CpuPeakPct)% | P95 $($sd.CpuP95Pct)%" })
+        $rows.Add([pscustomobject]@{ Key='RAM'; Value="Avg $($sd.RamAvgPct)% | Peak $($sd.RamPeakPct)% | P95 $($sd.RamP95Pct)%" })
+        $rows.Add([pscustomobject]@{ Key='IOPS'; Value="Peak $($sd.IopsPeak) | Avg $($sd.IopsAvg)" })
+        $rows.Add([pscustomobject]@{ Key='Defender CPU Peak'; Value="$($sd.DefenderCpuPeak)%" })
+        $rows.Add([pscustomobject]@{ Key='Critical Events'; Value="CPU>=90%: $($sd.CpuCritEvents)x | RAM>=90%: $($sd.RamCritEvents)x | IOPS>=1000: $($sd.IopsCritEvents)x | DiskQueue>2: $($sd.DiskQueueEvents)x" })
       }
 
     } else {
@@ -1897,6 +2258,7 @@ Power (1 utente/vCPU, 8 GB RAM): CAD/3D, sviluppo software, carichi GPU, editing
   'btn.validate'    = @{ en='Validate Configuration'; de='Konfiguration prüfen'; fr='Valider la configuration'; it='Valida configurazione' }
   'mode.new'        = @{ en='New Infrastructure'; de='Neue Infrastruktur'; fr='Nouvelle infrastructure'; it='Nuova infrastruttura' }
   'mode.assess'     = @{ en='Assess Existing'; de='Bestehende bewerten'; fr='Évaluer existant'; it='Valuta esistente' }
+  'mode.stepat'     = @{ en='StePaT Report Import'; de='StePaT Report Import'; fr='Import rapport StePaT'; it='Importa rapporto StePaT' }
   'mode.title'      = @{ en='Sizing Mode'; de='Sizing-Modus'; fr='Mode de dimensionnement'; it='Modalità dimensionamento' }
   'mode.desc'       = @{ en='New: plan optimal infrastructure. Assess: validate existing setup.'; de='Neu: optimale Infrastruktur planen. Bewerten: bestehende Konfiguration prüfen.'; fr='Nouveau: planifier l''infrastructure optimale. Évaluer: valider la configuration existante.'; it='Nuovo: pianificare infrastruttura ottimale. Valuta: verificare configurazione esistente.' }
   'btn.exportjson'  = @{ en='Export JSON'; de='JSON exportieren'; fr='Exporter JSON'; it='Esporta JSON' }
@@ -1949,13 +2311,14 @@ function Apply-Language {
 
   # Buttons
   $b = $w.FindName('BtnCalculate');    if ($b) { $b.Content = Get-Str 'btn.calculate' }
-  $b = $w.FindName('BtnPickVm');       if ($b) { $b.Content = if ($script:SizingMode -eq 'Assess') { Get-Str 'btn.validate' } else { Get-Str 'btn.pickvm' } }
+  $b = $w.FindName('BtnPickVm');       if ($b) { $b.Content = if ($script:SizingMode -in 'Assess','Stepat') { Get-Str 'btn.validate' } else { Get-Str 'btn.pickvm' } }
   Set-LblText 'LblSizingMode'       'mode.title'
   Set-LblText 'LblSizingModeDesc'   'mode.desc'
   $cmb = $w.FindName('CmbSizingMode')
-  if ($cmb -and $cmb.Items.Count -ge 2) {
+  if ($cmb -and $cmb.Items.Count -ge 3) {
     $cmb.Items[0].Content = Get-Str 'mode.new'
     $cmb.Items[1].Content = Get-Str 'mode.assess'
+    $cmb.Items[2].Content = Get-Str 'mode.stepat'
   }
   $b = $w.FindName('BtnExportReport'); if ($b) { $b.Content = Get-Str 'btn.exportreport' }
   $b = $w.FindName('BtnClose');        if ($b) { $b.Content = Get-Str 'btn.close' }
@@ -1973,8 +2336,8 @@ function Apply-Language {
   Set-LblText 'LblConcurrencyDesc'  'wl.concurrency.desc'
   Set-LblText 'LblPeakFactor'       'wl.peakfactor'
   Set-LblText 'LblPeakFactorDesc'   'wl.peakfactor.desc'
-  $thKey = if ($script:SizingMode -eq 'Assess') { 'wl.currenthosts' } else { 'wl.targethosts' }
-  $thDescKey = if ($script:SizingMode -eq 'Assess') { 'wl.currenthosts.desc' } else { 'wl.targethosts.desc' }
+  $thKey = if ($script:SizingMode -in 'Assess','Stepat') { 'wl.currenthosts' } else { 'wl.targethosts' }
+  $thDescKey = if ($script:SizingMode -in 'Assess','Stepat') { 'wl.currenthosts.desc' } else { 'wl.targethosts.desc' }
   Set-LblText 'LblTargetHosts'      $thKey
   Set-LblText 'LblTargetHostsDesc'  $thDescKey
   Set-LblText 'LblNPlus1'           'wl.nplus1'
@@ -2226,7 +2589,7 @@ $XamlString = @"
     <DockPanel LastChildFill="False">
       <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
         <TextBlock FontSize="20" FontWeight="Bold" Foreground="#FFFFFF" Text="BWS AVD Sizing"/>
-        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v2.7.0"/>
+        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v2.8.2"/>
       </StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
         <TextBlock Foreground="#88AACC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0" Text="Language:"/>
@@ -2249,8 +2612,26 @@ $XamlString = @"
             <TextBlock x:Name="LblSizingMode" FontWeight="Bold" Foreground="#086ADB" FontSize="13" Text="Sizing Mode" Margin="0,0,0,4"/>
             <TextBlock x:Name="LblSizingModeDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="New: plan optimal infrastructure. Assess: validate existing setup."/>
             <ComboBox x:Name="CmbSizingMode" Margin="0,3,0,12" SelectedIndex="0">
-              <ComboBoxItem Content="New Infrastructure"/><ComboBoxItem Content="Assess Existing"/>
+              <ComboBoxItem Content="New Infrastructure"/><ComboBoxItem Content="Assess Existing"/><ComboBoxItem Content="StePaT Report Import"/>
             </ComboBox>
+            <!-- StePaT Import Panel (hidden by default) -->
+            <StackPanel x:Name="PnlStepatImport" Visibility="Collapsed" Margin="0,0,0,8">
+              <Border Background="#F0F5FF" BorderBrush="#086ADB" BorderThickness="1" CornerRadius="6" Padding="14,10">
+                <StackPanel>
+                  <TextBlock FontWeight="Bold" Foreground="#086ADB" Text="StePaT Report Import" Margin="0,0,0,6"/>
+                  <TextBlock Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Import a StePaT Inspector HTML report to use real performance metrics as basis for the sizing recommendation."/>
+                  <Button x:Name="BtnImportStepat" Content="Import StePaT Report..." HorizontalAlignment="Left" Padding="16,6" Background="#086ADB" Foreground="White" FontWeight="SemiBold" Cursor="Hand" Margin="0,0,0,8"/>
+                  <TextBlock x:Name="TxtStepatStatus" Foreground="#999999" FontSize="11" TextWrapping="Wrap" Text="No report imported."/>
+                  <StackPanel x:Name="PnlStepatInfo" Visibility="Collapsed" Margin="0,6,0,0">
+                    <TextBlock x:Name="TxtStepatServer" Foreground="#333333" FontSize="12" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="TxtStepatVm" Foreground="#556688" FontSize="11"/>
+                    <TextBlock x:Name="TxtStepatCpu" Foreground="#556688" FontSize="11"/>
+                    <TextBlock x:Name="TxtStepatRam" Foreground="#556688" FontSize="11"/>
+                    <TextBlock x:Name="TxtStepatIops" Foreground="#556688" FontSize="11"/>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+            </StackPanel>
             <Separator Margin="0,0,0,8"/>
 
             <TextBlock x:Name="LblHostPoolType" FontWeight="Bold" Text="Host pool type"/>
@@ -2560,36 +2941,97 @@ foreach ($vm in $script:BwsVmCatalog) {
 }
 if ($CmbAssessVm.Items.Count -gt 0) { $CmbAssessVm.SelectedIndex = 2 } # D8s v5 as default
 
+# StePaT Import panel + button bindings
+$PnlStepatImport = $Window.FindName('PnlStepatImport')
+$BtnImportStepat = $Window.FindName('BtnImportStepat')
+$TxtStepatStatus = $Window.FindName('TxtStepatStatus')
+$PnlStepatInfo = $Window.FindName('PnlStepatInfo')
+$TxtStepatServer = $Window.FindName('TxtStepatServer')
+$TxtStepatVm = $Window.FindName('TxtStepatVm')
+$TxtStepatCpu = $Window.FindName('TxtStepatCpu')
+$TxtStepatRam = $Window.FindName('TxtStepatRam')
+$TxtStepatIops = $Window.FindName('TxtStepatIops')
+$script:StepatData = $null
+
 # Sizing Mode toggle
 $CmbSizingMode = $Window.FindName('CmbSizingMode')
 $script:SizingMode = 'New'
 $CmbSizingMode.add_SelectionChanged({
   $lblTH = $Window.FindName('LblTargetHosts')
   $lblTHDesc = $Window.FindName('LblTargetHostsDesc')
-  if ($CmbSizingMode.SelectedIndex -eq 0) {
-    $script:SizingMode = 'New'
-    $PnlVcpuRange.Visibility = 'Visible'
-    $PnlRamRange.Visibility = 'Visible'
-    $PnlAssessVm.Visibility = 'Collapsed'
-    $lv = $Window.FindName('LblVcpuRange'); if ($lv) { $lv.Visibility = 'Visible' }
-    $lvd = $Window.FindName('LblVcpuRangeDesc'); if ($lvd) { $lvd.Visibility = 'Visible' }
-    $lr = $Window.FindName('LblRamRange'); if ($lr) { $lr.Visibility = 'Visible' }
-    $lrd = $Window.FindName('LblRamRangeDesc'); if ($lrd) { $lrd.Visibility = 'Visible' }
-    $b = $Window.FindName('BtnPickVm'); if ($b) { $b.Content = Get-Str 'btn.pickvm' }
-    if ($lblTH) { $lblTH.Text = Get-Str 'wl.targethosts' }
-    if ($lblTHDesc) { $lblTHDesc.Text = Get-Str 'wl.targethosts.desc' }
-  } else {
-    $script:SizingMode = 'Assess'
-    $PnlVcpuRange.Visibility = 'Collapsed'
-    $PnlRamRange.Visibility = 'Collapsed'
-    $PnlAssessVm.Visibility = 'Visible'
-    $lv = $Window.FindName('LblVcpuRange'); if ($lv) { $lv.Visibility = 'Collapsed' }
-    $lvd = $Window.FindName('LblVcpuRangeDesc'); if ($lvd) { $lvd.Visibility = 'Collapsed' }
-    $lr = $Window.FindName('LblRamRange'); if ($lr) { $lr.Visibility = 'Collapsed' }
-    $lrd = $Window.FindName('LblRamRangeDesc'); if ($lrd) { $lrd.Visibility = 'Collapsed' }
-    $b = $Window.FindName('BtnPickVm'); if ($b) { $b.Content = Get-Str 'btn.validate' }
-    if ($lblTH) { $lblTH.Text = Get-Str 'wl.currenthosts' }
-    if ($lblTHDesc) { $lblTHDesc.Text = Get-Str 'wl.currenthosts.desc' }
+  $lv = $Window.FindName('LblVcpuRange'); $lvd = $Window.FindName('LblVcpuRangeDesc')
+  $lr = $Window.FindName('LblRamRange'); $lrd = $Window.FindName('LblRamRangeDesc')
+  $b = $Window.FindName('BtnPickVm')
+
+  switch ($CmbSizingMode.SelectedIndex) {
+    0 { # New Infrastructure
+      $script:SizingMode = 'New'
+      $PnlVcpuRange.Visibility = 'Visible'; $PnlRamRange.Visibility = 'Visible'
+      $PnlAssessVm.Visibility = 'Collapsed'; $PnlStepatImport.Visibility = 'Collapsed'
+      if ($lv) { $lv.Visibility = 'Visible' }; if ($lvd) { $lvd.Visibility = 'Visible' }
+      if ($lr) { $lr.Visibility = 'Visible' }; if ($lrd) { $lrd.Visibility = 'Visible' }
+      if ($b) { $b.Content = Get-Str 'btn.pickvm' }
+      if ($lblTH) { $lblTH.Text = Get-Str 'wl.targethosts' }
+      if ($lblTHDesc) { $lblTHDesc.Text = Get-Str 'wl.targethosts.desc' }
+    }
+    1 { # Assess Existing
+      $script:SizingMode = 'Assess'
+      $PnlVcpuRange.Visibility = 'Collapsed'; $PnlRamRange.Visibility = 'Collapsed'
+      $PnlAssessVm.Visibility = 'Visible'; $PnlStepatImport.Visibility = 'Collapsed'
+      if ($lv) { $lv.Visibility = 'Collapsed' }; if ($lvd) { $lvd.Visibility = 'Collapsed' }
+      if ($lr) { $lr.Visibility = 'Collapsed' }; if ($lrd) { $lrd.Visibility = 'Collapsed' }
+      if ($b) { $b.Content = Get-Str 'btn.validate' }
+      if ($lblTH) { $lblTH.Text = Get-Str 'wl.currenthosts' }
+      if ($lblTHDesc) { $lblTHDesc.Text = Get-Str 'wl.currenthosts.desc' }
+    }
+    2 { # StePaT Report Import
+      $script:SizingMode = 'Stepat'
+      $PnlVcpuRange.Visibility = 'Collapsed'; $PnlRamRange.Visibility = 'Collapsed'
+      $PnlAssessVm.Visibility = 'Collapsed'; $PnlStepatImport.Visibility = 'Visible'
+      if ($lv) { $lv.Visibility = 'Collapsed' }; if ($lvd) { $lvd.Visibility = 'Collapsed' }
+      if ($lr) { $lr.Visibility = 'Collapsed' }; if ($lrd) { $lrd.Visibility = 'Collapsed' }
+      if ($b) { $b.Content = Get-Str 'btn.validate' }
+      if ($lblTH) { $lblTH.Text = Get-Str 'wl.currenthosts' }
+      if ($lblTHDesc) { $lblTHDesc.Text = Get-Str 'wl.currenthosts.desc' }
+    }
+  }
+})
+
+# StePaT Import button handler
+$BtnImportStepat.add_Click({
+  try {
+    $dlg = [Microsoft.Win32.OpenFileDialog]::new()
+    $dlg.Title = 'Import StePaT Inspector Report'
+    $dlg.Filter = 'HTML Reports (*.html;*.htm)|*.html;*.htm|All Files (*.*)|*.*'
+    $dlg.DefaultExt = '.html'
+    if ($dlg.ShowDialog() -ne $true) { return }
+
+    $script:StepatData = Import-StepatReport -Path $dlg.FileName
+    $sd = $script:StepatData
+
+    $TxtStepatStatus.Text = "Imported: $($sd.SourceFile)"
+    $TxtStepatStatus.Foreground = [System.Windows.Media.Brushes]::Green
+    $TxtStepatServer.Text = "Server: $($sd.Hostname)  —  $($sd.VmSize)"
+    $TxtStepatVm.Text = "VM: $($sd.VCpu) vCPU, $($sd.RamGB) GB RAM ($($sd.BwsVmName))"
+    $TxtStepatCpu.Text = "CPU: Avg $($sd.CpuAvgPct)%, Peak $($sd.CpuPeakPct)%, P95 $($sd.CpuP95Pct)%"
+    $TxtStepatRam.Text = "RAM: Avg $($sd.RamAvgPct)%, Peak $($sd.RamPeakPct)%, P95 $($sd.RamP95Pct)%"
+    $TxtStepatIops.Text = "IOPS: Peak $($sd.IopsPeak), Avg $($sd.IopsAvg) | Defender CPU Peak: $($sd.DefenderCpuPeak)%"
+    $PnlStepatInfo.Visibility = 'Visible'
+
+    # Auto-select the matching VM in the Assess ComboBox as well (for PickVm reuse)
+    for ($i = 0; $i -lt $CmbAssessVm.Items.Count; $i++) {
+      if ($CmbAssessVm.Items[$i].Tag.Name -eq $sd.BwsVmName) {
+        $CmbAssessVm.SelectedIndex = $i; break
+      }
+    }
+
+    Write-UiInfo "StePaT report imported: $($sd.Hostname) — $($sd.BwsVmName) ($($sd.VCpu) vCPU, $($sd.RamGB) GB)"
+  } catch {
+    Write-UiError "Import failed: $($_.Exception.Message)"
+    $TxtStepatStatus.Text = "Import failed: $($_.Exception.Message)"
+    $TxtStepatStatus.Foreground = [System.Windows.Media.Brushes]::Red
+    $script:StepatData = $null
+    $PnlStepatInfo.Visibility = 'Collapsed'
   }
 })
 $CmbLoadBalancing = $Window.FindName('CmbLoadBalancing'); $TxtMaxSessionLimit = $Window.FindName('TxtMaxSessionLimit')
@@ -2719,6 +3161,11 @@ $BtnCalculate.add_Click({
       $assessVm = $selItem.Tag
       $paramMinVcpu = [int]$assessVm.vCPU; $paramMaxVcpu = [int]$assessVm.vCPU
       $paramMinRam  = [int]$assessVm.RamGB;  $paramMaxRam  = [int]$assessVm.RamGB
+    } elseif ($script:SizingMode -eq 'Stepat') {
+      if (-not $script:StepatData) { throw "Please import a StePaT report first." }
+      $sd = $script:StepatData
+      $paramMinVcpu = [int]$sd.VCpu; $paramMaxVcpu = [int]$sd.VCpu
+      $paramMinRam  = [int]$sd.RamGB;  $paramMaxRam  = [int]$sd.RamGB
     } else {
       $paramMinVcpu = [Math]::Max(4, (ConvertTo-IntSafe -Text $TxtMinVcpuHost.Text -Default 4))
       $paramMaxVcpu = [Math]::Min(64, [Math]::Max(4, (ConvertTo-IntSafe -Text $TxtMaxVcpuHost.Text -Default 64)))
@@ -2750,6 +3197,10 @@ $BtnCalculate.add_Click({
     if ($script:SizingMode -eq 'Assess' -and $CmbAssessVm.SelectedItem -and $CmbAssessVm.SelectedItem.Tag) {
       $script:LastSizing | Add-Member -NotePropertyName AssessedVmName -NotePropertyValue $CmbAssessVm.SelectedItem.Tag.Name -Force
     }
+    if ($script:SizingMode -eq 'Stepat' -and $script:StepatData) {
+      $script:LastSizing | Add-Member -NotePropertyName AssessedVmName -NotePropertyValue $script:StepatData.BwsVmName -Force
+      $script:LastSizing | Add-Member -NotePropertyName StepatData -NotePropertyValue $script:StepatData -Force
+    }
 
     Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick `
       -GridResults $GridResults -TxtNotes $TxtNotes
@@ -2768,13 +3219,24 @@ $BtnPickVm.add_Click({
       $series = $script:LastSizing.PreferredSeries
     }
 
-    # In Assess mode: use the selected VM directly, don't search
+    # In Assess/StePaT mode: use the selected VM directly, don't search
     # In New mode: search for best VM from BWS catalog
     if ($script:SizingMode -eq 'Assess') {
       $selItem = $CmbAssessVm.SelectedItem
       if (-not $selItem -or -not $selItem.Tag) { Write-UiWarning 'Please select an existing VM template.'; return }
       $assessVm = $selItem.Tag
       $bwsVm = $assessVm
+      $recVm = $script:AssessRecommendedVm
+    } elseif ($script:SizingMode -eq 'Stepat') {
+      if (-not $script:StepatData) { Write-UiWarning 'Please import a StePaT report first.'; return }
+      $sd = $script:StepatData
+      # Find the matching VM in BWS catalog
+      $bwsVm = $script:BwsVmCatalog | Where-Object { $_.Name -eq $sd.BwsVmName } | Select-Object -First 1
+      if (-not $bwsVm) {
+        # Fallback: match by vCPU + RAM
+        $bwsVm = $script:BwsVmCatalog | Where-Object { $_.vCPU -eq $sd.VCpu -and $_.RamGB -eq $sd.RamGB } | Select-Object -First 1
+      }
+      if (-not $bwsVm) { Write-UiWarning "VM '$($sd.BwsVmName)' not found in BWS catalog."; return }
       $recVm = $script:AssessRecommendedVm
     } else {
       $maxVcpuRange = [Math]::Min(64, [Math]::Max(4, (ConvertTo-IntSafe -Text $TxtMaxVcpuHost.Text -Default 64)))
@@ -2819,15 +3281,17 @@ $BtnPickVm.add_Click({
       BwsSeries       = $bwsVm.Series
       BwsOsDisk       = $bwsOsDisk
       BwsAddDisks     = $additionalDisks
-      BwsRecommendedVm = if ($script:SizingMode -eq 'Assess' -and $recVm) { $recVm } else { $null }
+      BwsRecommendedVm = if ($script:SizingMode -in 'Assess','Stepat' -and $recVm) { $recVm } else { $null }
+      BwsAlternativeVm = if ($script:SizingMode -in 'Assess','Stepat' -and $script:AssessAlternativeVm) { $script:AssessAlternativeVm } else { $null }
     }
 
     Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick `
       -GridResults $GridResults -TxtNotes $TxtNotes
 
-    # In Assess mode: show current vs recommended
-    if ($script:SizingMode -eq 'Assess') {
-      $recMsg = "Assessment: Current=$($bwsVm.Name) ($($bwsVm.vCPU) vCPU, $($bwsVm.RamGB) GB)"
+    # In Assess/StePaT mode: show current vs recommended
+    if ($script:SizingMode -in 'Assess','Stepat') {
+      $modeLabel = if ($script:SizingMode -eq 'Stepat') { 'StePaT' } else { 'Assessment' }
+      $recMsg = "$($modeLabel): Current=$($bwsVm.Name) ($($bwsVm.vCPU) vCPU, $($bwsVm.RamGB) GB)"
       if ($recVm -and $recVm.Name -ne $bwsVm.Name) {
         $recMsg += " | Recommended=$($recVm.Name) ($($recVm.vCPU) vCPU, $($recVm.RamGB) GB)"
       } elseif ($recVm) {
@@ -2905,12 +3369,18 @@ $BtnExportReport.add_Click({
         $osDiskRow = "          <tr><td>OS Disk</td><td>$($od.Sku) ($($od.SizeGiB) GiB, $($od.IOPS) IOPS, $($od.MBps) MB/s)</td></tr>"
       }
       $recVmRow = ''
-      if ($s.SizingMode -eq 'Assess' -and $script:LastVmPick.BwsRecommendedVm) {
+      $altVmRow = ''
+      if ($s.SizingMode -in 'Assess','Stepat' -and $script:LastVmPick.BwsRecommendedVm) {
         $rv = $script:LastVmPick.BwsRecommendedVm
         if ($rv.Name -ne $script:LastVmPick.BwsName) {
-          $recVmRow = "          <tr class=`"highlight`"><td>Recommended VM</td><td><strong>$($rv.Name)</strong> ($($rv.vCPU) vCPU, $($rv.RamGB) GB RAM)</td></tr>"
+          $recVmRow = "          <tr class=`"highlight`"><td>Recommended VM</td><td><strong>$($rv.Name)</strong> ($($rv.vCPU) vCPU, $($rv.RamGB) GB RAM, $($rv.Series)-series)</td></tr>"
         } else {
           $recVmRow = "          <tr class=`"highlight`"><td>Recommended VM</td><td>Current template is sufficient.</td></tr>"
+        }
+        if ($script:LastVmPick.PSObject.Properties.Name -contains 'BwsAlternativeVm' -and $script:LastVmPick.BwsAlternativeVm) {
+          $alt = $script:LastVmPick.BwsAlternativeVm
+          $altReason = if ($rv.Series -eq 'E') { 'D-series alternative — General Purpose (4 GB/vCPU), more vCPU for same RAM' } else { 'E-series alternative — Memory Optimized (8 GB/vCPU), if RAM grows' }
+          $altVmRow = "          <tr><td>Alternative VM</td><td>$($alt.Name) ($($alt.vCPU) vCPU, $($alt.RamGB) GB RAM, $($alt.Series)-series) — $altReason</td></tr>"
         }
       }
       $vmHtml = @"
@@ -2918,13 +3388,14 @@ $BtnExportReport.add_Click({
         <h2><span class="num">$sectionNum</span> $(Get-Str 'rpt.vmselection')</h2>
         <table>
           <tbody>
-            <tr><td>$(if($s.SizingMode -eq 'Assess'){'Current VM'}else{'VM Size'})</td><td><strong>$vmName</strong></td></tr>
+            <tr><td>$(if($s.SizingMode -in 'Assess','Stepat'){'Current VM'}else{'VM Size'})</td><td><strong>$vmName</strong></td></tr>
             <tr><td>vCPU</td><td>$vmCores</td></tr>
             <tr><td>RAM</td><td>$vmRam GB</td></tr>
             $(if($isBws){"<tr><td>Series</td><td>$($script:LastVmPick.BwsSeries)-series</td></tr>"}else{''})
             $osDiskRow
             $addDiskRows
             $recVmRow
+            $altVmRow
           </tbody>
         </table>
       </section>
@@ -3147,8 +3618,8 @@ $BtnExportReport.add_Click({
     <table>
       <tbody>
         <tr><td>Host Pool Type</td><td><strong>$($s.HostPoolType)</strong> ($($s.Mode))</td></tr>
-        <tr><td>Sizing Mode</td><td><strong>$(if($s.SizingMode -eq 'Assess'){Get-Str 'mode.assess'}else{Get-Str 'mode.new'})</strong></td></tr>
-        $(if($s.SizingMode -eq 'Assess' -and $s.AssessedVmName){"<tr><td>Assessed VM Template</td><td><strong>$($s.AssessedVmName)</strong></td></tr>"}else{''})
+        <tr><td>Sizing Mode</td><td><strong>$(if($s.SizingMode -eq 'Assess'){Get-Str 'mode.assess'}elseif($s.SizingMode -eq 'Stepat'){Get-Str 'mode.stepat'}else{Get-Str 'mode.new'})</strong></td></tr>
+        $(if($s.SizingMode -in 'Assess','Stepat' -and $s.AssessedVmName){"<tr><td>Assessed VM Template</td><td><strong>$($s.AssessedVmName)</strong></td></tr>"}else{''})
         <tr><td>Workload Class</td><td>$($s.Workload)</td></tr>
         <tr><td>Total Users</td><td>$($s.TotalUsers)</td></tr>
         <tr><td>Peak Concurrent</td><td>$($s.PeakConcurrentUsers)</td></tr>
@@ -3237,6 +3708,10 @@ $BtnReset.add_Click({
   # Workload tab - reset to defaults
   $CmbSizingMode.SelectedIndex = 0     # New Infrastructure
   $script:SizingMode = 'New'
+  $script:StepatData = $null
+  $TxtStepatStatus.Text = 'No report imported.'
+  $TxtStepatStatus.Foreground = [System.Windows.Media.Brushes]::Gray
+  $PnlStepatInfo.Visibility = 'Collapsed'
   $CmbHostPoolType.SelectedIndex = 0
   $CmbWorkload.SelectedIndex = 1       # Medium
   $TxtTotalUsers.Text = '100'
