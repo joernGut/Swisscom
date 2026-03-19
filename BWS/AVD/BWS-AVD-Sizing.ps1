@@ -1,12 +1,27 @@
 <#
 ================================================================================
-  Author:  Jörn Gutting 
+  Author:  Jörn Gutting (optimised by Claude)
   Script:  BWS AVD Sizing - Swisscom Branded Edition (WPF GUI) - PowerShell 7
-  Version: 2.0.0
+  Version: 2.1.0
   Date:    2025-02-20
 
   CHANGELOG
   =========
+
+  v2.1.0 (2025-02-20)
+  --------------------
+  - REMOVED: All pricing and cost features
+    * Costs tab completely removed (XAML, handler, FindName bindings)
+    * Pricing section removed from Results grid (no more CHF values)
+    * User Cost Analysis section removed from HTML report
+    * VM cost, OS Disk cost, Additional Disk cost no longer displayed anywhere
+    * CHF/month column removed from Additional Disks DataGrid
+    * CHF removed from Additional Disks ComboBox display
+    * $script:LastVmPrice object removed entirely
+    * Get-AzVmHourlyRetailPrice function removed
+    * Get-CurrencyCode function removed
+    * All cost localization strings removed (cost.*, btn.calccosts, rpt.usercosts, tab.costs)
+  - NOTE: PriceCHF retained internally in catalogs for VM selection logic (cheapest pick)
 
   v2.0.0 (2025-02-20)
   --------------------
@@ -298,8 +313,8 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion  = '2.0.3'
-$ScriptBuildUtc = '2025-02-20T13:00:00Z'
+$ScriptVersion  = '2.7.0'
+$ScriptBuildUtc = '2025-02-21T05:00:00Z'
 
 #region Ensure STA for WPF
 if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
@@ -383,11 +398,6 @@ function ConvertTo-ArmRegionName {
   if ($map.ContainsKey($norm)) { return $map[$norm] }
   if ($map.ContainsKey($normNoSpace)) { return $map[$normNoSpace] }
   return $normNoSpace
-}
-function Get-CurrencyCode {
-  param([Parameter(Mandatory)][System.Windows.Controls.ComboBox]$Combo)
-  $t = (Get-ComboText -Combo $Combo).Trim().ToUpperInvariant()
-  switch ($t) { 'USD' { return 'USD' } 'EUR' { return 'EUR' } 'CHF' { return 'CHF' } default { return 'USD' } }
 }
 function Get-TextDebugInfo {
   param([AllowNull()][string]$Text)
@@ -1096,28 +1106,6 @@ function Get-BestVmSize {
   }
   return $best
 }
-function Get-AzVmHourlyRetailPrice {
-  param([Parameter(Mandatory)][string]$ArmRegionName, [Parameter(Mandatory)][string]$ArmSkuName, [string]$CurrencyCode='USD')
-  $endpoint = 'https://prices.azure.com/api/retail/prices'
-  $filterExpr = "serviceName eq 'Virtual Machines' and armRegionName eq '$ArmRegionName' and armSkuName eq '$ArmSkuName' and unitOfMeasure eq '1 Hour'"
-  $uri = "${endpoint}?currencyCode='$CurrencyCode'&`$filter=$([uri]::EscapeDataString($filterExpr))"
-  try { $all = New-Object System.Collections.Generic.List[object]; $next = $uri
-    for ($i=0; $i -lt 3 -and $next; $i++) { $resp = Invoke-RestMethod -Method Get -Uri $next -TimeoutSec 20 -ErrorAction Stop
-      if ($resp.Items) { foreach ($it in $resp.Items) { $all.Add($it) } }; $next = $resp.NextPageLink }
-    if ($all.Count -lt 1) { return $null }
-    $c = $all | Where-Object { $_.meterName -notmatch 'Spot' -and $_.productName -notmatch 'Spot' }
-    if (-not $c -or $c.Count -lt 1) { $c = $all }
-    $w = $c | Where-Object { $_.productName -match 'Windows' }
-    $pool = if ($w -and $w.Count -gt 0) { $w } else { $c }
-    $cons = $pool | Where-Object { $_.PSObject.Properties.Name -contains 'type' -and $_.type -eq 'Consumption' }
-    if ($cons -and $cons.Count -gt 0) { $pool = $cons }
-    $best = $pool | Sort-Object retailPrice | Select-Object -First 1
-    if (-not $best) { return $null }
-    [pscustomobject]@{ RetailPricePerHour=[double]$best.retailPrice; CurrencyCode=[string]$best.currencyCode
-      ProductName=[string]$best.productName; MeterName=[string]$best.meterName; ArmSkuName=[string]$best.armSkuName
-      PricingNote='Retail list price. No discounts/RI/savings/AHB applied.' }
-  } catch { [pscustomobject]@{ Error=$true; Message=$_.Exception.Message; PricingNote='Price lookup failed.' } }
-}
 #endregion
 
 #region Sizing calculation (with application overhead)
@@ -1130,10 +1118,12 @@ function Get-AvdSizing {
     [Parameter(Mandatory)][double]$ConcurrencyValue,
     [double]$PeakFactor=1.0, [double]$CpuTargetUtil=$DefaultCpuUtil, [double]$MemTargetUtil=$DefaultMemUtil,
     [Alias('VirtualizationOverhead')][double]$SystemResourceReserve=$DefaultSystemResourceReserve,
-    [int]$MinVcpuPerHost=4, [int]$MaxVcpuPerHost=24, [int]$NPlusOneHosts=1, [double]$ExtraHeadroomPercent=0,
+    [int]$MinVcpuPerHost=4, [int]$MaxVcpuPerHost=24, [int]$MinRamPerHost=16, [int]$MaxRamPerHost=128,
+    [int]$TargetHosts=0, [int]$NPlusOneHosts=1, [double]$ExtraHeadroomPercent=0,
     [double]$ProfileContainerGB=30, [double]$ProfileGrowthPercent=20, [double]$ProfileOverheadPercent=10,
     [ValidateSet('BreadthFirst','DepthFirst')][string]$LoadBalancing='BreadthFirst',
     [int]$MaxSessionLimit=0,
+    [ValidateSet('New','Assess')][string]$SizingMode='New',
     $AppOverhead = $null   # output of Get-ApplicationOverhead
   )
 
@@ -1168,6 +1158,7 @@ function Get-AvdSizing {
     $usersPerVcpu = [double]$g.UsersPerVcpu; $minVcpuBP = [int]$g.MinVcpu; $minRamBP = [double]$g.MinRamGB
 
     if ($MinVcpuPerHost -lt 4) { $warnings.Add("Pooled: <4 vCPU not recommended (MS best practice: 4-24).") }
+    if ($MaxVcpuPerHost -lt $minVcpuBP) { $warnings.Add("vCPU range ($MinVcpuPerHost-$MaxVcpuPerHost) is below $Workload workload baseline (min $minVcpuBP vCPU). Sizing may require more hosts.") }
 
     # Determine preferred VM series based on app requirements
     # GPU ALWAYS wins (harder constraint: only NV/NC have GPUs)
@@ -1184,19 +1175,34 @@ function Get-AvdSizing {
     }
     if ($Workload -eq 'Power' -and $preferredSeries -eq 'D' -and $AppOverhead -and $AppOverhead.RequiresGPU) { $preferredSeries = 'NV' }
 
-    $candidates = ((4..24 | Where-Object { $_ % 4 -eq 0 }) + 6) | Sort-Object -Unique |
+    $candidates = ((2..24 | Where-Object { $_ % 2 -eq 0 }) + 6) | Sort-Object -Unique |
       Where-Object { $_ -ge $MinVcpuPerHost -and $_ -le $MaxVcpuPerHost }
 
     $best = $null
     foreach ($vcpu in $candidates) {
-      if ($vcpu -lt $minVcpuBP) { continue }
+      # In New mode: apply workload baseline filter
+      # In Assess mode: skip nothing — evaluate everything for validation
+      if ($SizingMode -eq 'New') {
+        if ($MinVcpuPerHost -ge $minVcpuBP) {
+          if ($vcpu -lt $minVcpuBP) { continue }
+        }
+      }
 
       # CPU-based users per host
       $usersPerHostCpu = [Math]::Floor($vcpu * $usersPerVcpu * $CpuTargetUtil * (1 - $SystemResourceReserve))
-      if ($usersPerHostCpu -lt 1) { continue }
+      if ($usersPerHostCpu -lt 1) { $usersPerHostCpu = 1 }
 
       # RAM from preferred VM series (uses real Azure VM specs)
       $ramFromLookup = Get-VmSeriesRamGB -Series $preferredSeries -Vcpu $vcpu
+
+      # In New mode: skip if RAM is outside range
+      # In Assess mode: use fixed RAM value, warn if insufficient
+      if ($SizingMode -eq 'New') {
+        if ($ramFromLookup -lt $MinRamPerHost -or $ramFromLookup -gt $MaxRamPerHost) { continue }
+      } else {
+        # In Assess mode, use the fixed RAM the user specified
+        $ramFromLookup = $MaxRamPerHost
+      }
 
       # Per-user RAM from GO-EUC research: Light=2GB, Medium=3-4GB, Heavy=5-6GB, Power=8GB
       $osOverheadGB = 4.0
@@ -1212,6 +1218,16 @@ function Get-AvdSizing {
       # Effective users/host = min(CPU-based, RAM-based)
       $usersPerHost = [Math]::Min($usersPerHostCpu, [Math]::Max(1, $usersPerHostRam))
       $hostsForPeak = Get-CeilingInt -Value ($peakConcurrent / $usersPerHost)
+
+      # If TargetHosts is set, check if this config can serve all users with that many hosts
+      $targetHostMatch = $true
+      if ($TargetHosts -gt 0) {
+        $requiredPerHost = Get-CeilingInt -Value ($peakConcurrent / $TargetHosts)
+        if ($usersPerHost -lt $requiredPerHost) {
+          # This vCPU size can't handle enough users per host for the target
+          $targetHostMatch = $false
+        }
+      }
 
       # RAM estimate: what this user count actually needs (NOT the VM lookup size)
       $ramFromUsers = $osOverheadGB + ($usersPerHost * $perUserRamGB)
@@ -1232,11 +1248,26 @@ function Get-AvdSizing {
 
       $ramProvisioned = $ramEstimated / $MemTargetUtil
 
+      # Check if provisioned RAM exceeds the VM's actual capacity
+      $ramSufficient = $true
+      if ($ramProvisioned -gt $ramFromLookup) {
+        $ramSufficient = $false
+      }
+
       $opt = [pscustomobject]@{
         VcpuPerHost=$vcpu; UsersPerHost=$usersPerHost; HostsForPeak=$hostsForPeak
         RamGB_Estimated=[Math]::Round($ramEstimated,2); RamGB_Provisioned=[Math]::Round($ramProvisioned,2)
+        RamGB_VmCapacity=[Math]::Round($ramFromLookup,2); RamSufficient=$ramSufficient
+        RamGB_OS=$osOverheadGB; RamGB_PerUser=$perUserRamGB; RamGB_Users=[Math]::Round($usersPerHost * $perUserRamGB,2)
+        RamGB_AppOverhead=$(if($AppOverhead){[Math]::Round($AppOverhead.TotalRamOverheadGB,2)}else{0})
+        TargetHostMatch=$targetHostMatch
         MinOsDiskGB=[int]$g.MinOsDiskGB
       }
+
+      # In New mode with TargetHosts: skip candidates that can't meet the target
+      if ($SizingMode -eq 'New' -and $TargetHosts -gt 0 -and -not $targetHostMatch) { continue }
+
+      # Selection priority: fewest hosts > smallest vCPU > least RAM
       if (-not $best) { $best = $opt }
       elseif ($opt.HostsForPeak -lt $best.HostsForPeak) { $best = $opt }
       elseif ($opt.HostsForPeak -eq $best.HostsForPeak -and $opt.VcpuPerHost -lt $best.VcpuPerHost) { $best = $opt }
@@ -1244,7 +1275,90 @@ function Get-AvdSizing {
     }
     if (-not $best) { throw "No suitable pooled sizing found." }
 
-    $hostsTotal = $best.HostsForPeak + [Math]::Max(0, $NPlusOneHosts)
+    # RAM capacity warning
+    if (-not $best.RamSufficient) {
+      $ramBreakdown = "RAM breakdown: OS=$($best.RamGB_OS) GB + Users=$($best.RamGB_Users) GB ($($best.UsersPerHost) x $($best.RamGB_PerUser) GB)"
+      if ($best.RamGB_AppOverhead -gt 0) { $ramBreakdown += " + Apps=$($best.RamGB_AppOverhead) GB" }
+      $ramBreakdown += " = $($best.RamGB_Estimated) GB needed (provisioned: $($best.RamGB_Provisioned) GB)"
+      if ($SizingMode -eq 'Assess') {
+        $warnings.Add("ASSESSMENT: RAM INSUFFICIENT — existing host has $($best.RamGB_VmCapacity) GB but $($best.RamGB_Provisioned) GB required.")
+      } else {
+        $warnings.Add("WARNING: RAM insufficient — VM has $($best.RamGB_VmCapacity) GB but $($best.RamGB_Provisioned) GB required.")
+      }
+      $warnings.Add("  $ramBreakdown")
+      if ($SizingMode -eq 'Assess') {
+        $warnings.Add("  Recommendation: increase RAM to at least $([Math]::Ceiling($best.RamGB_Provisioned)) GB per host.")
+      } else {
+        $warnings.Add("  Consider increasing the max RAM range or reducing users/applications.")
+      }
+    }
+
+    # vCPU capacity warning (Assess mode)
+    if ($SizingMode -eq 'Assess' -and $best.VcpuPerHost -lt $minVcpuBP) {
+      $warnings.Add("ASSESSMENT: vCPU BELOW BASELINE — existing host has $($best.VcpuPerHost) vCPU, $Workload workload recommends minimum $minVcpuBP vCPU.")
+      $warnings.Add("  Recommendation: increase vCPU to at least $minVcpuBP per host for $Workload workload.")
+    }
+
+    # Assessment: hosts needed with current config + target host warning
+    $script:AssessRecommendedVm = $null
+    if ($SizingMode -eq 'Assess') {
+      $maxCapacity = $best.UsersPerHost * $TargetHosts
+      $warnings.Add("")
+      $warnings.Add("ASSESSMENT SUMMARY — EXISTING INFRASTRUCTURE:")
+      $warnings.Add("  Current hosts:       $TargetHosts")
+      $warnings.Add("  Current config:      $($best.VcpuPerHost) vCPU, $($best.RamGB_VmCapacity) GB RAM per host")
+      $warnings.Add("  Users per host:      $($best.UsersPerHost)")
+      $warnings.Add("  Max capacity:        $maxCapacity users ($($best.UsersPerHost) users/host x $TargetHosts hosts)")
+      $warnings.Add("  Required capacity:   $peakConcurrent peak concurrent users")
+      if ($maxCapacity -ge $peakConcurrent) {
+        $warnings.Add("  Status:              OK — current infrastructure can serve all $peakConcurrent users.")
+      } else {
+        $warnings.Add("  Status:              INSUFFICIENT — current $TargetHosts host(s) can only serve $maxCapacity of $peakConcurrent users.")
+        $hostsNeeded = $best.HostsForPeak
+        $warnings.Add("  Hosts needed:        $hostsNeeded (with current config $($best.VcpuPerHost) vCPU / $($best.RamGB_VmCapacity) GB)")
+      }
+      # Calculate recommended specs to serve all users on the current number of hosts
+      if ($TargetHosts -gt 0) {
+        $reqUsersPerHost = Get-CeilingInt -Value ($peakConcurrent / $TargetHosts)
+        $baseVcpuForUsers = [Math]::Ceiling($reqUsersPerHost / ($usersPerVcpu * $CpuTargetUtil * (1 - $SystemResourceReserve)))
+        $appCpuForReq = 0
+        if ($AppOverhead -and $best.UsersPerHost -gt 0) {
+          $cpuPerUser = $AppOverhead.TotalCpuOverhead / $best.UsersPerHost
+          $appCpuForReq = [Math]::Ceiling($cpuPerUser * $reqUsersPerHost)
+        }
+        $reqVcpu = [Math]::Max($baseVcpuForUsers + $appCpuForReq, $minVcpuBP)
+        $appRamForReq = 0
+        if ($AppOverhead -and $best.UsersPerHost -gt 0) {
+          $ramPerUser = $AppOverhead.TotalRamOverheadGB / $best.UsersPerHost
+          $appRamForReq = [Math]::Round($ramPerUser * $reqUsersPerHost, 2)
+        }
+        $reqRam = [Math]::Ceiling($best.RamGB_OS + ($reqUsersPerHost * $best.RamGB_PerUser) + $appRamForReq)
+        $recVmForReport = $null
+        if ($script:BwsVmCatalog) {
+          $recVmForReport = $script:BwsVmCatalog | Where-Object {
+            $_.vCPU -ge $reqVcpu -and $_.RamGB -ge $reqRam
+          } | Sort-Object PriceCHF | Select-Object -First 1
+        }
+        $warnings.Add("")
+        $warnings.Add("  RECOMMENDATION to serve $peakConcurrent users on $TargetHosts host(s):")
+        $warnings.Add("    Users per host:    $reqUsersPerHost")
+        $warnings.Add("    Min vCPU per host: $reqVcpu (workload: $baseVcpuForUsers + apps: $appCpuForReq)")
+        $warnings.Add("    Min RAM per host:  $reqRam GB (OS: $($best.RamGB_OS) + users: $($reqUsersPerHost * $best.RamGB_PerUser) + apps: $appRamForReq)")
+        if ($recVmForReport) {
+          $script:AssessRecommendedVm = $recVmForReport
+          $warnings.Add("    Suggested VM:      $($recVmForReport.Name) ($($recVmForReport.vCPU) vCPU, $($recVmForReport.RamGB) GB RAM)")
+        } else {
+          $warnings.Add("    Suggested VM:      No single VM in catalog meets requirements — consider more hosts.")
+        }
+      }
+    }
+
+    # Target hosts: if set and greater than calculated, use target (ensures minimum host count)
+    $hostsForCalc = $best.HostsForPeak
+    if ($TargetHosts -gt 0 -and $TargetHosts -gt $hostsForCalc) {
+      $hostsForCalc = $TargetHosts
+    }
+    $hostsTotal = $hostsForCalc + [Math]::Max(0, $NPlusOneHosts)
     $profileBase = [Math]::Max([double]$g.MinProfileGB, $ProfileContainerGB)
     $plannedPerUser = $profileBase * (1 + $ProfileGrowthPercent/100.0) * (1 + $ProfileOverheadPercent/100.0)
 
@@ -1301,7 +1415,8 @@ function Get-AvdSizing {
       ConcurrentUsers=$concurrent; PeakConcurrentUsers=$peakConcurrent
       CpuTargetUtil=$CpuTargetUtil; MemTargetUtil=$MemTargetUtil; SystemResourceReserve=$SystemResourceReserve
       LoadBalancing=$LoadBalancing; MaxSessionLimit=$calcMaxSessionLimit; PreferredSeries=$preferredSeries
-      Recommended=$best; RecommendedHostsTotal=$hostsTotal; Examples=$g.Examples
+      Recommended=$best; RecommendedHostsTotal=$hostsTotal; TargetHosts=$TargetHosts; Examples=$g.Examples
+      MinRamPerHost=$MinRamPerHost; MaxRamPerHost=$MaxRamPerHost
       FsLogix=[pscustomobject]@{ PlannedPerUserGB=[Math]::Round($plannedPerUser,2); PlannedTotalGB_AtPeak=[Math]::Round($peakConcurrent*$plannedPerUser,2) }
       Autoscale=$autoscale; LoadBalancingNotes=@([string[]]$lbNotes.ToArray())
       AppOverhead=$AppOverhead; Notes=@([string[]]$warnings.ToArray())
@@ -1376,15 +1491,18 @@ function Get-AvdSizing {
 
 #region Results rendering
 function Set-ResultsGrid {
-  param([Parameter(Mandatory)]$Sizing, $VmPick, $VmPrice,
+  param([Parameter(Mandatory)]$Sizing, $VmPick,
     [Parameter(Mandatory)][System.Windows.Controls.DataGrid]$GridResults,
-    [Parameter(Mandatory)][System.Windows.Controls.TextBox]$TxtNotes,
-    $HidePricing=$true)
+    [Parameter(Mandatory)][System.Windows.Controls.TextBox]$TxtNotes)
 
   $rows = [System.Collections.Generic.List[object]]::new()
   $r = $Sizing.Recommended
 
   $rows.Add([pscustomobject]@{ Key='HostPoolType'; Value=$Sizing.HostPoolType })
+  $rows.Add([pscustomobject]@{ Key='Sizing Mode'; Value=$(if($Sizing.SizingMode -eq 'Assess'){Get-Str 'mode.assess'}else{Get-Str 'mode.new'}) })
+  if ($Sizing.SizingMode -eq 'Assess' -and $Sizing.AssessedVmName) {
+    $rows.Add([pscustomobject]@{ Key='Assessed VM Template'; Value=$Sizing.AssessedVmName })
+  }
   $rows.Add([pscustomobject]@{ Key='Mode'; Value=$Sizing.Mode })
   $rows.Add([pscustomobject]@{ Key='Workload'; Value=$Sizing.Workload })
   $rows.Add([pscustomobject]@{ Key='TotalUsers'; Value=$Sizing.TotalUsers })
@@ -1395,10 +1513,27 @@ function Set-ResultsGrid {
   $rows.Add([pscustomobject]@{ Key='vCPU per Host'; Value=$r.VcpuPerHost })
   $rows.Add([pscustomobject]@{ Key='RAM GB (estimated)'; Value=$r.RamGB_Estimated })
   $rows.Add([pscustomobject]@{ Key='RAM GB (provisioned)'; Value=$r.RamGB_Provisioned })
+  if ($r.PSObject.Properties.Name -contains 'RamGB_VmCapacity') {
+    $rows.Add([pscustomobject]@{ Key='RAM GB (VM capacity)'; Value=$r.RamGB_VmCapacity })
+    if (-not $r.RamSufficient) {
+      $rows.Add([pscustomobject]@{ Key='RAM Status'; Value="INSUFFICIENT — need $($r.RamGB_Provisioned) GB, VM has $($r.RamGB_VmCapacity) GB" })
+    } else {
+      $rows.Add([pscustomobject]@{ Key='RAM Status'; Value="OK ($($r.RamGB_Provisioned) GB of $($r.RamGB_VmCapacity) GB)" })
+    }
+    $breakdown = "OS: $($r.RamGB_OS) GB + Users: $($r.RamGB_Users) GB ($($r.UsersPerHost) x $($r.RamGB_PerUser) GB)"
+    if ($r.RamGB_AppOverhead -gt 0) { $breakdown += " + Apps: $($r.RamGB_AppOverhead) GB" }
+    $rows.Add([pscustomobject]@{ Key='RAM Breakdown'; Value=$breakdown })
+  }
   $rows.Add([pscustomobject]@{ Key='Hosts for Peak'; Value=$r.HostsForPeak })
+  if ($Sizing.TargetHosts -gt 0) {
+    $rows.Add([pscustomobject]@{ Key='Target Hosts'; Value=$Sizing.TargetHosts })
+  }
   $rows.Add([pscustomobject]@{ Key='Hosts total (N+1)'; Value=$Sizing.RecommendedHostsTotal })
   $rows.Add([pscustomobject]@{ Key='Min OS Disk (GB)'; Value=$r.MinOsDiskGB })
   $rows.Add([pscustomobject]@{ Key='Preferred VM Series'; Value="$($Sizing.PreferredSeries)-series" })
+  if ($Sizing.MinRamPerHost -and $Sizing.MaxRamPerHost) {
+    $rows.Add([pscustomobject]@{ Key='RAM Range (GB)'; Value="$($Sizing.MinRamPerHost) – $($Sizing.MaxRamPerHost) GB" })
+  }
   $rows.Add([pscustomobject]@{ Key='Guideline Examples'; Value=$Sizing.Examples })
 
   # Load Balancing
@@ -1448,49 +1583,67 @@ function Set-ResultsGrid {
   }
 
   if ($VmPick) {
-    $rows.Add([pscustomobject]@{ Key='--- VM TEMPLATE ---'; Value='' })
-    if ($VmPick.PSObject.Properties.Name -contains 'BwsName') {
-      $rows.Add([pscustomobject]@{ Key='VM Template'; Value=$VmPick.BwsName })
-      $rows.Add([pscustomobject]@{ Key='VM vCPU'; Value=$VmPick.NumberOfCores })
-      $rows.Add([pscustomobject]@{ Key='VM RAM (GB)'; Value=[Math]::Round($VmPick.MemoryInMB/1024,2) })
-      $rows.Add([pscustomobject]@{ Key='VM Series'; Value="$($VmPick.BwsSeries)-series" })
-      $rows.Add([pscustomobject]@{ Key='VM Cost'; Value="CHF $($VmPick.BwsPriceCHF)/month" })
-      if ($VmPick.BwsOsDisk) {
-        $rows.Add([pscustomobject]@{ Key='OS Disk'; Value="$($VmPick.BwsOsDisk.Sku) ($($VmPick.BwsOsDisk.SizeGiB) GiB, $($VmPick.BwsOsDisk.IOPS) IOPS, $($VmPick.BwsOsDisk.MBps) MB/s)" })
-        $rows.Add([pscustomobject]@{ Key='OS Disk Cost'; Value="CHF $($VmPick.BwsOsDisk.PriceCHF)/month" })
+    # In Assess mode: show current config, assessment, and recommendation
+    if ($Sizing.SizingMode -eq 'Assess') {
+      $rows.Add([pscustomobject]@{ Key='--- CURRENT VM TEMPLATE ---'; Value='' })
+      if ($VmPick.PSObject.Properties.Name -contains 'BwsName') {
+        $rows.Add([pscustomobject]@{ Key='Current VM'; Value=$VmPick.BwsName })
+        $rows.Add([pscustomobject]@{ Key='Current vCPU'; Value=$VmPick.NumberOfCores })
+        $rows.Add([pscustomobject]@{ Key='Current RAM (GB)'; Value=[Math]::Round($VmPick.MemoryInMB/1024,2) })
+        $rows.Add([pscustomobject]@{ Key='Current Series'; Value="$($VmPick.BwsSeries)-series" })
       }
-      if ($VmPick.BwsAddDisks -and @($VmPick.BwsAddDisks).Count -gt 0) {
-        foreach ($ad in @($VmPick.BwsAddDisks)) {
-          $rows.Add([pscustomobject]@{ Key="Additional Disk ($($ad.Sku))"; Value="$($ad.SizeGiB) GiB, $($ad.IOPS) IOPS, $($ad.MBps) MB/s — CHF $($ad.PriceCHF)/mo" })
-        }
-        $rows.Add([pscustomobject]@{ Key='Additional Disks Total'; Value="CHF $($VmPick.BwsAddDiskCost)/month" })
-      }
-    } else {
-      $rows.Add([pscustomobject]@{ Key='VM Size'; Value=$VmPick.Name })
-      $rows.Add([pscustomobject]@{ Key='VM vCPU'; Value=$VmPick.NumberOfCores })
-      $rows.Add([pscustomobject]@{ Key='VM RAM (GB)'; Value=[Math]::Round($VmPick.MemoryInMB/1024,2) })
-    }
-  }
-  if ($VmPrice -and -not $HidePricing) {
-    $rows.Add([pscustomobject]@{ Key='--- PRICING ---'; Value='' })
-    if ($VmPrice.PSObject.Properties.Name -contains 'bwsTotalPerHost') {
-      $rows.Add([pscustomobject]@{ Key='VM Cost'; Value="CHF $($VmPrice.bwsVmMonthly)/month" })
-      $rows.Add([pscustomobject]@{ Key='OS Disk Cost'; Value="CHF $($VmPrice.bwsOsDiskMonthly)/month" })
-      if ($VmPrice.bwsAddDiskMonthly -gt 0) {
-        $rows.Add([pscustomobject]@{ Key='Additional Disks Cost'; Value="CHF $($VmPrice.bwsAddDiskMonthly)/month" })
-      }
-      $perHost = [Math]::Round($VmPrice.bwsTotalPerHost, 2)
-      $rows.Add([pscustomobject]@{ Key='Total/Host/Month'; Value="CHF $perHost" })
-      $fleetTotal = [Math]::Round($perHost * $Sizing.RecommendedHostsTotal, 2)
-      $rows.Add([pscustomobject]@{ Key='Fleet Total/Month'; Value="CHF $fleetTotal ($($Sizing.RecommendedHostsTotal) hosts)" })
-    } elseif (-not ($VmPrice.PSObject.Properties.Name -contains 'Error' -and $VmPrice.Error)) {
-      $rows.Add([pscustomobject]@{ Key='Price/Hour'; Value="$($VmPrice.RetailPricePerHour) $($VmPrice.CurrencyCode)" })
-      $monthly = [Math]::Round($VmPrice.RetailPricePerHour * 730, 2)
-      $rows.Add([pscustomobject]@{ Key='Est. Monthly/Host'; Value="$monthly $($VmPrice.CurrencyCode)" })
-      $rows.Add([pscustomobject]@{ Key='Est. Monthly Total'; Value="$([Math]::Round($monthly * $Sizing.RecommendedHostsTotal, 2)) $($VmPrice.CurrencyCode) ($($Sizing.RecommendedHostsTotal) hosts)" })
-    }
-  }
 
+      # Assessment capacity
+      $rows.Add([pscustomobject]@{ Key='--- ASSESSMENT ---'; Value='' })
+      $maxCap = $r.UsersPerHost * $Sizing.TargetHosts
+      $rows.Add([pscustomobject]@{ Key='Current Hosts'; Value=$Sizing.TargetHosts })
+      $rows.Add([pscustomobject]@{ Key='Users per Host'; Value=$r.UsersPerHost })
+      $rows.Add([pscustomobject]@{ Key='Max Capacity'; Value="$maxCap users ($($r.UsersPerHost) x $($Sizing.TargetHosts) hosts)" })
+      $rows.Add([pscustomobject]@{ Key='Required Capacity'; Value="$($Sizing.PeakConcurrentUsers) peak users" })
+      if ($maxCap -ge $Sizing.PeakConcurrentUsers) {
+        $rows.Add([pscustomobject]@{ Key='Status'; Value="OK — current infrastructure sufficient" })
+      } else {
+        $rows.Add([pscustomobject]@{ Key='Status'; Value="INSUFFICIENT — can serve $maxCap of $($Sizing.PeakConcurrentUsers) users" })
+        $rows.Add([pscustomobject]@{ Key='Hosts needed (current VM)'; Value=$r.HostsForPeak })
+      }
+
+      # Recommendation
+      $rows.Add([pscustomobject]@{ Key='--- RECOMMENDATION ---'; Value='' })
+      if ($VmPick.BwsRecommendedVm) {
+        $rv = $VmPick.BwsRecommendedVm
+        if ($rv.Name -ne $VmPick.BwsName) {
+          $rows.Add([pscustomobject]@{ Key='Recommended VM'; Value="$($rv.Name) ($($rv.vCPU) vCPU, $($rv.RamGB) GB RAM)" })
+          $rows.Add([pscustomobject]@{ Key='Target Hosts'; Value="$($Sizing.TargetHosts) host(s) with $($rv.Name)" })
+        } else {
+          $rows.Add([pscustomobject]@{ Key='Recommended VM'; Value="Current template ($($VmPick.BwsName)) is sufficient." })
+        }
+      }
+
+    } else {
+      # New Infrastructure mode: show selected template
+      $rows.Add([pscustomobject]@{ Key='--- VM TEMPLATE ---'; Value='' })
+      if ($VmPick.PSObject.Properties.Name -contains 'BwsName') {
+        $rows.Add([pscustomobject]@{ Key='VM Template'; Value=$VmPick.BwsName })
+        $rows.Add([pscustomobject]@{ Key='VM vCPU'; Value=$VmPick.NumberOfCores })
+        $rows.Add([pscustomobject]@{ Key='VM RAM (GB)'; Value=[Math]::Round($VmPick.MemoryInMB/1024,2) })
+        $rows.Add([pscustomobject]@{ Key='VM Series'; Value="$($VmPick.BwsSeries)-series" })
+      } else {
+        $rows.Add([pscustomobject]@{ Key='VM Size'; Value=$VmPick.Name })
+        $rows.Add([pscustomobject]@{ Key='VM vCPU'; Value=$VmPick.NumberOfCores })
+        $rows.Add([pscustomobject]@{ Key='VM RAM (GB)'; Value=[Math]::Round($VmPick.MemoryInMB/1024,2) })
+      }
+    }
+
+    # Disks (both modes)
+    if ($VmPick.PSObject.Properties.Name -contains 'BwsOsDisk' -and $VmPick.BwsOsDisk) {
+      $rows.Add([pscustomobject]@{ Key='OS Disk'; Value="$($VmPick.BwsOsDisk.Sku) ($($VmPick.BwsOsDisk.SizeGiB) GiB, $($VmPick.BwsOsDisk.IOPS) IOPS, $($VmPick.BwsOsDisk.MBps) MB/s)" })
+    }
+    if ($VmPick.PSObject.Properties.Name -contains 'BwsAddDisks' -and $VmPick.BwsAddDisks -and @($VmPick.BwsAddDisks).Count -gt 0) {
+      foreach ($ad in @($VmPick.BwsAddDisks)) {
+        $rows.Add([pscustomobject]@{ Key="Additional Disk ($($ad.Sku))"; Value="$($ad.SizeGiB) GiB, $($ad.IOPS) IOPS, $($ad.MBps) MB/s" })
+      }
+    }
+  }
   $GridResults.ItemsSource = $rows
 
   # Notes
@@ -1605,11 +1758,11 @@ $script:BwsFileStorageCatalog = @(
 
 function Select-BwsVm {
   param(
-    [int]$MinVcpu, [int]$MinRamGB, [int]$MaxVcpu = 64,
+    [int]$MinVcpu, [int]$MinRamGB, [int]$MaxVcpu = 64, [int]$MaxRamGB = 128,
     [string]$PreferredSeries = 'D'
   )
   $candidates = $script:BwsVmCatalog | Where-Object {
-    $_.vCPU -ge $MinVcpu -and $_.RamGB -ge $MinRamGB -and $_.vCPU -le $MaxVcpu
+    $_.vCPU -ge $MinVcpu -and $_.RamGB -ge $MinRamGB -and $_.vCPU -le $MaxVcpu -and $_.RamGB -le $MaxRamGB
   }
   # Prefer requested series, then by price
   $preferred = $candidates | Where-Object { $_.Series -eq $PreferredSeries } | Sort-Object PriceCHF
@@ -1637,7 +1790,6 @@ $script:Strings = @{
   'tab.applications'  = @{ en='Applications'; de='Anwendungen'; fr='Applications'; it='Applicazioni' }
   'tab.vmtemplate'    = @{ en='VM Template'; de='VM-Vorlage'; fr='Modèle VM'; it='Modello VM' }
   'tab.results'       = @{ en='Results'; de='Ergebnisse'; fr='Résultats'; it='Risultati' }
-  'tab.costs'         = @{ en='Costs'; de='Kosten'; fr='Coûts'; it='Costi' }
 
   # --- Workload Tab ---
   'wl.hostpooltype'       = @{ en='Host pool type'; de='Hostpool-Typ'; fr='Type de pool'; it='Tipo pool host' }
@@ -1665,6 +1817,10 @@ Power (1 utente/vCPU, 8 GB RAM): CAD/3D, sviluppo software, carichi GPU, editing
   'wl.concurrency.desc'   = @{ en='Percent or absolute number of concurrent users.'; de='Prozent oder absolute Anzahl gleichzeitiger Benutzer.'; fr='Pourcentage ou nombre absolu d''utilisateurs simultanés.'; it='Percentuale o numero assoluto di utenti simultanei.' }
   'wl.peakfactor'         = @{ en='Peak factor'; de='Spitzenfaktor'; fr='Facteur de pointe'; it='Fattore di picco' }
   'wl.peakfactor.desc'    = @{ en='Spike multiplier. 1.0 = none, 1.2 = 20% extra.'; de='Spitzenmultiplikator. 1.0 = kein, 1.2 = 20% extra.'; fr='Multiplicateur de pointe. 1.0 = aucun, 1.2 = 20% supplémentaire.'; it='Moltiplicatore di picco. 1.0 = nessuno, 1.2 = 20% in più.' }
+  'wl.targethosts'        = @{ en='Target number of hosts'; de='Zielanzahl Hosts'; fr='Nombre cible d''hôtes'; it='Numero target di host' }
+  'wl.targethosts.desc'   = @{ en='Desired number of session hosts. VM template will be sized to fit all users across this many hosts.'; de='Gewünschte Anzahl Session Hosts. VM Template wird so dimensioniert, dass alle Benutzer auf diese Anzahl Hosts passen.'; fr='Nombre souhaité d''hôtes de session. Le modèle VM sera dimensionné pour accueillir tous les utilisateurs sur ce nombre d''hôtes.'; it='Numero desiderato di host di sessione. Il template VM verrà dimensionato per ospitare tutti gli utenti su questo numero di host.' }
+  'wl.currenthosts'       = @{ en='Current number of hosts'; de='Aktuelle Anzahl Hosts'; fr='Nombre actuel d''hôtes'; it='Numero attuale di host' }
+  'wl.currenthosts.desc'  = @{ en='Number of session hosts in existing infrastructure. Assessment will validate if this is sufficient.'; de='Anzahl Session Hosts in bestehender Infrastruktur. Assessment prüft ob dies ausreicht.'; fr='Nombre d''hôtes dans l''infrastructure existante. L''évaluation vérifiera si c''est suffisant.'; it='Numero di host nell''infrastruttura esistente. La valutazione verificherà se è sufficiente.' }
   'wl.nplus1'             = @{ en='N+1 redundancy'; de='N+1 Redundanz'; fr='Redondance N+1'; it='Ridondanza N+1' }
   'wl.nplus1.desc'        = @{ en='Extra failover hosts. 1 = one standby, 0 = off.'; de='Extra Failover-Hosts. 1 = ein Standby, 0 = aus.'; fr='Hôtes de basculement supplémentaires. 1 = un en attente, 0 = désactivé.'; it='Host di failover aggiuntivi. 1 = uno in standby, 0 = disattivato.' }
   'wl.headroom'           = @{ en='Extra headroom'; de='Zusätzlicher Puffer'; fr='Marge supplémentaire'; it='Margine aggiuntivo' }
@@ -1685,6 +1841,8 @@ Power (1 utente/vCPU, 8 GB RAM): CAD/3D, sviluppo software, carichi GPU, editing
   'tune.cpuram.desc'    = @{ en='Target utilisation and virtualisation overhead (MS: 15-20%).'; de='Zielauslastung und Virtualisierungs-Overhead (MS: 15-20%).'; fr='Utilisation cible et surcharge de virtualisation (MS: 15-20%).'; it='Utilizzo target e overhead di virtualizzazione (MS: 15-20%).' }
   'tune.vcpurange'      = @{ en='vCPU range per host (pooled)'; de='vCPU-Bereich pro Host (Pooled)'; fr='Plage vCPU par hôte (poolé)'; it='Range vCPU per host (pooled)' }
   'tune.vcpurange.desc' = @{ en='MS recommends max 24 for multi-session. 128 = unrestricted.'; de='MS empfiehlt max 24 für Multi-Session. 128 = unbegrenzt.'; fr='MS recommande max 24 pour multi-session. 128 = illimité.'; it='MS raccomanda max 24 per multi-sessione. 128 = illimitato.' }
+  'tune.ramrange'        = @{ en='RAM range per host (GB)'; de='RAM-Bereich pro Host (GB)'; fr='Plage RAM par hôte (Go)'; it='Range RAM per host (GB)' }
+  'tune.ramrange.desc'   = @{ en='Minimum and maximum RAM in GB per session host.'; de='Minimum und Maximum RAM in GB pro Session Host.'; fr='RAM minimum et maximum en Go par hôte de session.'; it='RAM minimo e massimo in GB per host di sessione.' }
 
   # --- Applications Tab ---
   'app.client'      = @{ en='Client Applications'; de='Client-Anwendungen'; fr='Applications clientes'; it='Applicazioni client' }
@@ -1728,42 +1886,24 @@ Power (1 utente/vCPU, 8 GB RAM): CAD/3D, sviluppo software, carichi GPU, editing
 
   # --- Results Tab ---
   'res.title'       = @{ en='Sizing Results'; de='Sizing-Ergebnisse'; fr='Résultats du dimensionnement'; it='Risultati dimensionamento' }
-  'res.desc'        = @{ en='Click ''Calculate'' then ''Suggest VM Template'' to find the best VM template with pricing.'; de='Klicken Sie ''Berechnen'' und dann ''VM Template vorschlagen''.'; fr='Cliquez ''Calculer'' puis ''Proposer un modèle VM''.'; it='Clicca ''Calcola'' poi ''Suggerisci template VM''.' }
+  'res.desc'        = @{ en='Click ''Calculate'' then ''Suggest VM Template'' to find the best VM template.'; de='Klicken Sie ''Berechnen'' und dann ''VM Template vorschlagen''.'; fr='Cliquez ''Calculer'' puis ''Proposer un modèle VM''.'; it='Clicca ''Calcola'' poi ''Suggerisci template VM''.' }
   'res.notes'       = @{ en='Notes, warnings and recommendations:'; de='Hinweise, Warnungen und Empfehlungen:'; fr='Notes, avertissements et recommandations:'; it='Note, avvisi e raccomandazioni:' }
 
   # --- Costs Tab ---
-  'cost.title'      = @{ en='Cost Analysis'; de='Kostenanalyse'; fr='Analyse des coûts'; it='Analisi dei costi' }
-  'cost.desc'       = @{ en='Configure pricing, discounts and calculate per-user costs. Requires ''Suggest VM Template'' on the Results tab first.'; de='Preise, Rabatte konfigurieren und Pro-Benutzer-Kosten berechnen. Zuerst ''VM Template vorschlagen'' auf dem Ergebnis-Tab.'; fr='Configurer les prix, remises et calculer les coûts par utilisateur. ''Proposer un modèle VM'' d''abord.'; it='Configurare prezzi, sconti e calcolare i costi per utente. Prima ''Suggerisci template VM''.' }
-  'cost.pricing'    = @{ en='Pricing'; de='Preise'; fr='Tarification'; it='Prezzi' }
-  'cost.currency'   = @{ en='Currency'; de='Währung'; fr='Devise'; it='Valuta' }
-  'cost.currency.desc' = @{ en='Currency for Azure Retail Prices API.'; de='Währung für Azure Retail Prices API.'; fr='Devise pour l''API Azure Retail Prices.'; it='Valuta per l''API Azure Retail Prices.' }
-  'cost.ahb'        = @{ en='Azure Hybrid Benefit'; de='Azure Hybrid Benefit'; fr='Azure Hybrid Benefit'; it='Azure Hybrid Benefit' }
-  'cost.ahb.desc'   = @{ en='M365 E3/E5 or Win E3/E5 licenses cover Windows cost.'; de='M365 E3/E5 oder Win E3/E5 Lizenzen decken Windows-Kosten.'; fr='Les licences M365 E3/E5 ou Win E3/E5 couvrent le coût Windows.'; it='Le licenze M365 E3/E5 o Win E3/E5 coprono il costo Windows.' }
-  'cost.ahb.check'  = @{ en='Azure Hybrid Benefit active'; de='Azure Hybrid Benefit aktiv'; fr='Azure Hybrid Benefit actif'; it='Azure Hybrid Benefit attivo' }
-  'cost.schedule'   = @{ en='Operating Schedule'; de='Betriebszeiten'; fr='Horaires d''exploitation'; it='Orario operativo' }
-  'cost.hours'      = @{ en='Operating hours per day'; de='Betriebsstunden pro Tag'; fr='Heures d''exploitation par jour'; it='Ore operative al giorno' }
-  'cost.hours.desc' = @{ en='24 = always on, 10 = business hours only.'; de='24 = immer an, 10 = nur Geschäftszeiten.'; fr='24 = toujours actif, 10 = heures ouvrables uniquement.'; it='24 = sempre attivo, 10 = solo ore lavorative.' }
-  'cost.days'       = @{ en='Operating days per month'; de='Betriebstage pro Monat'; fr='Jours d''exploitation par mois'; it='Giorni operativi al mese' }
-  'cost.days.desc'  = @{ en='22 = work month, 30 = daily use.'; de='22 = Arbeitsmonat, 30 = täglich.'; fr='22 = mois ouvrable, 30 = utilisation quotidienne.'; it='22 = mese lavorativo, 30 = uso quotidiano.' }
-  'cost.discounts'  = @{ en='Discounts'; de='Rabatte'; fr='Remises'; it='Sconti' }
-  'cost.disc.desc'  = @{ en='Applied cumulatively to the Azure retail list price.'; de='Kumulativ auf den Azure-Listenpreis angewendet.'; fr='Appliquées cumulativement au prix catalogue Azure.'; it='Applicate cumulativamente al prezzo di listino Azure.' }
-  'cost.csp'        = @{ en='CSP / EA / Partner discount'; de='CSP / EA / Partner-Rabatt'; fr='Remise CSP / EA / Partenaire'; it='Sconto CSP / EA / Partner' }
-  'cost.csp.desc'   = @{ en='Negotiated discount (CSP margin, EA, MPA).'; de='Verhandelter Rabatt (CSP-Marge, EA, MPA).'; fr='Remise négociée (marge CSP, EA, MPA).'; it='Sconto negoziato (margine CSP, EA, MPA).' }
-  'cost.ri'         = @{ en='Reserved Instance discount'; de='Reserved Instance-Rabatt'; fr='Remise instance réservée'; it='Sconto istanza riservata' }
-  'cost.ri.desc'    = @{ en='1yr ~35%, 3yr ~55%.'; de='1 Jahr ~35%, 3 Jahre ~55%.'; fr='1 an ~35%, 3 ans ~55%.'; it='1 anno ~35%, 3 anni ~55%.' }
-  'cost.additional'      = @{ en='Additional discount'; de='Zusätzlicher Rabatt'; fr='Remise supplémentaire'; it='Sconto aggiuntivo' }
-  'cost.additional.desc' = @{ en='Savings Plans, promos, custom agreements.'; de='Savings Plans, Aktionen, Sondervereinbarungen.'; fr='Plans d''épargne, promos, accords personnalisés.'; it='Piani di risparmio, promozioni, accordi personalizzati.' }
-  'cost.breakdown'  = @{ en='Cost Breakdown'; de='Kostenaufschlüsselung'; fr='Ventilation des coûts'; it='Ripartizione costi' }
 
   # --- Buttons ---
   'btn.calculate'   = @{ en='Calculate'; de='Berechnen'; fr='Calculer'; it='Calcola' }
   'btn.pickvm'      = @{ en='Suggest VM Template'; de='VM Template vorschlagen'; fr='Proposer un modèle VM'; it='Suggerisci template VM' }
+  'btn.validate'    = @{ en='Validate Configuration'; de='Konfiguration prüfen'; fr='Valider la configuration'; it='Valida configurazione' }
+  'mode.new'        = @{ en='New Infrastructure'; de='Neue Infrastruktur'; fr='Nouvelle infrastructure'; it='Nuova infrastruttura' }
+  'mode.assess'     = @{ en='Assess Existing'; de='Bestehende bewerten'; fr='Évaluer existant'; it='Valuta esistente' }
+  'mode.title'      = @{ en='Sizing Mode'; de='Sizing-Modus'; fr='Mode de dimensionnement'; it='Modalità dimensionamento' }
+  'mode.desc'       = @{ en='New: plan optimal infrastructure. Assess: validate existing setup.'; de='Neu: optimale Infrastruktur planen. Bewerten: bestehende Konfiguration prüfen.'; fr='Nouveau: planifier l''infrastructure optimale. Évaluer: valider la configuration existante.'; it='Nuovo: pianificare infrastruttura ottimale. Valuta: verificare configurazione esistente.' }
   'btn.exportjson'  = @{ en='Export JSON'; de='JSON exportieren'; fr='Exporter JSON'; it='Esporta JSON' }
   'btn.exportreport'= @{ en='Export HTML Report'; de='HTML-Bericht exportieren'; fr='Exporter rapport HTML'; it='Esporta report HTML' }
   'btn.close'       = @{ en='Close'; de='Schliessen'; fr='Fermer'; it='Chiudi' }
   'btn.reset'       = @{ en='Reset'; de='Zurücksetzen'; fr='Réinitialiser'; it='Reimposta' }
   'btn.diagnostics' = @{ en='Diagnostics'; de='Diagnose'; fr='Diagnostics'; it='Diagnostica' }
-  'btn.calccosts'   = @{ en='Calculate Costs'; de='Kosten berechnen'; fr='Calculer les coûts'; it='Calcola costi' }
   'btn.azlogin'     = @{ en='Azure Login'; de='Azure Login'; fr='Connexion Azure'; it='Accesso Azure' }
   'btn.loadskus'    = @{ en='Load SKUs'; de='SKUs laden'; fr='Charger SKUs'; it='Carica SKU' }
 
@@ -1775,7 +1915,6 @@ Power (1 utente/vCPU, 8 GB RAM): CAD/3D, sviluppo software, carichi GPU, editing
   'rpt.loadbal'     = @{ en='Load Balancing'; de='Lastverteilung'; fr='Équilibrage de charge'; it='Bilanciamento carico' }
   'rpt.storage'     = @{ en='Storage'; de='Speicher'; fr='Stockage'; it='Storage' }
   'rpt.vmselection' = @{ en='Azure VM Selection'; de='Azure VM-Auswahl'; fr='Sélection VM Azure'; it='Selezione VM Azure' }
-  'rpt.usercosts'   = @{ en='User Cost Analysis'; de='Benutzer-Kostenanalyse'; fr='Analyse des coûts utilisateur'; it='Analisi costi utente' }
   'rpt.notes'       = @{ en='Notes &amp; Recommendations'; de='Hinweise &amp; Empfehlungen'; fr='Notes &amp; Recommandations'; it='Note &amp; Raccomandazioni' }
   'rpt.warnings'    = @{ en='Warnings'; de='Warnungen'; fr='Avertissements'; it='Avvisi' }
   'rpt.generated'   = @{ en='Generated by'; de='Erstellt mit'; fr='Généré par'; it='Generato da' }
@@ -1793,6 +1932,12 @@ function Apply-Language {
   $w = $script:Window
   if (-not $w) { return }
 
+  # Helper: safe set text (must be defined before any calls)
+  function Set-LblText([string]$Name, [string]$Key) {
+    $el = $w.FindName($Name)
+    if ($el) { $el.Text = Get-Str $Key }
+  }
+
   # Tab headers
   $tabs = $w.FindName('Tabs')
   if ($tabs) {
@@ -1800,22 +1945,21 @@ function Apply-Language {
     $tabs.Items[1].Header = Get-Str 'tab.applications'
     $tabs.Items[2].Header = Get-Str 'tab.vmtemplate'
     $tabs.Items[3].Header = Get-Str 'tab.results'
-    if ($tabs.Items.Count -gt 4) { $tabs.Items[4].Header = Get-Str 'tab.costs' }
   }
 
   # Buttons
   $b = $w.FindName('BtnCalculate');    if ($b) { $b.Content = Get-Str 'btn.calculate' }
-  $b = $w.FindName('BtnPickVm');       if ($b) { $b.Content = Get-Str 'btn.pickvm' }
+  $b = $w.FindName('BtnPickVm');       if ($b) { $b.Content = if ($script:SizingMode -eq 'Assess') { Get-Str 'btn.validate' } else { Get-Str 'btn.pickvm' } }
+  Set-LblText 'LblSizingMode'       'mode.title'
+  Set-LblText 'LblSizingModeDesc'   'mode.desc'
+  $cmb = $w.FindName('CmbSizingMode')
+  if ($cmb -and $cmb.Items.Count -ge 2) {
+    $cmb.Items[0].Content = Get-Str 'mode.new'
+    $cmb.Items[1].Content = Get-Str 'mode.assess'
+  }
   $b = $w.FindName('BtnExportReport'); if ($b) { $b.Content = Get-Str 'btn.exportreport' }
   $b = $w.FindName('BtnClose');        if ($b) { $b.Content = Get-Str 'btn.close' }
   $b = $w.FindName('BtnReset');        if ($b) { $b.Content = Get-Str 'btn.reset' }
-  $b = $w.FindName('BtnCalcUserCosts');if ($b) { $b.Content = Get-Str 'btn.calccosts' }
-
-  # Helper: safe set text
-  function Set-LblText([string]$Name, [string]$Key) {
-    $el = $w.FindName($Name)
-    if ($el) { $el.Text = Get-Str $Key }
-  }
 
   # Workload tab
   Set-LblText 'LblHostPoolType'     'wl.hostpooltype'
@@ -1829,6 +1973,10 @@ function Apply-Language {
   Set-LblText 'LblConcurrencyDesc'  'wl.concurrency.desc'
   Set-LblText 'LblPeakFactor'       'wl.peakfactor'
   Set-LblText 'LblPeakFactorDesc'   'wl.peakfactor.desc'
+  $thKey = if ($script:SizingMode -eq 'Assess') { 'wl.currenthosts' } else { 'wl.targethosts' }
+  $thDescKey = if ($script:SizingMode -eq 'Assess') { 'wl.currenthosts.desc' } else { 'wl.targethosts.desc' }
+  Set-LblText 'LblTargetHosts'      $thKey
+  Set-LblText 'LblTargetHostsDesc'  $thDescKey
   Set-LblText 'LblNPlus1'           'wl.nplus1'
   Set-LblText 'LblNPlus1Desc'       'wl.nplus1.desc'
   Set-LblText 'LblHeadroom'         'wl.headroom'
@@ -1847,6 +1995,8 @@ function Apply-Language {
   Set-LblText 'LblCpuRamDesc'     'tune.cpuram.desc'
   Set-LblText 'LblVcpuRange'      'tune.vcpurange'
   Set-LblText 'LblVcpuRangeDesc'  'tune.vcpurange.desc'
+  Set-LblText 'LblRamRange'       'tune.ramrange'
+  Set-LblText 'LblRamRangeDesc'   'tune.ramrange.desc'
 
   # Applications tab
   Set-LblText 'LblClientApps'     'app.client'
@@ -1894,10 +2044,7 @@ function Apply-Language {
   Set-LblText 'LblResNotes'       'res.notes'
 
   # Costs tab
-  Set-LblText 'LblCostTitle'      'cost.title'
-  Set-LblText 'LblCostDesc'       'cost.desc'
   Set-LblText 'LblDiscDesc'       'cost.disc.desc'
-  Set-LblText 'LblBreakdown'      'cost.breakdown'
 
   # CheckBox content
 }
@@ -2079,7 +2226,7 @@ $XamlString = @"
     <DockPanel LastChildFill="False">
       <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
         <TextBlock FontSize="20" FontWeight="Bold" Foreground="#FFFFFF" Text="BWS AVD Sizing"/>
-        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v2.0.3"/>
+        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v2.7.0"/>
       </StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
         <TextBlock Foreground="#88AACC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0" Text="Language:"/>
@@ -2099,6 +2246,13 @@ $XamlString = @"
 
           <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Padding="0,0,12,0">
           <StackPanel>
+            <TextBlock x:Name="LblSizingMode" FontWeight="Bold" Foreground="#086ADB" FontSize="13" Text="Sizing Mode" Margin="0,0,0,4"/>
+            <TextBlock x:Name="LblSizingModeDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="New: plan optimal infrastructure. Assess: validate existing setup."/>
+            <ComboBox x:Name="CmbSizingMode" Margin="0,3,0,12" SelectedIndex="0">
+              <ComboBoxItem Content="New Infrastructure"/><ComboBoxItem Content="Assess Existing"/>
+            </ComboBox>
+            <Separator Margin="0,0,0,8"/>
+
             <TextBlock x:Name="LblHostPoolType" FontWeight="Bold" Text="Host pool type"/>
             <TextBlock x:Name="LblHostPoolTypeDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Pooled: shared VMs (cost-efficient). Personal: 1:1 mapping (isolated)."/>
             <ComboBox x:Name="CmbHostPoolType" Margin="0,3,0,8" SelectedIndex="0" IsEnabled="False">
@@ -2134,6 +2288,10 @@ $XamlString = @"
             </StackPanel>
 
             <Separator Margin="0,4,0,4"/>
+            <TextBlock x:Name="LblTargetHosts" FontWeight="Bold" Text="Target number of hosts"/>
+            <TextBlock x:Name="LblTargetHostsDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Desired number of session hosts. VM template will be sized to fit all users across this many hosts."/>
+            <StackPanel Orientation="Horizontal" Margin="0,3,0,6"><TextBox x:Name="TxtTargetHosts" Width="120" Text="2"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="hosts (min 1)"/></StackPanel>
+
             <TextBlock x:Name="LblNPlus1" FontWeight="Bold" Text="N+1 redundancy"/>
             <TextBlock x:Name="LblNPlus1Desc" Foreground="#556688" FontSize="11" Text="Extra failover hosts. 1 = one standby, 0 = off."/>
             <StackPanel Orientation="Horizontal" Margin="0,3,0,6"><TextBox x:Name="TxtNPlusOne" Width="120" Text="0"/></StackPanel>
@@ -2175,8 +2333,25 @@ $XamlString = @"
               <Separator/>
               <TextBlock x:Name="LblVcpuRange" FontWeight="Bold" Text="vCPU range per host (pooled)"/>
               <TextBlock x:Name="LblVcpuRangeDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="MS recommends max 24 for multi-session. 128 = unrestricted."/>
-              <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtMinVcpuHost" Width="100" Text="8"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="min vCPU/host"/></StackPanel>
-              <StackPanel Orientation="Horizontal"><TextBox x:Name="TxtMaxVcpuHost" Width="100" Text="64"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="max vCPU/host (8-64)"/></StackPanel>
+              <!-- New Infrastructure: range -->
+              <StackPanel x:Name="PnlVcpuRange" Orientation="Vertical">
+                <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtMinVcpuHost" Width="100" Text="4"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="min vCPU/host"/></StackPanel>
+                <StackPanel Orientation="Horizontal"><TextBox x:Name="TxtMaxVcpuHost" Width="100" Text="64"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="max vCPU/host (4-64)"/></StackPanel>
+              </StackPanel>
+              <Separator Margin="0,8,0,4"/>
+              <TextBlock x:Name="LblRamRange" FontWeight="Bold" Text="RAM range per host (GB)"/>
+              <TextBlock x:Name="LblRamRangeDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Minimum and maximum RAM in GB per session host."/>
+              <!-- New Infrastructure: range -->
+              <StackPanel x:Name="PnlRamRange" Orientation="Vertical">
+                <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBox x:Name="TxtMinRamHost" Width="100" Text="16"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="min RAM/host (GB)"/></StackPanel>
+                <StackPanel Orientation="Horizontal"><TextBox x:Name="TxtMaxRamHost" Width="100" Text="128"/><TextBlock Margin="8,4,0,0" Foreground="#8899AA" Text="max RAM/host (16-128 GB)"/></StackPanel>
+              </StackPanel>
+              <!-- Assess Existing: VM Template picker -->
+              <StackPanel x:Name="PnlAssessVm" Orientation="Vertical" Visibility="Collapsed">
+                <TextBlock FontWeight="Bold" Foreground="#086ADB" Text="Existing VM Template" Margin="0,0,0,4"/>
+                <TextBlock Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4" Text="Select the VM template currently used in your infrastructure."/>
+                <ComboBox x:Name="CmbAssessVm" Margin="0,3,0,4"/>
+              </StackPanel>
             </StackPanel>
             </ScrollViewer>
           </Border>
@@ -2291,7 +2466,6 @@ $XamlString = @"
                 <DataGridTextColumn Header="Size (GiB)" Binding="{Binding SizeGiB}" Width="80"/>
                 <DataGridTextColumn Header="IOPS" Binding="{Binding IOPS}" Width="70"/>
                 <DataGridTextColumn Header="MB/s" Binding="{Binding MBps}" Width="60"/>
-                <DataGridTextColumn Header="CHF/month" Binding="{Binding PriceCHF}" Width="90"/>
               </DataGrid.Columns>
             </DataGrid>
 
@@ -2326,43 +2500,12 @@ $XamlString = @"
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Margin="0,0,0,6">
             <TextBlock x:Name="LblResTitle" FontSize="14" FontWeight="Bold" Foreground="#086ADB" Text="Sizing Results"/>
-            <TextBlock x:Name="LblResDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Click 'Calculate' then 'Suggest VM Template' to find the best VM template with pricing."/>
+            <TextBlock x:Name="LblResDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Click 'Calculate' then 'Suggest VM Template' to find the best VM template."/>
           </StackPanel>
           <DataGrid Grid.Row="1" x:Name="GridResults" AutoGenerateColumns="True" IsReadOnly="True" Margin="0,4,0,8"/>
           <TextBlock x:Name="LblResNotes" Grid.Row="2" Foreground="#8899AA" FontSize="11" Text="Notes, warnings and recommendations:" Margin="0,0,0,2"/>
           <TextBox Grid.Row="3" x:Name="TxtNotes" Height="170" TextWrapping="Wrap" AcceptsReturn="True"
                    VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11" IsReadOnly="True"/>
-        </Grid>
-      </TabItem>
-
-      <!-- TAB 5: Costs -->
-      <TabItem Header="Costs" x:Name="TabUserCosts">
-        <Grid Margin="10">
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-          <StackPanel Grid.Row="0" Margin="0,0,0,8">
-            <TextBlock x:Name="LblCostTitle" FontSize="14" FontWeight="Bold" Foreground="#086ADB" Text="Cost Analysis"/>
-            <TextBlock x:Name="LblCostDesc" Foreground="#556688" FontSize="11" TextWrapping="Wrap" Text="Calculate per-user costs. Requires 'Suggest VM Template' on the Results tab first."/>
-          </StackPanel>
-          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-          <Grid>
-            <Grid.ColumnDefinitions><ColumnDefinition Width="400"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-
-            <StackPanel Grid.Column="0" Margin="0,0,16,0">
-              <Button x:Name="BtnCalcUserCosts" Content="Calculate Costs" Width="200" HorizontalAlignment="Left" FontWeight="Bold"
-                      Background="#086ADB" Foreground="#FFFFFF" Margin="0,4,0,0"/>
-            </StackPanel>
-
-            <Border Grid.Column="1" Padding="14" BorderBrush="#D8DFE8" BorderThickness="1" CornerRadius="8" Background="#F5F8FC">
-              <StackPanel>
-                <TextBlock x:Name="LblBreakdown" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="Cost Breakdown" Margin="0,0,0,8"/>
-                <DataGrid x:Name="GridUserCosts" AutoGenerateColumns="True" IsReadOnly="True" Margin="0,0,0,8"/>
-                <TextBox x:Name="TxtUserCostNotes" Height="140" TextWrapping="Wrap" AcceptsReturn="True"
-                         VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11" IsReadOnly="True"
-                         Background="#001155" Foreground="#556688" BorderBrush="#D8DFE8"/>
-              </StackPanel>
-            </Border>
-          </Grid>
-          </ScrollViewer>
         </Grid>
       </TabItem>
     </TabControl>
@@ -2396,11 +2539,59 @@ $CmbHostPoolType = $Window.FindName('CmbHostPoolType'); $CmbWorkload = $Window.F
 $TxtTotalUsers = $Window.FindName('TxtTotalUsers'); $CmbConcurrencyMode = $Window.FindName('CmbConcurrencyMode')
 $TxtConcurrencyValue = $Window.FindName('TxtConcurrencyValue'); $LblConcurrencyHint = $Window.FindName('LblConcurrencyHint')
 $TxtPeakFactor = $Window.FindName('TxtPeakFactor'); $TxtNPlusOne = $Window.FindName('TxtNPlusOne')
+$TxtTargetHosts = $Window.FindName('TxtTargetHosts')
 $TxtExtraHeadroomPct = $Window.FindName('TxtExtraHeadroomPct')
 $TxtProfileGB = $Window.FindName('TxtProfileGB'); $TxtProfileGrowthPct = $Window.FindName('TxtProfileGrowthPct')
 $TxtProfileOverheadPct = $Window.FindName('TxtProfileOverheadPct')
 $TxtCpuUtil = $Window.FindName('TxtCpuUtil'); $TxtMemUtil = $Window.FindName('TxtMemUtil'); $TxtVirtOverhead = $Window.FindName('TxtVirtOverhead')
 $TxtMinVcpuHost = $Window.FindName('TxtMinVcpuHost'); $TxtMaxVcpuHost = $Window.FindName('TxtMaxVcpuHost')
+$TxtMinRamHost = $Window.FindName('TxtMinRamHost'); $TxtMaxRamHost = $Window.FindName('TxtMaxRamHost')
+$PnlVcpuRange = $Window.FindName('PnlVcpuRange')
+$PnlRamRange = $Window.FindName('PnlRamRange')
+$PnlAssessVm = $Window.FindName('PnlAssessVm')
+$CmbAssessVm = $Window.FindName('CmbAssessVm')
+
+# Populate Assess VM Template ComboBox
+foreach ($vm in $script:BwsVmCatalog) {
+  $item = [System.Windows.Controls.ComboBoxItem]::new()
+  $item.Content = "$($vm.Name) — $($vm.vCPU) vCPU, $($vm.RamGB) GB RAM"
+  $item.Tag = $vm
+  $CmbAssessVm.Items.Add($item)
+}
+if ($CmbAssessVm.Items.Count -gt 0) { $CmbAssessVm.SelectedIndex = 2 } # D8s v5 as default
+
+# Sizing Mode toggle
+$CmbSizingMode = $Window.FindName('CmbSizingMode')
+$script:SizingMode = 'New'
+$CmbSizingMode.add_SelectionChanged({
+  $lblTH = $Window.FindName('LblTargetHosts')
+  $lblTHDesc = $Window.FindName('LblTargetHostsDesc')
+  if ($CmbSizingMode.SelectedIndex -eq 0) {
+    $script:SizingMode = 'New'
+    $PnlVcpuRange.Visibility = 'Visible'
+    $PnlRamRange.Visibility = 'Visible'
+    $PnlAssessVm.Visibility = 'Collapsed'
+    $lv = $Window.FindName('LblVcpuRange'); if ($lv) { $lv.Visibility = 'Visible' }
+    $lvd = $Window.FindName('LblVcpuRangeDesc'); if ($lvd) { $lvd.Visibility = 'Visible' }
+    $lr = $Window.FindName('LblRamRange'); if ($lr) { $lr.Visibility = 'Visible' }
+    $lrd = $Window.FindName('LblRamRangeDesc'); if ($lrd) { $lrd.Visibility = 'Visible' }
+    $b = $Window.FindName('BtnPickVm'); if ($b) { $b.Content = Get-Str 'btn.pickvm' }
+    if ($lblTH) { $lblTH.Text = Get-Str 'wl.targethosts' }
+    if ($lblTHDesc) { $lblTHDesc.Text = Get-Str 'wl.targethosts.desc' }
+  } else {
+    $script:SizingMode = 'Assess'
+    $PnlVcpuRange.Visibility = 'Collapsed'
+    $PnlRamRange.Visibility = 'Collapsed'
+    $PnlAssessVm.Visibility = 'Visible'
+    $lv = $Window.FindName('LblVcpuRange'); if ($lv) { $lv.Visibility = 'Collapsed' }
+    $lvd = $Window.FindName('LblVcpuRangeDesc'); if ($lvd) { $lvd.Visibility = 'Collapsed' }
+    $lr = $Window.FindName('LblRamRange'); if ($lr) { $lr.Visibility = 'Collapsed' }
+    $lrd = $Window.FindName('LblRamRangeDesc'); if ($lrd) { $lrd.Visibility = 'Collapsed' }
+    $b = $Window.FindName('BtnPickVm'); if ($b) { $b.Content = Get-Str 'btn.validate' }
+    if ($lblTH) { $lblTH.Text = Get-Str 'wl.currenthosts' }
+    if ($lblTHDesc) { $lblTHDesc.Text = Get-Str 'wl.currenthosts.desc' }
+  }
+})
 $CmbLoadBalancing = $Window.FindName('CmbLoadBalancing'); $TxtMaxSessionLimit = $Window.FindName('TxtMaxSessionLimit')
 
 # Applications tab - checkboxes
@@ -2431,7 +2622,7 @@ $GridAddDisks.ItemsSource = $script:BwsAdditionalDisks
 # Populate disk ComboBox from File Storage catalog (also suitable as data disks)
 foreach ($d in $script:BwsFileStorageCatalog) {
   $item = [System.Windows.Controls.ComboBoxItem]::new()
-  $item.Content = "$($d.Sku): $($d.SizeGiB) GiB, $($d.IOPS) IOPS, $($d.MBps) MB/s — CHF $($d.PriceCHF)/mo"
+  $item.Content = "$($d.Sku): $($d.SizeGiB) GiB, $($d.IOPS) IOPS, $($d.MBps) MB/s"
   $item.Tag = $d
   $CmbAddDiskSku.Items.Add($item)
 }
@@ -2442,7 +2633,7 @@ $BtnAddDisk.add_Click({
   if ($sel -and $sel.Tag) {
     $d = $sel.Tag
     $script:BwsAdditionalDisks.Add([pscustomobject]@{
-      Sku=$d.Sku; SizeGiB=$d.SizeGiB; IOPS=$d.IOPS; MBps=$d.MBps; PriceCHF=$d.PriceCHF
+      Sku=$d.Sku; SizeGiB=$d.SizeGiB; IOPS=$d.IOPS; MBps=$d.MBps
     })
   }
 })
@@ -2469,15 +2660,10 @@ $CmbLanguage.add_SelectionChanged({
 })
 
 # Costs tab (visible with -Expert)
-$TabUserCosts = $Window.FindName('TabUserCosts')
-$BtnCalcUserCosts = $Window.FindName('BtnCalcUserCosts')
-$GridUserCosts = $Window.FindName('GridUserCosts')
-$TxtUserCostNotes = $Window.FindName('TxtUserCostNotes')
-$TabUserCosts.Visibility = 'Visible'
 
 # All panels visible (Expert mode removed)
 
-$script:LastSizing = $null; $script:LastVmPick = $null; $script:LastVmPrice = $null
+$script:LastSizing = $null; $script:LastVmPick = $null
 
 # App checkbox mapping
 $script:AppCheckboxMap = [ordered]@{
@@ -2526,6 +2712,20 @@ $BtnCalculate.add_Click({
     $lbAlgo = if ($lbRaw -like 'Depth*') { 'DepthFirst' } else { 'BreadthFirst' }
     $maxSessLimit = ConvertTo-IntSafe -Text $TxtMaxSessionLimit.Text -Default 0
 
+    # vCPU / RAM range depends on sizing mode
+    if ($script:SizingMode -eq 'Assess') {
+      $selItem = $CmbAssessVm.SelectedItem
+      if (-not $selItem -or -not $selItem.Tag) { throw "Please select an existing VM template." }
+      $assessVm = $selItem.Tag
+      $paramMinVcpu = [int]$assessVm.vCPU; $paramMaxVcpu = [int]$assessVm.vCPU
+      $paramMinRam  = [int]$assessVm.RamGB;  $paramMaxRam  = [int]$assessVm.RamGB
+    } else {
+      $paramMinVcpu = [Math]::Max(4, (ConvertTo-IntSafe -Text $TxtMinVcpuHost.Text -Default 4))
+      $paramMaxVcpu = [Math]::Min(64, [Math]::Max(4, (ConvertTo-IntSafe -Text $TxtMaxVcpuHost.Text -Default 64)))
+      $paramMinRam  = [Math]::Max(16, (ConvertTo-IntSafe -Text $TxtMinRamHost.Text -Default 16))
+      $paramMaxRam  = [Math]::Min(128, [Math]::Max(16, (ConvertTo-IntSafe -Text $TxtMaxRamHost.Text -Default 128)))
+    }
+
     $script:LastSizing = Get-AvdSizing -HostPoolType $hostPoolType -Workload $workload -TotalUsers $totalUsers `
       -ConcurrencyMode (Get-ComboText -Combo $CmbConcurrencyMode) `
       -ConcurrencyValue (ConvertTo-DoubleSafe -Text $TxtConcurrencyValue.Text -Default 60) `
@@ -2533,21 +2733,26 @@ $BtnCalculate.add_Click({
       -CpuTargetUtil (ConvertTo-DoubleSafe -Text $TxtCpuUtil.Text -Default 0.80) `
       -MemTargetUtil (ConvertTo-DoubleSafe -Text $TxtMemUtil.Text -Default 1.0) `
       -SystemResourceReserve (ConvertTo-DoubleSafe -Text $TxtVirtOverhead.Text -Default 0.20) `
-      -MinVcpuPerHost ([Math]::Max(8, (ConvertTo-IntSafe -Text $TxtMinVcpuHost.Text -Default 8))) `
-      -MaxVcpuPerHost ([Math]::Min(64, [Math]::Max(8, (ConvertTo-IntSafe -Text $TxtMaxVcpuHost.Text -Default 64)))) `
+      -MinVcpuPerHost $paramMinVcpu -MaxVcpuPerHost $paramMaxVcpu `
+      -MinRamPerHost $paramMinRam -MaxRamPerHost $paramMaxRam `
+      -TargetHosts ([Math]::Max(1, (ConvertTo-IntSafe -Text $TxtTargetHosts.Text -Default 2))) `
       -NPlusOneHosts (ConvertTo-IntSafe -Text $TxtNPlusOne.Text -Default 0) `
       -ExtraHeadroomPercent (ConvertTo-DoubleSafe -Text $TxtExtraHeadroomPct.Text -Default 0) `
       -ProfileContainerGB (ConvertTo-DoubleSafe -Text $TxtProfileGB.Text -Default 30) `
       -ProfileGrowthPercent (ConvertTo-DoubleSafe -Text $TxtProfileGrowthPct.Text -Default 20) `
       -ProfileOverheadPercent (ConvertTo-DoubleSafe -Text $TxtProfileOverheadPct.Text -Default 10) `
       -LoadBalancing $lbAlgo -MaxSessionLimit $maxSessLimit `
+      -SizingMode $script:SizingMode `
       -AppOverhead $appOverhead
 
     if ($script:LastSizing -is [System.Array]) { $script:LastSizing = $script:LastSizing | Select-Object -First 1 }
+    $script:LastSizing | Add-Member -NotePropertyName SizingMode -NotePropertyValue $script:SizingMode -Force
+    if ($script:SizingMode -eq 'Assess' -and $CmbAssessVm.SelectedItem -and $CmbAssessVm.SelectedItem.Tag) {
+      $script:LastSizing | Add-Member -NotePropertyName AssessedVmName -NotePropertyValue $CmbAssessVm.SelectedItem.Tag.Name -Force
+    }
 
-    $hidePricingVal = $false
-    Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick -VmPrice $script:LastVmPrice `
-      -GridResults $GridResults -TxtNotes $TxtNotes -HidePricing $hidePricingVal
+    Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick `
+      -GridResults $GridResults -TxtNotes $TxtNotes
     $Window.FindName('Tabs').SelectedIndex = 3
   } catch { Write-UiError "Calculation failed: $($_.Exception.Message)" }
 })
@@ -2563,15 +2768,27 @@ $BtnPickVm.add_Click({
       $series = $script:LastSizing.PreferredSeries
     }
 
-    $maxVcpuRange = [Math]::Min(64, [Math]::Max(8, (ConvertTo-IntSafe -Text $TxtMaxVcpuHost.Text -Default 64)))
-    $minVcpu = $script:LastSizing.Recommended.VcpuPerHost
-    $minRamGB = $script:LastSizing.Recommended.RamGB_Provisioned
+    # In Assess mode: use the selected VM directly, don't search
+    # In New mode: search for best VM from BWS catalog
+    if ($script:SizingMode -eq 'Assess') {
+      $selItem = $CmbAssessVm.SelectedItem
+      if (-not $selItem -or -not $selItem.Tag) { Write-UiWarning 'Please select an existing VM template.'; return }
+      $assessVm = $selItem.Tag
+      $bwsVm = $assessVm
+      $recVm = $script:AssessRecommendedVm
+    } else {
+      $maxVcpuRange = [Math]::Min(64, [Math]::Max(4, (ConvertTo-IntSafe -Text $TxtMaxVcpuHost.Text -Default 64)))
+      $maxRamRange = [Math]::Min(128, [Math]::Max(16, (ConvertTo-IntSafe -Text $TxtMaxRamHost.Text -Default 128)))
+      $minVcpu = $script:LastSizing.Recommended.VcpuPerHost
+      $minRamGB = $script:LastSizing.Recommended.RamGB_Provisioned
 
-    # Select best VM from BWS catalog
-    $bwsVm = Select-BwsVm -MinVcpu $minVcpu -MinRamGB $minRamGB -MaxVcpu $maxVcpuRange -PreferredSeries $series
-    if (-not $bwsVm) {
-      Write-UiWarning "No BWS VM template found (min $minVcpu vCPU, min $([Math]::Round($minRamGB,0)) GB RAM, max $maxVcpuRange vCPU)."
-      return
+      # Select best VM from BWS catalog
+      $bwsVm = Select-BwsVm -MinVcpu $minVcpu -MinRamGB $minRamGB -MaxVcpu $maxVcpuRange -MaxRamGB $maxRamRange -PreferredSeries $series
+      if (-not $bwsVm) {
+        Write-UiWarning "No BWS VM template found (min $minVcpu vCPU, min $([Math]::Round($minRamGB,0)) GB RAM, max $maxVcpuRange vCPU, max $maxRamRange GB RAM)."
+        return
+      }
+      $recVm = $null
     }
 
     # Select OS Disk from BWS catalog — use sizing requirements
@@ -2589,12 +2806,8 @@ $BtnPickVm.add_Click({
     $additionalDisks = @()
     if ($script:BwsAdditionalDisks -and $script:BwsAdditionalDisks.Count -gt 0) {
       $additionalDisks = @($script:BwsAdditionalDisks | ForEach-Object {
-        [pscustomobject]@{ Sku=$_.Sku; SizeGiB=$_.SizeGiB; IOPS=$_.IOPS; MBps=$_.MBps; PriceCHF=[double]$_.PriceCHF }
+        [pscustomobject]@{ Sku=$_.Sku; SizeGiB=$_.SizeGiB; IOPS=$_.IOPS; MBps=$_.MBps }
       })
-    }
-    $additionalDiskCost = 0
-    if ($additionalDisks.Count -gt 0) {
-      $additionalDiskCost = ($additionalDisks | ForEach-Object { [double]$_.PriceCHF } | Measure-Object -Sum).Sum
     }
 
     # Build a VM pick object compatible with existing code
@@ -2603,25 +2816,27 @@ $BtnPickVm.add_Click({
       NumberOfCores   = $bwsVm.vCPU
       MemoryInMB      = $bwsVm.RamGB * 1024
       BwsName         = $bwsVm.Name
-      BwsPriceCHF     = $bwsVm.PriceCHF
       BwsSeries       = $bwsVm.Series
       BwsOsDisk       = $bwsOsDisk
       BwsAddDisks     = $additionalDisks
-      BwsAddDiskCost  = $additionalDiskCost
-    }
-    $script:LastVmPrice = [pscustomobject]@{
-      retailPrice = 0; currencyCode = 'CHF'; unitOfMeasure = 'BWS Monthly'
-      bwsVmMonthly     = $bwsVm.PriceCHF
-      bwsOsDiskMonthly = $bwsOsDisk.PriceCHF
-      bwsAddDiskMonthly = $additionalDiskCost
-      bwsTotalPerHost  = $bwsVm.PriceCHF + $bwsOsDisk.PriceCHF + $additionalDiskCost
+      BwsRecommendedVm = if ($script:SizingMode -eq 'Assess' -and $recVm) { $recVm } else { $null }
     }
 
-    $hidePricingVal2 = $false
-    Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick -VmPrice $script:LastVmPrice `
-      -GridResults $GridResults -TxtNotes $TxtNotes -HidePricing $hidePricingVal2
+    Set-ResultsGrid -Sizing $script:LastSizing -VmPick $script:LastVmPick `
+      -GridResults $GridResults -TxtNotes $TxtNotes
 
-    Write-UiInfo "Selected: $($bwsVm.Name) ($($bwsVm.vCPU) vCPU, $($bwsVm.RamGB) GB) — CHF $($bwsVm.PriceCHF)/mo"
+    # In Assess mode: show current vs recommended
+    if ($script:SizingMode -eq 'Assess') {
+      $recMsg = "Assessment: Current=$($bwsVm.Name) ($($bwsVm.vCPU) vCPU, $($bwsVm.RamGB) GB)"
+      if ($recVm -and $recVm.Name -ne $bwsVm.Name) {
+        $recMsg += " | Recommended=$($recVm.Name) ($($recVm.vCPU) vCPU, $($recVm.RamGB) GB)"
+      } elseif ($recVm) {
+        $recMsg += " | Current template is sufficient."
+      }
+      Write-UiInfo $recMsg
+    } else {
+      Write-UiInfo "Selected: $($bwsVm.Name) ($($bwsVm.vCPU) vCPU, $($bwsVm.RamGB) GB)"
+    }
   } catch { Write-UiError "Failed: $($_.Exception.Message)" }
 })
 
@@ -2671,137 +2886,47 @@ $BtnExportReport.add_Click({
     }
 
     # VM + pricing section (Expert only shows pricing)
-    $hidePricing = $false
     $vmHtml = ''
     $sectionNum = 6
     if ($script:LastVmPick) {
-      $vmName = esc $script:LastVmPick.Name
       $vmCores = $script:LastVmPick.NumberOfCores
       $vmRam = [Math]::Round($script:LastVmPick.MemoryInMB/1024,1)
-      $priceRows = ''
-      $priceNote = ''
       $isBws = $script:LastVmPick.PSObject.Properties.Name -contains 'BwsName'
-      if ($isBws) {
-        $bwsVmP = $script:LastVmPick.BwsPriceCHF
-        $bwsOsP = if ($script:LastVmPick.BwsOsDisk) { $script:LastVmPick.BwsOsDisk.PriceCHF } else { 0 }
-        $bwsAddP = if ($script:LastVmPick.BwsAddDiskCost) { $script:LastVmPick.BwsAddDiskCost } else { 0 }
-        $bwsPerHost = [Math]::Round($bwsVmP + $bwsOsP + $bwsAddP, 2)
-        $bwsTotal = [Math]::Round($bwsPerHost * $s.RecommendedHostsTotal, 2)
-        $vmName = esc $script:LastVmPick.BwsName
-        $addDiskRows = ''
-        if ($script:LastVmPick.BwsAddDisks -and @($script:LastVmPick.BwsAddDisks).Count -gt 0) {
-          foreach ($ad in @($script:LastVmPick.BwsAddDisks)) {
-            $addDiskRows += "          <tr><td>Additional Disk</td><td>$($ad.Sku) ($($ad.SizeGiB) GiB, $($ad.IOPS) IOPS, $($ad.MBps) MB/s) CHF $($ad.PriceCHF)/mo</td></tr>`n"
-          }
+      $vmName = if ($isBws) { esc $script:LastVmPick.BwsName } else { esc $script:LastVmPick.Name }
+      $addDiskRows = ''
+      if ($isBws -and $script:LastVmPick.BwsAddDisks -and @($script:LastVmPick.BwsAddDisks).Count -gt 0) {
+        foreach ($ad in @($script:LastVmPick.BwsAddDisks)) {
+          $addDiskRows += "          <tr><td>Additional Disk</td><td>$($ad.Sku) ($($ad.SizeGiB) GiB, $($ad.IOPS) IOPS, $($ad.MBps) MB/s)</td></tr>`n"
         }
-        $priceRows = @"
-          <tr><td>VM Cost</td><td>CHF $bwsVmP/month</td></tr>
-          <tr><td>OS Disk</td><td>$(if($script:LastVmPick.BwsOsDisk){"$($script:LastVmPick.BwsOsDisk.Sku) ($($script:LastVmPick.BwsOsDisk.SizeGiB) GiB, $($script:LastVmPick.BwsOsDisk.IOPS) IOPS, $($script:LastVmPick.BwsOsDisk.MBps) MB/s) CHF $bwsOsP/mo"}else{'—'})</td></tr>
-          $addDiskRows
-          <tr class="highlight"><td>Total per Host</td><td><strong>CHF $bwsPerHost/month</strong></td></tr>
-          <tr class="highlight"><td>Fleet Total</td><td><strong>CHF $bwsTotal/month</strong> ($($s.RecommendedHostsTotal) hosts)</td></tr>
-"@
-        $priceNote = '<p class="note">BWS managed pricing (monthly). Prices from BWS catalog.</p>'
-      } elseif (-not $hidePricing -and $script:LastVmPrice -and $script:LastVmPrice.PSObject.Properties.Name -contains 'RetailPricePerHour') {
-        $monthly = [Math]::Round($script:LastVmPrice.RetailPricePerHour * 730, 2)
-        $totalMonthly = [Math]::Round($monthly * $s.RecommendedHostsTotal, 2)
-        $cur = esc $script:LastVmPrice.CurrencyCode
-        $priceRows = @"
-          <tr><td>Price/Hour (list)</td><td>$($script:LastVmPrice.RetailPricePerHour) $cur</td></tr>
-          <tr><td>Est. Monthly/Host (list)</td><td>$monthly $cur</td></tr>
-          <tr class="highlight"><td>Est. Monthly Total (list)</td><td><strong>$totalMonthly $cur</strong> ($($s.RecommendedHostsTotal) hosts)</td></tr>
-"@
-        $priceNote = '<p class="note">Azure retail list price (pay-as-you-go). Discounts, RI, Savings Plans, and AHB not applied.</p>'
+      }
+      $osDiskRow = ''
+      if ($isBws -and $script:LastVmPick.BwsOsDisk) {
+        $od = $script:LastVmPick.BwsOsDisk
+        $osDiskRow = "          <tr><td>OS Disk</td><td>$($od.Sku) ($($od.SizeGiB) GiB, $($od.IOPS) IOPS, $($od.MBps) MB/s)</td></tr>"
+      }
+      $recVmRow = ''
+      if ($s.SizingMode -eq 'Assess' -and $script:LastVmPick.BwsRecommendedVm) {
+        $rv = $script:LastVmPick.BwsRecommendedVm
+        if ($rv.Name -ne $script:LastVmPick.BwsName) {
+          $recVmRow = "          <tr class=`"highlight`"><td>Recommended VM</td><td><strong>$($rv.Name)</strong> ($($rv.vCPU) vCPU, $($rv.RamGB) GB RAM)</td></tr>"
+        } else {
+          $recVmRow = "          <tr class=`"highlight`"><td>Recommended VM</td><td>Current template is sufficient.</td></tr>"
+        }
       }
       $vmHtml = @"
       <section>
         <h2><span class="num">$sectionNum</span> $(Get-Str 'rpt.vmselection')</h2>
         <table>
           <tbody>
-            <tr><td>VM Size</td><td><strong>$vmName</strong></td></tr>
+            <tr><td>$(if($s.SizingMode -eq 'Assess'){'Current VM'}else{'VM Size'})</td><td><strong>$vmName</strong></td></tr>
             <tr><td>vCPU</td><td>$vmCores</td></tr>
             <tr><td>RAM</td><td>$vmRam GB</td></tr>
-            $priceRows
+            $(if($isBws){"<tr><td>Series</td><td>$($script:LastVmPick.BwsSeries)-series</td></tr>"}else{''})
+            $osDiskRow
+            $addDiskRows
+            $recVmRow
           </tbody>
         </table>
-        $priceNote
-      </section>
-"@
-      $sectionNum++
-    }
-
-    # User Costs section
-    $userCostsHtml = ''
-    $isBwsPrice = $script:LastVmPrice -and ($script:LastVmPrice.PSObject.Properties.Name -contains 'bwsTotalPerHost')
-    if ($script:LastVmPrice -and ($isBwsPrice -or ($script:LastVmPrice.PSObject.Properties.Name -contains 'RetailPricePerHour'))) {
-      $ucHoursPerDay  = 24
-      $ucDaysPerMonth = 30
-      $ucMonthlyHrs = $ucHoursPerDay * $ucDaysPerMonth
-
-      if ($isBwsPrice) {
-        $ucMonthlyPerHost = [Math]::Round($script:LastVmPrice.bwsTotalPerHost, 2)
-        $ucCur = 'CHF'
-      } else {
-        $ucListPrice = [double]$script:LastVmPrice.RetailPricePerHour
-        $ucCur = esc $script:LastVmPrice.CurrencyCode
-        $ucMonthlyPerHost = [Math]::Round($ucListPrice * $ucMonthlyHrs, 2)
-      }
-
-      $ucHostsTotal = [int]$s.RecommendedHostsTotal
-      $ucTotalUsers = [int]$s.TotalUsers
-
-      $ucMonthlyAll     = [Math]::Round($ucMonthlyPerHost * $ucHostsTotal, 2)
-      $ucPerUser        = if ($ucTotalUsers -gt 0) { [Math]::Round($ucMonthlyAll / $ucTotalUsers, 2) } else { 0 }
-      $ucYearlyPerUser  = [Math]::Round($ucPerUser * 12, 2)
-      $ucYearlyTotal    = [Math]::Round($ucMonthlyAll * 12, 2)
-
-      # Build cost breakdown rows for BWS
-      $costBreakdownHtml = ''
-      if ($isBwsPrice -and $script:LastVmPrice) {
-        $cbVm = $script:LastVmPrice.bwsVmMonthly
-        $cbOs = $script:LastVmPrice.bwsOsDiskMonthly
-        $cbAdd = $script:LastVmPrice.bwsAddDiskMonthly
-        $addDiskDetailRows = ''
-        if ($cbAdd -gt 0 -and $script:LastVmPick.BwsAddDisks -and @($script:LastVmPick.BwsAddDisks).Count -gt 0) {
-          foreach ($ad in @($script:LastVmPick.BwsAddDisks)) {
-            $addDiskDetailRows += "            <tr><td style='padding-left:24px'>$($ad.Sku) ($($ad.SizeGiB) GiB, $($ad.IOPS) IOPS, $($ad.MBps) MB/s)</td><td>$($ad.PriceCHF) $ucCur</td></tr>`n"
-          }
-        }
-        $costBreakdownHtml = @"
-        <h3>Cost Breakdown per Host</h3>
-        <table>
-          <tbody>
-            <tr><td>VM</td><td>$cbVm $ucCur</td></tr>
-            <tr><td>OS Disk</td><td>$cbOs $ucCur</td></tr>
-            $(if($cbAdd -gt 0){"<tr><td>Additional Disks</td><td>$cbAdd $ucCur</td></tr>`n$addDiskDetailRows"}else{''})
-            <tr class="highlight"><td><strong>Total per Host</strong></td><td><strong>$ucMonthlyPerHost $ucCur</strong></td></tr>
-          </tbody>
-        </table>
-"@
-      }
-
-      $userCostsHtml = @"
-      <section>
-        <h2><span class="num">$sectionNum</span> $(Get-Str 'rpt.usercosts')</h2>
-        $costBreakdownHtml
-        <h3>Fleet Costs</h3>
-        <table>
-          <tbody>
-            <tr><td>Hosts Total</td><td>$ucHostsTotal</td></tr>
-            <tr><td>Monthly/Host</td><td>$ucMonthlyPerHost $ucCur</td></tr>
-            <tr class="highlight"><td>Monthly All Hosts</td><td><strong>$ucMonthlyAll $ucCur</strong></td></tr>
-            <tr><td>Yearly All Hosts</td><td>$ucYearlyTotal $ucCur</td></tr>
-          </tbody>
-        </table>
-        <h3>Costs per User</h3>
-        <table>
-          <tbody>
-            <tr><td>Total Users</td><td>$ucTotalUsers</td></tr>
-            <tr class="highlight"><td>Monthly / User</td><td><strong>$ucPerUser $ucCur</strong></td></tr>
-            <tr class="highlight"><td>Yearly / User</td><td><strong>$ucYearlyPerUser $ucCur</strong></td></tr>
-          </tbody>
-        </table>
-        <p class="note">BWS managed pricing. Includes VM, OS Disk and additional disks per host.</p>
       </section>
 "@
       $sectionNum++
@@ -3022,12 +3147,21 @@ $BtnExportReport.add_Click({
     <table>
       <tbody>
         <tr><td>Host Pool Type</td><td><strong>$($s.HostPoolType)</strong> ($($s.Mode))</td></tr>
+        <tr><td>Sizing Mode</td><td><strong>$(if($s.SizingMode -eq 'Assess'){Get-Str 'mode.assess'}else{Get-Str 'mode.new'})</strong></td></tr>
+        $(if($s.SizingMode -eq 'Assess' -and $s.AssessedVmName){"<tr><td>Assessed VM Template</td><td><strong>$($s.AssessedVmName)</strong></td></tr>"}else{''})
         <tr><td>Workload Class</td><td>$($s.Workload)</td></tr>
         <tr><td>Total Users</td><td>$($s.TotalUsers)</td></tr>
         <tr><td>Peak Concurrent</td><td>$($s.PeakConcurrentUsers)</td></tr>
         <tr><td>Users per Host</td><td>$($r.UsersPerHost)</td></tr>
         <tr><td>vCPU per Host</td><td>$($r.VcpuPerHost)</td></tr>
         <tr><td>RAM per Host</td><td>$($r.RamGB_Provisioned) GB (provisioned)</td></tr>
+        $(if($r.PSObject.Properties.Name -contains 'RamGB_VmCapacity'){
+          $ramStatusClass = if($r.RamSufficient){''}else{' class="highlight"'}
+          $ramStatusText = if($r.RamSufficient){"OK ($($r.RamGB_Provisioned) GB of $($r.RamGB_VmCapacity) GB)"}else{"INSUFFICIENT — need $($r.RamGB_Provisioned) GB, VM has $($r.RamGB_VmCapacity) GB"}
+          $brkText = "OS: $($r.RamGB_OS) GB + Users: $($r.RamGB_Users) GB ($($r.UsersPerHost) x $($r.RamGB_PerUser) GB)"
+          if($r.RamGB_AppOverhead -gt 0){$brkText += " + Apps: $($r.RamGB_AppOverhead) GB"}
+          "<tr$ramStatusClass><td>RAM Status</td><td>$ramStatusText</td></tr>`n        <tr><td>RAM Breakdown</td><td>$brkText</td></tr>"
+        }else{''})
         <tr class="highlight"><td>Session Hosts Total</td><td><strong>$($s.RecommendedHostsTotal)</strong></td></tr>
         <tr><td>Guideline Examples</td><td>$($s.Examples)</td></tr>
       </tbody>
@@ -3069,7 +3203,6 @@ $BtnExportReport.add_Click({
   $vmHtml
 
   <!-- User Costs (Expert only) -->
-  $userCostsHtml
 
   <!-- Notes -->
   <section>
@@ -3097,118 +3230,20 @@ $BtnExportReport.add_Click({
   } catch { Write-UiError "Report export failed: $($_.Exception.Message)" }
 })
 
-# User Costs calculation
-$BtnCalcUserCosts.add_Click({
-  try {
-    if (-not $script:LastSizing) { Write-UiWarning 'Calculate sizing first.'; return }
-    if (-not $script:LastVmPick) { Write-UiWarning "Click 'Suggest VM Template' first to get pricing data."; return }
-    if (-not $script:LastVmPrice) { Write-UiWarning 'VM pricing not available.'; return }
-
-    $s = $script:LastSizing; $r = $s.Recommended; $p = $script:LastVmPrice
-    $hoursPerDay  = 24
-    $daysPerMonth = 30
-
-    $isBwsP = $p.PSObject.Properties.Name -contains 'bwsTotalPerHost'
-    if ($isBwsP) {
-      $monthlyPerHost = [Math]::Round($p.bwsTotalPerHost, 2)
-      $currency = 'CHF'
-    } else {
-      $listPricePerHour = [double]$p.RetailPricePerHour
-      $currency = [string]$p.CurrencyCode
-      $monthlyHoursPerHost = $hoursPerDay * $daysPerMonth
-      $monthlyPerHost = [Math]::Round($listPricePerHour * $monthlyHoursPerHost, 2)
-    }
-
-    $hostsTotal = [int]$s.RecommendedHostsTotal
-    $usersPerHost = [int]$r.UsersPerHost
-    $peakUsers = [int]$s.PeakConcurrentUsers
-    $totalUsers = [int]$s.TotalUsers
-
-    $monthlyAllHosts = [Math]::Round($monthlyPerHost * $hostsTotal, 2)
-    $costPerUser = if ($totalUsers -gt 0) { [Math]::Round($monthlyAllHosts / $totalUsers, 2) } else { 0 }
-    $yearlyPerUser = [Math]::Round($costPerUser * 12, 2)
-    $yearlyTotal = [Math]::Round($monthlyAllHosts * 12, 2)
-
-    # Build results grid
-    $rows = [System.Collections.Generic.List[object]]::new()
-    $rows.Add([pscustomobject]@{ Key='--- VM TEMPLATE ---'; Value='' })
-    if ($isBwsP) {
-      $vmDisplayName = if ($script:LastVmPick.BwsName) { $script:LastVmPick.BwsName } else { $script:LastVmPick.Name }
-      $rows.Add([pscustomobject]@{ Key='VM Template'; Value=$vmDisplayName })
-    } else {
-      $rows.Add([pscustomobject]@{ Key='VM Size'; Value=$script:LastVmPick.Name })
-    }
-
-    $rows.Add([pscustomobject]@{ Key='--- COST BREAKDOWN PER HOST ---'; Value='' })
-    if ($isBwsP) {
-      $rows.Add([pscustomobject]@{ Key='VM Cost'; Value="CHF $($p.bwsVmMonthly)/month" })
-      $rows.Add([pscustomobject]@{ Key='OS Disk Cost'; Value="CHF $($p.bwsOsDiskMonthly)/month" })
-      if ($p.bwsAddDiskMonthly -gt 0) {
-        if ($script:LastVmPick.BwsAddDisks -and @($script:LastVmPick.BwsAddDisks).Count -gt 0) {
-          foreach ($ad in @($script:LastVmPick.BwsAddDisks)) {
-            $rows.Add([pscustomobject]@{ Key="  Additional Disk ($($ad.Sku))"; Value="$($ad.SizeGiB) GiB — CHF $($ad.PriceCHF)/mo" })
-          }
-        }
-        $rows.Add([pscustomobject]@{ Key='Additional Disks Total'; Value="CHF $($p.bwsAddDiskMonthly)/month" })
-      }
-      $rows.Add([pscustomobject]@{ Key='Total per Host'; Value="CHF $monthlyPerHost/month" })
-    } else {
-      $rows.Add([pscustomobject]@{ Key='Monthly/Host'; Value="$monthlyPerHost $currency" })
-    }
-
-    $rows.Add([pscustomobject]@{ Key='--- FLEET COSTS ---'; Value='' })
-    $rows.Add([pscustomobject]@{ Key='Hosts total'; Value=$hostsTotal })
-    $rows.Add([pscustomobject]@{ Key='Monthly all Hosts'; Value="$monthlyAllHosts $currency" })
-    $rows.Add([pscustomobject]@{ Key='Yearly all Hosts'; Value="$yearlyTotal $currency" })
-    $rows.Add([pscustomobject]@{ Key='--- COSTS PER USER ---'; Value='' })
-    $rows.Add([pscustomobject]@{ Key='Total Users'; Value=$totalUsers })
-    $rows.Add([pscustomobject]@{ Key='Monthly / User'; Value="$costPerUser $currency" })
-    $rows.Add([pscustomobject]@{ Key='Yearly / User'; Value="$yearlyPerUser $currency" })
-
-    $GridUserCosts.ItemsSource = $rows
-
-    # Notes
-    $notes = [System.Text.StringBuilder]::new()
-    [void]$notes.AppendLine("USER COST ANALYSIS")
-    [void]$notes.AppendLine("==================")
-    if ($isBwsP) {
-      $vmN = if ($script:LastVmPick.BwsName) { $script:LastVmPick.BwsName } else { $script:LastVmPick.Name }
-      [void]$notes.AppendLine("VM: $vmN | $hostsTotal hosts")
-      [void]$notes.AppendLine("")
-      [void]$notes.AppendLine("COST BREAKDOWN PER HOST:")
-      [void]$notes.AppendLine("  VM:              CHF $($p.bwsVmMonthly)/month")
-      [void]$notes.AppendLine("  OS Disk:         CHF $($p.bwsOsDiskMonthly)/month")
-      if ($p.bwsAddDiskMonthly -gt 0) {
-        [void]$notes.AppendLine("  Additional Disks: CHF $($p.bwsAddDiskMonthly)/month")
-      }
-      [void]$notes.AppendLine("  ────────────────────────────")
-      [void]$notes.AppendLine("  Total per Host:  CHF $monthlyPerHost/month")
-    } else {
-      [void]$notes.AppendLine("VM: $($script:LastVmPick.Name) | $hostsTotal hosts")
-    }
-    [void]$notes.AppendLine("")
-    [void]$notes.AppendLine("FLEET + PER USER:")
-    [void]$notes.AppendLine("  Monthly total:   $monthlyAllHosts $currency ($hostsTotal hosts)")
-    [void]$notes.AppendLine("  Per user/month:  $costPerUser $currency")
-    [void]$notes.AppendLine("  Per user/year:   $yearlyPerUser $currency")
-
-    $TxtUserCostNotes.Text = $notes.ToString()
-    Write-UiInfo "User costs calculated: $costPerUser $currency/user/month ($yearlyPerUser $currency/user/year)"
-  } catch { Write-UiError "User cost calculation failed: $($_.Exception.Message)" }
-})
-
-# Diagnostics handler — opens a dialog with info + Disconnect/Login buttons
 $BtnReset.add_Click({
   # Clear calculation state
-  $script:LastSizing = $null; $script:LastVmPick = $null; $script:LastVmPrice = $null
+  $script:LastSizing = $null; $script:LastVmPick = $null
 
   # Workload tab - reset to defaults
+  $CmbSizingMode.SelectedIndex = 0     # New Infrastructure
+  $script:SizingMode = 'New'
   $CmbHostPoolType.SelectedIndex = 0
   $CmbWorkload.SelectedIndex = 1       # Medium
   $TxtTotalUsers.Text = '100'
   $CmbConcurrencyMode.SelectedIndex = 0
   $TxtConcurrencyValue.Text = '60'
   $TxtPeakFactor.Text = '1.0'
+  $TxtTargetHosts.Text = '2'
   $TxtNPlusOne.Text = '0'
   $TxtExtraHeadroomPct.Text = '0'
   $CmbLoadBalancing.SelectedIndex = 0  # Breadth-first
@@ -3221,8 +3256,11 @@ $BtnReset.add_Click({
   $TxtCpuUtil.Text = '1.0'
   $TxtMemUtil.Text = '1.0'
   $TxtVirtOverhead.Text = '0.20'
-  $TxtMinVcpuHost.Text = '8'
+  $TxtMinVcpuHost.Text = '4'
   $TxtMaxVcpuHost.Text = '64'
+  $TxtMinRamHost.Text = '16'
+  $TxtMaxRamHost.Text = '128'
+  if ($CmbAssessVm.Items.Count -gt 2) { $CmbAssessVm.SelectedIndex = 2 }
 
   # Applications tab - uncheck all
   foreach ($kv in $script:AppCheckboxMap.GetEnumerator()) {
@@ -3239,8 +3277,6 @@ $BtnReset.add_Click({
   $TxtNotes.Text = ''
 
   # Costs tab - clear
-  $GridUserCosts.ItemsSource = $null
-  $TxtUserCostNotes.Text = ''
 
   Write-UiInfo 'All settings reset to defaults.'
 })
