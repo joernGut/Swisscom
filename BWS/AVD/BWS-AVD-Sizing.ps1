@@ -2,11 +2,29 @@
 ================================================================================
   Author:  Jörn Gutting (optimised by Claude)
   Script:  BWS AVD Sizing - Swisscom Branded Edition (WPF GUI) - PowerShell 7
-  Version: 2.8.2
+  Version: 2.9.0
   Date:    2025-02-21
 
   CHANGELOG
   =========
+
+  v2.9.0 (2025-02-21)
+  --------------------
+  - NEW: Custom Applications category on Applications tab
+    * Input fields: Application Name, vCPU/User, MB RAM/User, Users count
+    * Users field: 0 = applies to all concurrent users, >0 = only that many users
+    * Add/Remove buttons with DataGrid showing all custom apps
+    * ObservableCollection ($script:CustomApps) for dynamic UI updates
+  - ENHANCED: Get-ApplicationOverhead accepts new -CustomApps parameter
+    * Custom apps processed after catalog apps, overhead added to totals
+    * Per-app user count: custom apps with Users>0 use that count, not UsersPerHost
+    * Notes include custom apps with "(Customized, X users)" label
+  - ENHANCED: Calculate handler passes $script:CustomApps snapshot to overhead calc
+    * Works even when no catalog apps selected (only custom apps)
+  - ENHANCED: HTML Report shows custom apps in Applications table
+    * Category column: "Customized (X users)" or "Customized (all users)"
+  - ENHANCED: Reset clears custom apps list and input fields
+  - FIX: Extra closing brace in Get-ApplicationOverhead causing syntax error
 
   v2.8.2 (2025-02-21)
   --------------------
@@ -481,8 +499,8 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion  = '2.8.2'
-$ScriptBuildUtc = '2025-02-21T08:00:00Z'
+$ScriptVersion  = '2.9.0'
+$ScriptBuildUtc = '2025-02-21T09:00:00Z'
 
 #region Ensure STA for WPF
 if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
@@ -802,7 +820,8 @@ function Get-ApplicationOverhead {
   #>
   param(
     [Parameter(Mandatory)][string[]]$SelectedApps,
-    [int]$UsersPerHost = 1
+    [int]$UsersPerHost = 1,
+    [array]$CustomApps = @()
   )
 
   $totalCpu = 0.0; $totalRamMB = 0; $totalDiskIOPS = 0; $totalDiskGB = 0
@@ -838,6 +857,15 @@ function Get-ApplicationOverhead {
     }
     if ($app.Category -eq 'Database') { $dbApps.Add($appName) }
     $notes.Add("$appName : +$($app.CpuOverheadPerUser) vCPU, +$($app.RamMBPerUser) MB RAM/user ($($app.Category))")
+  }
+
+  # Process custom applications
+  foreach ($cApp in $CustomApps) {
+    if (-not $cApp -or -not $cApp.Name) { continue }
+    $cUsers = if ($cApp.Users -gt 0) { $cApp.Users } else { $UsersPerHost }
+    $totalCpu   += [double]$cApp.CpuPerUser * $cUsers
+    $totalRamMB += [int]$cApp.RamMBPerUser * $cUsers
+    $notes.Add("$($cApp.Name) : +$($cApp.CpuPerUser) vCPU, +$($cApp.RamMBPerUser) MB RAM/user (Customized, $cUsers users)")
   }
 
   if ($dbApps.Count -gt 0) {
@@ -2589,7 +2617,7 @@ $XamlString = @"
     <DockPanel LastChildFill="False">
       <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
         <TextBlock FontSize="20" FontWeight="Bold" Foreground="#FFFFFF" Text="BWS AVD Sizing"/>
-        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v2.8.2"/>
+        <TextBlock FontSize="12" VerticalAlignment="Bottom" Margin="10,0,0,2" Foreground="#88AACC" Text="v2.9.0"/>
       </StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
         <TextBlock Foreground="#88AACC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0" Text="Language:"/>
@@ -2792,14 +2820,42 @@ $XamlString = @"
           <Border Grid.Column="2" Padding="14" BorderBrush="#D8DFE8" BorderThickness="1" CornerRadius="8" Background="#F5F8FC">
             <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel>
-              <TextBlock x:Name="LblHowAffects" FontSize="14" FontWeight="Bold" Foreground="#086ADB" Text="How Apps Affect Sizing"/>
-              <Separator/>
-              <TextBlock x:Name="LblInfoVmAuto" FontWeight="SemiBold" Text="VM Series Auto-Selection"/>
-              <TextBlock x:Name="LblInfoVmAutoDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#556688" Text="No special apps: D-series. Database: E-series. GPU/CAD: NV-series. GPU always takes priority."/>
-              <TextBlock x:Name="LblInfoDbEngines" FontWeight="SemiBold" Text="Database Engines"/>
-              <TextBlock x:Name="LblInfoDbEnginesDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#556688" Text="E-series, Premium SSD v2 data disk. Personal pool strongly recommended."/>
-              <TextBlock x:Name="LblInfoCadGpu" FontWeight="SemiBold" Text="CAD / GPU"/>
-              <TextBlock x:Name="LblInfoCadGpuDesc" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="11" Foreground="#556688" Text="NV-series (NVIDIA A10). 2-4 users/host typical. Personal pool recommended for heavy 3D."/>
+              <TextBlock x:Name="LblCustomApps" FontSize="14" FontWeight="Bold" Foreground="#086ADB" Text="Custom Applications" Margin="0,0,0,4"/>
+              <TextBlock Foreground="#556688" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Add applications not in the predefined list. Specify resource requirements per user as per vendor documentation."/>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                <TextBox x:Name="TxtCustomAppName" Width="140" ToolTip="Application name"/>
+                <TextBlock Margin="6,4,0,0" Foreground="#8899AA" FontSize="10" Text="Name" Width="32"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                <TextBox x:Name="TxtCustomAppCpu" Width="60" ToolTip="vCPU per user"/>
+                <TextBlock Margin="6,4,0,0" Foreground="#8899AA" FontSize="10" Text="vCPU/User" Width="62"/>
+                <TextBox x:Name="TxtCustomAppRam" Width="60" Margin="8,0,0,0" ToolTip="RAM in MB per user"/>
+                <TextBlock Margin="6,4,0,0" Foreground="#8899AA" FontSize="10" Text="MB RAM/User"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                <TextBox x:Name="TxtCustomAppUsers" Width="60" Text="0" ToolTip="Number of users for this app (0 = all concurrent users)"/>
+                <TextBlock Margin="6,4,0,0" Foreground="#8899AA" FontSize="10" Text="Users (0=all)" Width="82"/>
+                <Button x:Name="BtnAddCustomApp" Content="Add" Width="50" Margin="8,0,0,0" Padding="4,2" Background="#086ADB" Foreground="White" FontSize="11" Cursor="Hand"/>
+                <Button x:Name="BtnRemoveCustomApp" Content="Remove" Width="60" Margin="4,0,0,0" Padding="4,2" FontSize="11" Cursor="Hand"/>
+              </StackPanel>
+              <DataGrid x:Name="GridCustomApps" Height="120" Margin="0,4,0,8" AutoGenerateColumns="False"
+                        IsReadOnly="True" HeadersVisibility="Column" CanUserAddRows="False" FontSize="11">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Application" Binding="{Binding Name}" Width="110"/>
+                  <DataGridTextColumn Header="vCPU" Binding="{Binding CpuPerUser}" Width="50"/>
+                  <DataGridTextColumn Header="MB RAM" Binding="{Binding RamMBPerUser}" Width="60"/>
+                  <DataGridTextColumn Header="Users" Binding="{Binding Users}" Width="50"/>
+                </DataGrid.Columns>
+              </DataGrid>
+
+              <Separator Margin="0,8,0,8"/>
+              <TextBlock x:Name="LblHowAffects" FontSize="13" FontWeight="Bold" Foreground="#086ADB" Text="How Apps Affect Sizing" Margin="0,0,0,4"/>
+              <TextBlock x:Name="LblInfoVmAuto" FontWeight="SemiBold" Text="VM Series Auto-Selection" FontSize="11"/>
+              <TextBlock x:Name="LblInfoVmAutoDesc" Margin="0,2,0,6" TextWrapping="Wrap" FontSize="10" Foreground="#556688" Text="No special apps: D-series. Database: E-series. GPU/CAD: NV-series."/>
+              <TextBlock x:Name="LblInfoDbEngines" FontWeight="SemiBold" Text="Database Engines" FontSize="11"/>
+              <TextBlock x:Name="LblInfoDbEnginesDesc" Margin="0,2,0,6" TextWrapping="Wrap" FontSize="10" Foreground="#556688" Text="E-series, Premium SSD v2 data disk. Personal pool recommended."/>
+              <TextBlock x:Name="LblInfoCadGpu" FontWeight="SemiBold" Text="CAD / GPU" FontSize="11"/>
+              <TextBlock x:Name="LblInfoCadGpuDesc" Margin="0,2,0,6" TextWrapping="Wrap" FontSize="10" Foreground="#556688" Text="NV-series (NVIDIA A10). 2-4 users/host typical."/>
             </StackPanel>
             </ScrollViewer>
           </Border>
@@ -3048,6 +3104,38 @@ $ChkAutoCAD = $Window.FindName('ChkAutoCAD'); $ChkRevit = $Window.FindName('ChkR
 $ChkSolidWorks = $Window.FindName('ChkSolidWorks'); $ChkVideoEdit = $Window.FindName('ChkVideoEdit')
 $TxtDbDataGB = $Window.FindName('TxtDbDataGB')
 
+# Custom Applications
+$TxtCustomAppName = $Window.FindName('TxtCustomAppName')
+$TxtCustomAppCpu = $Window.FindName('TxtCustomAppCpu')
+$TxtCustomAppRam = $Window.FindName('TxtCustomAppRam')
+$TxtCustomAppUsers = $Window.FindName('TxtCustomAppUsers')
+$BtnAddCustomApp = $Window.FindName('BtnAddCustomApp')
+$BtnRemoveCustomApp = $Window.FindName('BtnRemoveCustomApp')
+$GridCustomApps = $Window.FindName('GridCustomApps')
+$script:CustomApps = [System.Collections.ObjectModel.ObservableCollection[pscustomobject]]::new()
+$GridCustomApps.ItemsSource = $script:CustomApps
+
+$BtnAddCustomApp.add_Click({
+  $appName = $TxtCustomAppName.Text.Trim()
+  if (-not $appName) { Write-UiWarning 'Please enter an application name.'; return }
+  $cpu = 0; $ram = 0; $users = 0
+  try { $cpu = [double]$TxtCustomAppCpu.Text } catch { Write-UiWarning 'Invalid vCPU value.'; return }
+  try { $ram = [int]$TxtCustomAppRam.Text } catch { Write-UiWarning 'Invalid RAM value.'; return }
+  try { $users = [int]$TxtCustomAppUsers.Text } catch { $users = 0 }
+  if ($cpu -le 0 -and $ram -le 0) { Write-UiWarning 'CPU or RAM must be > 0.'; return }
+  $script:CustomApps.Add([pscustomobject]@{
+    Name=$appName; CpuPerUser=[Math]::Round($cpu,2); RamMBPerUser=$ram; Users=[Math]::Max(0,$users)
+  })
+  $TxtCustomAppName.Text = ''; $TxtCustomAppCpu.Text = ''; $TxtCustomAppRam.Text = ''; $TxtCustomAppUsers.Text = '0'
+})
+
+$BtnRemoveCustomApp.add_Click({
+  $idx = $GridCustomApps.SelectedIndex
+  if ($idx -ge 0 -and $idx -lt $script:CustomApps.Count) {
+    $script:CustomApps.RemoveAt($idx)
+  }
+})
+
 # VM Template tab
 $TxtLocation = $Window.FindName('TxtLocation'); $CmbVmSeries = $Window.FindName('CmbVmSeries')
 $TxtPublisher = $Window.FindName('TxtPublisher'); $TxtOffer = $Window.FindName('TxtOffer')
@@ -3142,12 +3230,19 @@ $BtnCalculate.add_Click({
 
     # Gather selected applications
     $selectedApps = Get-SelectedApps
+    $customApps = @()
+    if ($script:CustomApps -and $script:CustomApps.Count -gt 0) {
+      $customApps = @($script:CustomApps | ForEach-Object {
+        [pscustomobject]@{ Name=$_.Name; CpuPerUser=$_.CpuPerUser; RamMBPerUser=$_.RamMBPerUser; Users=$_.Users }
+      })
+    }
     $appOverhead = $null
-    if (@($selectedApps).Count -gt 0) {
+    if (@($selectedApps).Count -gt 0 -or $customApps.Count -gt 0) {
       $usersPerHostEstimate = if ($hostPoolType -eq 'Pooled') {
         switch ($workload) { 'Light' { 8 } 'Medium' { 4 } 'Heavy' { 2 } 'Power' { 1 } default { 4 } }
       } else { 1 }
-      $appOverhead = Get-ApplicationOverhead -SelectedApps $selectedApps -UsersPerHost $usersPerHostEstimate
+      if (@($selectedApps).Count -eq 0) { $selectedApps = @('__none__') }  # dummy to satisfy Mandatory
+      $appOverhead = Get-ApplicationOverhead -SelectedApps $selectedApps -UsersPerHost $usersPerHostEstimate -CustomApps $customApps
     }
     # Parse load balancing selection
     $lbRaw = Get-ComboText -Combo $CmbLoadBalancing
@@ -3329,6 +3424,13 @@ $BtnExportReport.add_Click({
           $app = $script:ApplicationCatalog[$appName]
           $appsRows += "<tr><td>$(esc $appName)</td><td>$(esc $app.Category)</td><td>+$($app.CpuOverheadPerUser) vCPU</td><td>+$($app.RamMBPerUser) MB</td></tr>`n"
         }
+      }
+    }
+    # Custom applications
+    if ($script:CustomApps -and $script:CustomApps.Count -gt 0) {
+      foreach ($cApp in $script:CustomApps) {
+        $usersNote = if ($cApp.Users -gt 0) { "$($cApp.Users) users" } else { 'all users' }
+        $appsRows += "<tr><td>$(esc $cApp.Name)</td><td>Customized ($usersNote)</td><td>+$($cApp.CpuPerUser) vCPU</td><td>+$($cApp.RamMBPerUser) MB</td></tr>`n"
       }
     }
 
@@ -3742,6 +3844,8 @@ $BtnReset.add_Click({
     $kv.Value.IsChecked = $false
   }
   if ($TxtDbDataGB) { $TxtDbDataGB.Text = '100' }
+  $script:CustomApps.Clear()
+  $TxtCustomAppName.Text = ''; $TxtCustomAppCpu.Text = ''; $TxtCustomAppRam.Text = ''; $TxtCustomAppUsers.Text = '0'
 
   # Azure tab
   $CmbVmSeries.SelectedIndex = 0      # Any (auto)
