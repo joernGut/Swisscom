@@ -97,6 +97,10 @@ param(
     
     [Parameter(Mandatory=$false)]
     [switch]$SkipUserLicenseCheck,
+    [switch]$SkipSecurity,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$SupportBundle,
     
     [Parameter(Mandatory=$false)]
     [ValidateSet("HTML", "PDF", "Both")]
@@ -133,9 +137,12 @@ param(
 if ($PSVersionTable.PSEdition -eq 'Core') {
     Write-Warning "This script is designed for Windows PowerShell 5.1 (Desktop edition)."
     Write-Warning "You are running PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))."
-    Write-Warning "SharePoint checks require the Desktop edition and will be skipped automatically."
-    Write-Warning "All other checks will continue."
+    Write-Warning "The Microsoft.Online.SharePoint.PowerShell module requires Desktop (PS 5.1)."
+    Write-Warning "SharePoint checks will be SKIPPED automatically."
+    Write-Warning "All other checks will continue normally."
     Write-Host ""
+    # Force SharePoint skip when not on Desktop edition
+    $script:SkipSharePoint = $true
 }
 if ($PSVersionTable.PSVersion.Major -lt 5 -or
     ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -lt 1)) {
@@ -155,7 +162,97 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 
 
 # Script Version
-$script:Version = "2.3.0"
+$script:Version = "3.0.0"
+
+# -- Account Session State ------------------------------------------------
+# The script uses exactly TWO accounts:
+#   1. GlobalAdmin  - has all M365 + Azure Subscription rights
+#      Used for: Az (Graph/ARM), Teams, SharePoint, Entra/Intune checks
+#   2. DomainAdmin  - local Active Directory only (not used in this script
+#      for online checks; reserved for future on-prem AD queries)
+#
+# The GlobalAdmin credential is asked once at startup and reused for all
+# services to avoid multiple interactive browser windows.
+# Microsoft Learn:
+#   Connect-MicrosoftTeams -AccountId -TenantId (reuses AAD session)
+#   Connect-SPOService -Credential (PSCredential, PS 5.1 only)
+# -------------------------------------------------------------------------
+$script:GlobalAdminUPN       = $null   # set by Connect-BWsGlobalAdmin
+$script:GlobalAdminTenantId  = $null   # set by Connect-BWsGlobalAdmin
+$script:GlobalAdminConnected = $false  # $true once Az + Graph confirmed
+$script:TeamsConnected       = $false  # $true after Connect-MicrosoftTeams
+$script:SharePointConnected  = $false  # $true after Connect-SPOService
+
+# -- Central Error Log (all check runs accumulate here) --------------------
+# Each entry is a PSCustomObject with Code, Severity, Category, Function,
+# CheckStep, Message, Detail, HttpStatus, Timestamp.
+# MS Learn (ErrorRecord): learn.microsoft.com/powershell/scripting/developer/
+#   cmdlet/adding-non-terminating-error-reporting-to-your-cmdlet
+# Use Write-BWsError instead of .Errors += "string" in all check functions.
+# Export with Get-BWsSupportBundle for support tickets.
+$script:BWS_ErrorLog = [System.Collections.Generic.List[object]]::new()
+
+#============================================================================
+# QUALITY ASSURANCE - Block 1b: PSScriptAnalyzer (optional, -RunAnalyzer)
+# Runs FIRST - before any module import, login, or network call.
+#============================================================================
+if ($RunAnalyzer) {
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Magenta
+    Write-Host "  PSScriptAnalyzer - Static Code Analysis" -ForegroundColor Magenta
+    Write-Host "======================================================" -ForegroundColor Magenta
+    Write-Host ""
+
+    if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+        Write-Host "  PSScriptAnalyzer not installed. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+            Write-Host "  [OK] PSScriptAnalyzer installed" -ForegroundColor Green
+        } catch {
+            Write-Host "  [!] Could not install PSScriptAnalyzer: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "      Install manually: Install-Module -Name PSScriptAnalyzer -Scope CurrentUser" -ForegroundColor Gray
+        }
+    }
+
+    if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
+        Import-Module PSScriptAnalyzer -ErrorAction SilentlyContinue
+        Write-Host "  Analyzing $PSCommandPath ..." -ForegroundColor Gray
+        Write-Host ""
+
+        $analyzerResults = Invoke-ScriptAnalyzer -Path $PSCommandPath -Severity @("Error","Warning") -ErrorAction SilentlyContinue
+
+        if ($analyzerResults -and $analyzerResults.Count -gt 0) {
+            $errors   = $analyzerResults | Where-Object { $_.Severity -eq "Error"   }
+            $warnings = $analyzerResults | Where-Object { $_.Severity -eq "Warning" }
+            Write-Host "  Errors:   $($errors.Count)" -ForegroundColor $(if ($errors.Count -gt 0) { "Red" } else { "Green" })
+            Write-Host "  Warnings: $($warnings.Count)" -ForegroundColor $(if ($warnings.Count -gt 0) { "Yellow" } else { "Green" })
+            Write-Host ""
+            foreach ($result in $analyzerResults | Sort-Object Severity, Line) {
+                $color = if ($result.Severity -eq "Error") { "Red" } else { "Yellow" }
+                Write-Host "  [$($result.Severity)] Line $($result.Line): $($result.RuleName)" -ForegroundColor $color
+                Write-Host "    $($result.Message)" -ForegroundColor Gray
+                Write-Host ""
+            }
+            if ($errors.Count -gt 0) {
+                Write-Host "  [!] Errors found. Review before running in production." -ForegroundColor Red
+            }
+        } else {
+            Write-Host "  [OK] No errors or warnings found." -ForegroundColor Green
+        }
+        Import-Module PSScriptAnalyzer -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    Write-Host "======================================================" -ForegroundColor Magenta
+    Write-Host ""
+
+    if (-not $GUI) {
+        $continueAfterAnalysis = Read-Host "Continue with checks? (J/N)"
+        if ($continueAfterAnalysis -notin @("J","j","Y","y")) {
+            Write-Host "Script stopped after PSScriptAnalyzer run." -ForegroundColor Yellow
+            exit 0
+        }
+    }
+}
 
 #============================================================================
 # QUALITY ASSURANCE - Block 1: Strict Mode
@@ -310,45 +407,65 @@ if ($psVersion -ge 7 -or $psEdition -eq "Core") {
 
 $script:RequiredModules = @(
     #
-    # COMPATIBILITY NOTE - PS 5.1 / .NET Framework 4.x
-    # -------------------------------------------------
-    # Az.Resources v9+ and Microsoft.Graph SDK v2+ require .NET 5/6+ and cannot
-    # be imported in Windows PowerShell 5.1. They are therefore:
-    #   * Listed below as "Informational" (Required=$false, SkipParam="AlwaysSkip")
-    #     so they appear in the prerequisites table with their installed version.
-    #   * NOT imported: their functionality is provided by direct REST calls via
-    #     Invoke-AzRestMethod (Az.Accounts) and Invoke-BWsGraphPagedRequest.
-    # Graph Beta APIs use the same REST pattern against /beta/ endpoints.
-    # MaxVersion="1.99.99" on Graph entries = install v1.x if nothing is present.
+    # MODULE REQUIREMENTS  -  Windows PowerShell 5.1 (Desktop edition)
+    # -----------------------------------------------------------------
+    # Only modules whose PS cmdlets are ACTUALLY CALLED in this script.
+    # All Graph API calls use Invoke-AzRestMethod (Az.Accounts) via REST -
+    # no Microsoft.Graph SDK modules needed or installed.
+    # All Azure resource queries use Find-BWsAzResource (ARM REST) -
+    # Az.Resources is NOT needed.
     #
+    # Required=true  -> install + import, abort check on failure
+    # Required=false -> install + import only if SkipParam not set
+    #
+    # Microsoft Learn install guidance:
+    #   learn.microsoft.com/powershell/azure/install-azps-windows
+    #   Import order: Az.Accounts MUST be imported before Az.Storage
+    # -----------------------------------------------------------------
 
-    # -- Az Core --------------------------------------------------------------
-    @{ Name="Az.Accounts";                                MinVersion="2.0.0";  MaxVersion="";       Description="Azure Authentication";         Scope="CurrentUser"; Required=$true;  SkipParam="" },
-    @{ Name="Az.Resources";                               MinVersion="1.0.0";  MaxVersion="";       Description="Azure Resources (info only)";  Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
-    @{ Name="Az.Storage";                                 MinVersion="3.0.0";  MaxVersion="";       Description="Azure Storage / Defender";     Scope="CurrentUser"; Required=$false; SkipParam="SkipDefender" },
+    # -- CORE (always required) -------------------------------------------
+    # Az.Accounts: Connect-AzAccount, Get-AzContext, Set-AzContext,
+    #              Invoke-AzRestMethod (handles ALL Graph + ARM REST auth)
+    # MS Learn: github.com/Azure/azure-powershell - PS 5.1 compatible
+    @{ Name="Az.Accounts";
+       MinVersion="2.4.0";  MaxVersion="";
+       Description="Azure Auth + Invoke-AzRestMethod (Graph/ARM)";
+       Scope="CurrentUser"; Required=$true;  SkipParam="" },
 
-    # -- Microsoft Graph SDK v1.x (PS 5.1 compatible) -------------------------
-    # v2.x is .NET 6+ only. MaxVersion pins install to last v1.x release.
-    # Runtime calls go through Invoke-BWsGraphPagedRequest (REST, no SDK needed).
-    @{ Name="Microsoft.Graph.Authentication";             MinVersion="1.0.0";  MaxVersion="1.99.99"; Description="Graph SDK Auth (v1.x)";       Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
-    @{ Name="Microsoft.Graph.DeviceManagement";           MinVersion="1.0.0";  MaxVersion="1.99.99"; Description="Graph SDK Device Mgmt (v1.x)";Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
-    @{ Name="Microsoft.Graph.Devices.CorporateManagement";MinVersion="1.0.0";  MaxVersion="1.99.99"; Description="Graph SDK App Mgmt (v1.x)";   Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
-    @{ Name="Microsoft.Graph.Users";                      MinVersion="1.0.0";  MaxVersion="1.99.99"; Description="Graph SDK Users (v1.x)";      Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
-    @{ Name="Microsoft.Graph.Identity.DirectoryManagement";MinVersion="1.0.0"; MaxVersion="1.99.99"; Description="Graph SDK Directory (v1.x)";  Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
-    @{ Name="Microsoft.Graph.Groups";                     MinVersion="1.0.0";  MaxVersion="1.99.99"; Description="Graph SDK Groups (v1.x)";     Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+    # -- CONDITIONAL (skipped if corresponding -Skip flag is set) ---------
+    # Az.Storage: Get-AzStorageAccount, Get-AzStorageContainer,
+    #             Get-AzStorageBlob  (Defender file check)
+    # MS Learn: learn.microsoft.com/powershell/module/az.storage
+    @{ Name="Az.Storage";
+       MinVersion="5.0.0";  MaxVersion="";
+       Description="Storage Blobs (Defender file check)";
+       Scope="CurrentUser"; Required=$false; SkipParam="SkipDefender" },
 
-    # -- Microsoft Graph Beta SDK (informational, .NET 6+ only) ---------------
-    # Beta REST calls go through Invoke-BWsBetaGraphRequest (/beta/ endpoint).
-    @{ Name="Microsoft.Graph.Beta.DeviceManagement";      MinVersion="0.1.0";  MaxVersion="";        Description="Graph Beta Device Mgmt";      Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
-    @{ Name="Microsoft.Graph.Beta.Users";                 MinVersion="0.1.0";  MaxVersion="";        Description="Graph Beta Users";            Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
-    @{ Name="Microsoft.Graph.Beta.Identity.DirectoryManagement";MinVersion="0.1.0";MaxVersion="";    Description="Graph Beta Directory";        Scope="CurrentUser"; Required=$false; SkipParam="AlwaysSkip" },
+    # Microsoft.Online.SharePoint.PowerShell:
+    #   Connect-SPOService, Get-SPOTenant, Get-SPOSite
+    #   NOTE: PS 5.1 (Desktop edition) ONLY - not supported in PS Core / PS 7
+    # MS Learn: learn.microsoft.com/powershell/sharepoint/sharepoint-online/connect-sharepoint-online
+    @{ Name="Microsoft.Online.SharePoint.PowerShell";
+       MinVersion="16.0.0"; MaxVersion="";
+       Description="SharePoint Online Admin (PS 5.1 only)";
+       Scope="CurrentUser"; Required=$false; SkipParam="SkipSharePoint" },
 
-    # -- Other -----------------------------------------------------------------
-    @{ Name="Microsoft.Online.SharePoint.PowerShell";     MinVersion="16.0.0"; MaxVersion="";        Description="SharePoint Online Admin";     Scope="CurrentUser"; Required=$false; SkipParam="SkipSharePoint" },
-    @{ Name="MicrosoftTeams";                             MinVersion="4.0.0";  MaxVersion="";        Description="Microsoft Teams Admin";       Scope="CurrentUser"; Required=$false; SkipParam="SkipTeams" },
-    @{ Name="PSScriptAnalyzer";                           MinVersion="1.20.0"; MaxVersion="";        Description="PS Static Code Analysis";     Scope="CurrentUser"; Required=$false; SkipParam="" }
+    # MicrosoftTeams: Connect-MicrosoftTeams, Get-CsTeamsMeetingPolicy,
+    #                 Get-CsMeetingConfiguration, Get-CsTeamsClientConfiguration
+    # MS Learn: learn.microsoft.com/microsoftteams/teams-powershell-install
+    @{ Name="MicrosoftTeams";
+       MinVersion="4.0.0";  MaxVersion="";
+       Description="Teams Admin (Connect-MicrosoftTeams)";
+       Scope="CurrentUser"; Required=$false; SkipParam="SkipTeams" },
+
+    # -- OPTIONAL ---------------------------------------------------------
+    # PSScriptAnalyzer: Invoke-ScriptAnalyzer  (only with -RunAnalyzer)
+    # MS Learn: learn.microsoft.com/powershell/utility-modules/psscriptanalyzer/overview
+    @{ Name="PSScriptAnalyzer";
+       MinVersion="1.20.0"; MaxVersion="";
+       Description="Static code analysis (-RunAnalyzer only)";
+       Scope="CurrentUser"; Required=$false; SkipParam="" }
 )
-
 
 #============================================================================
 # Graph REST API Helpers  -  Az.Accounts token + Invoke-RestMethod
@@ -369,13 +486,476 @@ $script:BWSGraphConnected   = $false
 
 $script:BWSGraphConnected = $false   # becomes $true after first successful call
 
+#============================================================================
+# ERROR SYSTEM - Write-BWsError / Get-BWsSupportBundle
+#============================================================================
+
+function Write-BWsError {
+    <#
+    .SYNOPSIS
+        Central error/warning recorder for all BWS check functions.
+        Replaces plain .Errors += "string" with structured error records.
+    .NOTES
+        Error code scheme:  BWS-{CAT}-{NNN}
+          AUTH   Login, Graph token, Az session
+          GRAPH  Graph API HTTP errors, throttling
+          INTUNE MDM policies, connectors, apps
+          ENTRA  Entra ID sync, PIM, roles
+          SPO    SharePoint Online connection/config
+          TEAMS  Teams configuration
+          SEC    Security config (MDM, grp, SICT, PIM)
+          SYS    PowerShell environment, modules
+
+        Usage:
+          $err = Write-BWsError -Code "BWS-ENTRA-001" -Message "Sync stale"
+          $status.Errors += $err
+
+        Or just log without appending to local status:
+          Write-BWsError -Code "BWS-AUTH-003" -Message "Graph 403" -Severity Warning
+    .PARAMETER Code
+        Error code in BWS-CAT-NNN format.
+    .PARAMETER Message
+        Short human-readable description (shown in console and report).
+    .PARAMETER Severity
+        Error / Warning / Info  (default: Error)
+    .PARAMETER Detail
+        Full exception message or technical detail for support.
+    .PARAMETER HttpStatus
+        HTTP status code from Graph API if applicable (0 = N/A).
+    .PARAMETER CheckStep
+        Which check step produced this error (e.g. "[1/2] Org sync").
+    .PARAMETER SuppressConsole
+        Suppress the Write-Host output (log only). Useful in tight loops.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet("Error","Warning","Info")]
+        [string]$Severity      = "Error",
+        [string]$Detail        = "",
+        [int]   $HttpStatus    = 0,
+        [string]$CheckStep     = "",
+        [switch]$SuppressConsole
+    )
+
+    # Derive category from code (BWS-AUTH-003 -> AUTH)
+    $category = if ($Code -match '^BWS-([A-Z]+)-\d+$') { $Matches[1] } else { "GEN" }
+
+    # Capture calling function name (skip Write-BWsError itself = frame 0)
+    $callerFn = try {
+        $stack = Get-PSCallStack
+        if ($stack.Count -ge 2) { $stack[1].Command } else { "Unknown" }
+    } catch { "Unknown" }
+
+    $record = [PSCustomObject]@{
+        Code       = $Code
+        Severity   = $Severity
+        Category   = $category
+        Function   = $callerFn
+        CheckStep  = $CheckStep
+        Message    = $Message
+        Detail     = if ($Detail) { $Detail } else { "" }
+        HttpStatus = $HttpStatus
+        Timestamp  = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        Resolved   = $false
+    }
+
+    # Always add to global log
+    $script:BWS_ErrorLog.Add($record)
+
+    # Console output (unless suppressed)
+    if (-not $SuppressConsole) {
+        $icon  = switch ($Severity) { "Error"{"[X]"} "Warning"{"[!]"} default{"[i]"} }
+        $color = switch ($Severity) { "Error"{"Red"} "Warning"{"Yellow"} default{"Cyan"} }
+        Write-Host "    $icon [$Code] $Message" -ForegroundColor $color
+        if ($Detail -and -not $script:CompactViewGlobal) {
+            Write-Host "        Detail : $Detail" -ForegroundColor DarkGray
+        }
+        if ($CheckStep) {
+            Write-Host "        Step   : $CheckStep" -ForegroundColor DarkGray
+        }
+    }
+
+    # Return the record so callers can do: $status.Errors += Write-BWsError ...
+    return $record
+}
+
+
+function Get-BWsSupportBundle {
+    <#
+    .SYNOPSIS
+        Generates a structured support bundle (JSON) from the current script run.
+        Contains: error log, environment info, script version, run timestamp.
+        Attach this file to any BWS support ticket.
+    .PARAMETER BCID
+        Business Continuity ID for the filename.
+    .PARAMETER OutputPath
+        Directory to write the JSON to. Defaults to current directory.
+    .PARAMETER PassThru
+        Return the bundle hashtable instead of just the file path.
+    #>
+    param(
+        [string]$BCID       = "0000",
+        [string]$OutputPath = "",
+        [switch]$PassThru
+    )
+
+    Write-Host ""
+    Write-Host "=====================================================" -ForegroundColor Cyan
+    Write-Host "  BWS SUPPORT BUNDLE" -ForegroundColor Cyan
+    Write-Host "=====================================================" -ForegroundColor Cyan
+
+    # Environment via existing Get-BWsDiagnostics
+    $envInfo = try { Get-BWsDiagnostics -AsObject } catch { @{} }
+
+    $errorsByCategory = @{}
+    foreach ($e in $script:BWS_ErrorLog) {
+        if (-not $errorsByCategory.ContainsKey($e.Category)) {
+            $errorsByCategory[$e.Category] = @()
+        }
+        $errorsByCategory[$e.Category] += $e
+    }
+
+    $topErrors = $script:BWS_ErrorLog |
+        Where-Object { $_.Severity -eq "Error" } |
+        Group-Object Code |
+        Sort-Object Count -Descending |
+        Select-Object -First 10 |
+        ForEach-Object { @{ Code=$_.Name; Count=$_.Count; Message=($_.Group[0].Message) } }
+
+    $bundle = [ordered]@{
+        BundleVersion      = "1.0"
+        ScriptVersion      = $script:Version
+        GeneratedAt        = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        BCID               = $BCID
+        GlobalAdminAccount = if ($script:GlobalAdminUPN) { $script:GlobalAdminUPN } else { "N/A" }
+        TenantId           = if ($script:GlobalAdminTenantId) { $script:GlobalAdminTenantId } else { "N/A" }
+        Environment        = $envInfo
+        Summary            = @{
+            TotalEntries   = $script:BWS_ErrorLog.Count
+            ErrorCount     = ($script:BWS_ErrorLog | Where-Object { $_.Severity -eq "Error" }).Count
+            WarningCount   = ($script:BWS_ErrorLog | Where-Object { $_.Severity -eq "Warning" }).Count
+            InfoCount      = ($script:BWS_ErrorLog | Where-Object { $_.Severity -eq "Info" }).Count
+            CategoriesHit  = ($script:BWS_ErrorLog | Select-Object -ExpandProperty Category -Unique)
+        }
+        TopErrors          = $topErrors
+        ErrorsByCategory   = $errorsByCategory
+        FullLog            = @($script:BWS_ErrorLog)
+    }
+
+    # Write JSON
+    $ts       = Get-Date -Format "yyyyMMdd_HHmmss"
+    $fileName = "BWS_Support_${BCID}_${ts}.json"
+    $path     = if ($OutputPath) { Join-Path $OutputPath $fileName } else { Join-Path (Get-Location).Path $fileName }
+    $bundle | ConvertTo-Json -Depth 15 | Out-File -FilePath $path -Encoding UTF8
+
+    # Console summary
+    $errCount  = $bundle.Summary.ErrorCount
+    $warnCount = $bundle.Summary.WarningCount
+    Write-Host "  File     : $path" -ForegroundColor Green
+    Write-Host "  Errors   : $errCount"   -ForegroundColor $(if ($errCount  -eq 0){"Green"}else{"Red"})
+    Write-Host "  Warnings : $warnCount"  -ForegroundColor $(if ($warnCount -eq 0){"Green"}else{"Yellow"})
+    if ($topErrors) {
+        Write-Host ""
+        Write-Host "  Top error codes:" -ForegroundColor Cyan
+        foreach ($e in $topErrors) {
+            Write-Host "    $($e.Code.PadRight(22)) $($e.Count)x  $($e.Message.Substring(0,[Math]::Min(45,$e.Message.Length)))" -ForegroundColor White
+        }
+    }
+    Write-Host "=====================================================" -ForegroundColor Cyan
+    Write-Host "  Attach this file to your BWS support ticket." -ForegroundColor Gray
+    Write-Host "=====================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    if ($PassThru) { return $bundle } else { return $path }
+}
+
+
+function Show-BWsErrorSummary {
+    <#
+    .SYNOPSIS
+        Prints a compact error table to the console at the end of a run.
+        Called automatically if there are any errors in the log.
+    #>
+    param([switch]$OnlyErrors)
+
+    $items = if ($OnlyErrors) {
+        @($script:BWS_ErrorLog | Where-Object { $_.Severity -eq "Error" })
+    } else {
+        @($script:BWS_ErrorLog | Where-Object { $_.Severity -in @("Error","Warning") })
+    }
+
+    if ($items.Count -eq 0) { return }
+
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  ERROR LOG SUMMARY  ($($items.Count) issue(s))" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+
+    $errCount  = ($items | Where-Object Severity -eq "Error").Count
+    $warnCount = ($items | Where-Object Severity -eq "Warning").Count
+    Write-Host "  Errors:   $errCount" -ForegroundColor $(if($errCount  -eq 0){"Green"}else{"Red"})
+    Write-Host "  Warnings: $warnCount" -ForegroundColor $(if($warnCount -eq 0){"Green"}else{"Yellow"})
+    Write-Host ""
+
+    $grouped = $items | Group-Object Category | Sort-Object Count -Descending
+    foreach ($grp in $grouped) {
+        Write-Host "  [$($grp.Name)] ($($grp.Count) issue(s)):" -ForegroundColor Yellow
+        foreach ($e in $grp.Group | Sort-Object Severity) {
+            $icon  = if ($e.Severity -eq "Error") { "[X]" } else { "[!]" }
+            $col   = if ($e.Severity -eq "Error") { "Red" } else { "Yellow" }
+            $short = $e.Message.Substring(0, [Math]::Min(55, $e.Message.Length))
+            Write-Host "    $icon [$($e.Code)] $short" -ForegroundColor $col
+        }
+        Write-Host ""
+    }
+    Write-Host "  Run Get-BWsSupportBundle for a full support export." -ForegroundColor Gray
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+function Connect-BWsGlobalAdmin {
+    <#
+    .SYNOPSIS
+        Performs the single interactive GlobalAdmin login for the script.
+        ONE login covers Az (Graph/ARM), Teams, and SharePoint.
+    .NOTES
+        Account model:
+          GlobalAdmin  - All M365 + Azure rights. Used for:
+                           * Connect-AzAccount  (Az.Accounts)
+                           * Connect-MicrosoftTeams -AccountId -TenantId
+                           * Connect-SPOService -Credential (PS 5.1 only)
+          DomainAdmin  - Local AD only (on-prem queries, not online)
+
+        Microsoft Learn references:
+          Connect-AzAccount: learn.microsoft.com/powershell/module/az.accounts/connect-azaccount
+          Connect-MicrosoftTeams -AccountId: learn.microsoft.com/powershell/module/microsoftteams/connect-microsoftteams
+          Connect-SPOService -Credential: learn.microsoft.com/powershell/module/sharepoint-online/connect-sposervice
+
+        PS 5.1 requirement:
+          Microsoft.Online.SharePoint.PowerShell is DESKTOP (PS 5.1) only.
+          The script enforces or warns accordingly.
+
+    .PARAMETER SharePointAdminUrl
+        SharePoint admin centre URL, e.g. https://contoso-admin.sharepoint.com
+        Derived automatically from tenant domain if not provided.
+    .PARAMETER ForceRelogin
+        Force a new Connect-AzAccount even if a session already exists.
+    .OUTPUTS
+        Returns $true on success, $false on failure.
+    #>
+    param(
+        [string]$SharePointAdminUrl = "",
+        [switch]$ForceRelogin,
+        [switch]$SkipTeams,
+        [switch]$SkipSharePoint
+    )
+
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  ACCOUNT LOGIN" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  Account 1: GlobalAdmin (M365 + Azure)" -ForegroundColor White
+    Write-Host "  Account 2: DomainAdmin (on-premises AD - not required" -ForegroundColor Gray
+    Write-Host "             for online checks in this script)" -ForegroundColor Gray
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    # -- Step 1: Az / Graph login (GlobalAdmin) -------------------------
+    Write-Host "  [1/3] Azure + Graph login (GlobalAdmin)" -ForegroundColor Yellow
+    Write-Host "        A browser window will open for interactive sign-in." -ForegroundColor Gray
+    Write-Host ""
+
+    try {
+        $azCtx = $null
+
+        if (-not $ForceRelogin) {
+            $azCtx = Get-AzContext -ErrorAction SilentlyContinue
+            if ($azCtx -and $azCtx.Account) {
+                Write-Host "    [OK] Already logged in as: $($azCtx.Account.Id)" -ForegroundColor Green
+                Write-Host "         Tenant : $($azCtx.Tenant.Id)" -ForegroundColor Gray
+                Write-Host "         Sub    : $($azCtx.Subscription.Name)" -ForegroundColor Gray
+            } else {
+                $azCtx = $null
+            }
+        }
+
+        if (-not $azCtx) {
+            Write-Host "    Launching browser login for GlobalAdmin..." -ForegroundColor Cyan
+            # PS 5.1 + MFA: Connect-AzAccount opens a browser window
+            # -SkipContextPopulation avoids loading all 25 subscriptions (faster)
+            $azCtx = Connect-AzAccount -ErrorAction Stop
+            $azCtx = Get-AzContext -ErrorAction Stop
+            Write-Host "    [OK] Logged in as: $($azCtx.Account.Id)" -ForegroundColor Green
+            Write-Host "         Tenant : $($azCtx.Tenant.Id)" -ForegroundColor Gray
+            Write-Host "         Sub    : $($azCtx.Subscription.Name)" -ForegroundColor Gray
+        }
+
+        # Store for reuse by Teams + SharePoint
+        $script:GlobalAdminUPN      = $azCtx.Account.Id
+        $script:GlobalAdminTenantId = $azCtx.Tenant.Id
+        $script:GlobalAdminConnected = $true
+
+        # Verify Graph access
+        try {
+            $probe = Invoke-AzRestMethod -Uri 'https://graph.microsoft.com/v1.0/organization?$select=id' -Method GET -ErrorAction Stop
+            if ($probe.StatusCode -ge 200 -and $probe.StatusCode -lt 300) {
+                Write-Host "    [OK] Graph API reachable via Az session" -ForegroundColor Green
+                $script:BWSGraphConnected = $true
+            } else {
+                Write-Host "    [!]  Graph probe returned HTTP $($probe.StatusCode)" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "    [!]  Graph probe failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+
+    } catch {
+        Write-Host "    [X]  Azure login failed: $($_.Exception.Message)" -ForegroundColor Red
+        $script:GlobalAdminConnected = $false
+        return $false
+    }
+
+    # -- Step 2: Teams login (reuse Az session) ------------------------
+    if (-not $SkipTeams) {
+        Write-Host ""
+        Write-Host "  [2/3] Microsoft Teams (reusing GlobalAdmin session)" -ForegroundColor Yellow
+        try {
+            # Check if already connected
+            $teamsAlreadyOk = $false
+            try {
+                $null = Get-CsTeamsClientConfiguration -ErrorAction Stop
+                $teamsAlreadyOk = $true
+                Write-Host "    [OK] Teams session already active" -ForegroundColor Green
+            } catch {}
+
+            if (-not $teamsAlreadyOk) {
+                # Connect-MicrosoftTeams with -AccountId and -TenantId reuses the
+                # existing AAD token cache - no new browser window needed.
+                # MS Learn: learn.microsoft.com/powershell/module/microsoftteams/connect-microsoftteams
+                Write-Host "    Connecting to Microsoft Teams (-AccountId $($script:GlobalAdminUPN))..." -ForegroundColor Cyan
+                $null = Connect-MicrosoftTeams `
+                    -AccountId $script:GlobalAdminUPN `
+                    -TenantId  $script:GlobalAdminTenantId `
+                    -ErrorAction Stop 2>$null 3>$null
+                Write-Host "    [OK] Teams connected (no additional login required)" -ForegroundColor Green
+            }
+            $script:TeamsConnected = $true
+        } catch {
+            Write-Host "    [!]  Teams connection failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "         Teams checks will prompt for login when needed." -ForegroundColor Gray
+            # Non-fatal: Teams check will fall through to its own connection
+        }
+    } else {
+        Write-Host "  [2/3] Teams: skipped (-SkipTeams)" -ForegroundColor Gray
+    }
+
+    # -- Step 3: SharePoint (PS 5.1 Desktop only) ---------------------
+    if (-not $SkipSharePoint) {
+        Write-Host ""
+        Write-Host "  [3/3] SharePoint Online (PS 5.1 Desktop only)" -ForegroundColor Yellow
+
+        # SharePoint Management Shell REQUIRES Windows PowerShell 5.1
+        # It does NOT work in PowerShell 7 / Core.
+        # MS Learn: learn.microsoft.com/powershell/sharepoint/sharepoint-online/connect-sharepoint-online
+        if ($PSVersionTable.PSEdition -ne "Desktop") {
+            Write-Host "    [!]  SharePoint module requires Windows PowerShell 5.1 (Desktop edition)." -ForegroundColor Yellow
+            Write-Host "         Current: PS $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))" -ForegroundColor Gray
+            Write-Host "         SharePoint checks will be SKIPPED." -ForegroundColor Yellow
+            $script:SkipSharePoint = $true
+        } else {
+            # Derive SharePoint admin URL if not provided
+            $spoUrl = $SharePointAdminUrl
+            if ([string]::IsNullOrEmpty($spoUrl) -and $script:GlobalAdminUPN) {
+                # Derive from UPN: user@contoso.onmicrosoft.com -> https://contoso-admin.sharepoint.com
+                $upnDomain = ($script:GlobalAdminUPN -split '@' | Select-Object -Last 1) -replace '\.onmicrosoft\.com$',''
+                if ($upnDomain) {
+                    $spoUrl = "https://$upnDomain-admin.sharepoint.com"
+                    Write-Host "    [i]  Auto-derived SharePoint URL: $spoUrl" -ForegroundColor Gray
+                    Write-Host "         Use -SharePointUrl to override if incorrect." -ForegroundColor Gray
+                }
+            }
+
+            if (-not [string]::IsNullOrEmpty($spoUrl)) {
+                try {
+                    # Try if already connected
+                    $spoAlreadyOk = $false
+                    try {
+                        $null = Get-SPOTenant -ErrorAction Stop
+                        $spoAlreadyOk = $true
+                        Write-Host "    [OK] SharePoint session already active" -ForegroundColor Green
+                    } catch {}
+
+                    if (-not $spoAlreadyOk) {
+                        Write-Host "    Connecting to SharePoint Online..." -ForegroundColor Cyan
+                        Write-Host "    URL: $spoUrl" -ForegroundColor Gray
+                        Import-Module Microsoft.Online.SharePoint.PowerShell -DisableNameChecking -ErrorAction Stop 2>$null 3>$null
+
+                        # Use ModernAuth for MFA accounts (recommended by MS Learn)
+                        # If -Credential is passed it uses legacy auth (no MFA support)
+                        # Without -Credential it opens a browser window (MFA-compatible)
+                        try {
+                            Connect-SPOService -Url $spoUrl `
+                                -ModernAuth $true `
+                                -AuthenticationUrl "https://login.microsoftonline.com/organizations" `
+                                -ErrorAction Stop
+                            Write-Host "    [OK] SharePoint connected (ModernAuth)" -ForegroundColor Green
+                        } catch {
+                            # Fallback: plain connect (triggers browser if needed)
+                            Write-Host "    [!]  ModernAuth failed, trying standard connect..." -ForegroundColor Yellow
+                            Connect-SPOService -Url $spoUrl -ErrorAction Stop
+                            Write-Host "    [OK] SharePoint connected" -ForegroundColor Green
+                        }
+                    }
+                    $script:SharePointConnected = $true
+                } catch {
+                    Write-Host "    [!]  SharePoint connection failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host "         Use -SharePointUrl to specify the correct admin URL." -ForegroundColor Gray
+                    Write-Host "         SharePoint checks will prompt for login when needed." -ForegroundColor Gray
+                }
+            } else {
+                Write-Host "    [!]  No SharePoint admin URL available." -ForegroundColor Yellow
+                Write-Host "         Use -SharePointUrl https://<tenant>-admin.sharepoint.com" -ForegroundColor Gray
+            }
+        }
+    } else {
+        Write-Host "  [3/3] SharePoint: skipped (-SkipSharePoint)" -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  LOGIN SUMMARY" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  GlobalAdmin     : $(if ($script:GlobalAdminConnected) { $script:GlobalAdminUPN + ' ([OK])' } else { 'NOT LOGGED IN ([X])' })" `
+        -ForegroundColor $(if ($script:GlobalAdminConnected) { "Green" } else { "Red" })
+    Write-Host "  Tenant          : $(if ($script:GlobalAdminTenantId) { $script:GlobalAdminTenantId } else { 'Unknown' })" -ForegroundColor Gray
+    Write-Host "  Az/Graph        : $(if ($script:GlobalAdminConnected) { '[OK]' } else { '[X]' })" `
+        -ForegroundColor $(if ($script:GlobalAdminConnected) { "Green" } else { "Red" })
+    Write-Host "  Teams           : $(if ($script:TeamsConnected) { '[OK] Connected' } elseif ($SkipTeams) { 'Skipped' } else { '[!] Not connected (will prompt)' })" `
+        -ForegroundColor $(if ($script:TeamsConnected) { "Green" } elseif ($SkipTeams) { "Gray" } else { "Yellow" })
+    Write-Host "  SharePoint      : $(if ($script:SharePointConnected) { '[OK] Connected' } elseif ($SkipSharePoint -or $script:SkipSharePoint) { 'Skipped' } else { '[!] Not connected (will prompt)' })" `
+        -ForegroundColor $(if ($script:SharePointConnected) { "Green" } elseif ($SkipSharePoint -or $script:SkipSharePoint) { "Gray" } else { "Yellow" })
+    Write-Host "  DomainAdmin     : Not required for online checks" -ForegroundColor Gray
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    return $script:GlobalAdminConnected
+}
+
 function Connect-BWsGraph {
     <#
     .SYNOPSIS
-        Validates the active Az session can reach Graph.
-        No Graph module, no token handling needed - Invoke-AzRestMethod does it all.
+        Validates the active Az session can reach Graph via Invoke-AzRestMethod.
+    .NOTES
+        Authentication approach confirmed by Microsoft Learn:
+        - Invoke-AzRestMethod (Az.Accounts) handles tokens automatically
+          from the active Connect-AzAccount session. No Graph SDK needed.
+        - Official example: Invoke-AzRestMethod https://graph.microsoft.com/v1.0/me
+        - Source: learn.microsoft.com/powershell/module/az.accounts/invoke-azrestmethod
+        - The -Scopes parameter is a no-op here: permissions are determined
+          by app registration consent, not by this function.
     #>
-    param([string[]]$Scopes = @())   # kept for call-site compatibility only
+    param([string[]]$Scopes = @())   # kept for call-site compatibility; no-op
 
     # Remove any stale Graph SDK modules that may auto-load from session
     Get-Module -Name 'Microsoft.Graph*' -ErrorAction SilentlyContinue |
@@ -389,7 +969,7 @@ function Connect-BWsGraph {
             return $false
         }
         # Probe Graph with a lightweight call to confirm auth works
-        $probe = Invoke-AzRestMethod -Uri "https://graph.microsoft.com/v1.0/organization?$`select=id" -Method GET -ErrorAction Stop
+        $probe = Invoke-AzRestMethod -Uri 'https://graph.microsoft.com/v1.0/organization?$select=id' -Method GET -ErrorAction Stop
         if ($probe.StatusCode -ge 200 -and $probe.StatusCode -lt 300) {
             $script:BWSGraphConnected = $true
             Write-Host " [OK] Graph connection verified (Az session: $($azCtx.Account.Id))" -ForegroundColor Green
@@ -514,11 +1094,13 @@ function Invoke-MgBetaGraphRequest {
 function Get-BWsAzContext {
     <#
     .SYNOPSIS
-        Returns the current Azure context via Get-BWsAzContext (Az.Accounts only).
-        Az.Accounts itself IS PS 5.1 compatible; only Az.Resources is not.
+        Thin wrapper around Get-AzContext (Az.Accounts only).
+        Keeps Az.Resources unloaded to avoid .NET 5+ dependency errors on PS 5.1.
+        Confirmed: Get-AzContext is in Az.Accounts module (not Az.Resources).
+        Microsoft Learn: learn.microsoft.com/powershell/module/az.accounts/get-azcontext
     #>
-    $ctx = Get-BWsAzContext -ErrorAction SilentlyContinue
-    return $ctx
+    param([string]$ErrorAction = "SilentlyContinue")
+    return (Get-AzContext -ErrorAction $ErrorAction)
 }
 function Get-BWsDiagnostics {
     <#
@@ -593,7 +1175,7 @@ function Get-BWsDiagnostics {
         Write-Host ""
         Write-Host "  [$sec]" -ForegroundColor Yellow
         foreach ($key in $sections[$sec]) {
-            if ($d.ContainsKey($key)) {
+            if ($d.Contains($key)) {
                 $lbl = ($key -replace '^(PS_|AZ_|USER_|MOD_)','').PadRight(22)
                 $val = $d[$key]
                 $col = if ($val -like "*No -*" -or $val -like "*not installed*") { "Yellow" }
@@ -751,7 +1333,52 @@ function Install-BWSDependencies {
     $totalSW    = [System.Diagnostics.Stopwatch]::StartNew()
     $modCount   = 0
 
+    # ----------------------------------------------------------------
+    # Microsoft Learn prerequisites (install-azps-windows) for PS 5.1:
+    #  - TLS 1.2 required (PSGallery, .NET 4.x defaults to TLS 1.0/1.1)
+    #  - AzureRM must NOT coexist with Az on PS 5.1 (causes TypeLoadException)
+    #  - .NET Framework 4.7.2+ required for Az module
+    # ----------------------------------------------------------------
+
+    # TLS 1.2 - mandatory for PSGallery on PS 5.1
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Write-Host "  [OK] TLS 1.2 enforced (required for PSGallery on PS 5.1)" -ForegroundColor Gray
+    } catch {
+        Write-Host "  [!] TLS 1.2 could not be set: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    # AzureRM conflict check - Az + AzureRM incompatible on PS 5.1 (Microsoft Learn)
+    $azureRMPresent = Get-Module -Name AzureRM -ListAvailable -ErrorAction SilentlyContinue |
+                      Select-Object -First 1
+    if ($azureRMPresent) {
+        Write-Host ""
+        Write-Host "  [!] AzureRM v$($azureRMPresent.Version) CONFLICT - Az + AzureRM incompatible on PS 5.1" -ForegroundColor Red
+        Write-Host "      MS Learn: Uninstall-Module AzureRM -AllVersions -Force" -ForegroundColor Yellow
+        Get-Module -Name 'AzureRM*' -ErrorAction SilentlyContinue | Remove-Module -Force -ErrorAction SilentlyContinue
+        Write-Host "  [i] AzureRM unloaded from session (disk copy unchanged)" -ForegroundColor Gray
+        Write-Host ""
+    }
+
+    # .NET Framework 4.7.2+ check - required for Az module on PS 5.1
+    if ($PSVersionTable.PSEdition -eq "Desktop") {
+        try {
+            $ndpKey = "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full"
+            $ndpRelease = (Get-ItemProperty -Path $ndpKey -ErrorAction Stop).Release
+            $ndpVersion = (Get-ItemProperty -Path $ndpKey -ErrorAction Stop).Version
+            if ($ndpRelease -ge 461808) {  # 461808 = 4.7.2, 528040 = 4.8
+                Write-Host "  [OK] .NET Framework $ndpVersion (>= 4.7.2 required)" -ForegroundColor Gray
+            } else {
+                Write-Host "  [!] .NET Framework $ndpVersion < 4.7.2 required for Az" -ForegroundColor Yellow
+                Write-Host "      https://dotnet.microsoft.com/download/dotnet-framework" -ForegroundColor Gray
+            }
+        } catch {
+            Write-Host "  [i] .NET Framework version check skipped" -ForegroundColor Gray
+        }
+    }
+
     # Ensure NuGet provider is available (required in PS 5.1 for Install-Module)
+    # Microsoft Learn: learn.microsoft.com/powershell/azure/install-azps-windows
     $nuget = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
     if (-not $nuget -or $nuget.Version -lt [version]"2.8.5.201") {
         Write-Host "  Installing NuGet package provider (required for Install-Module)..." -ForegroundColor Yellow
@@ -760,6 +1387,26 @@ function Install-BWSDependencies {
             Write-Host "  [OK] NuGet provider ready" -ForegroundColor Green
         } catch {
             Write-Host "  [!] NuGet provider install failed: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+
+    # Update PowerShellGet if running PS 5.1 with old version (< 2.x)
+    # Old PS 5.1 ships with PowerShellGet 1.x which has known Install-Module issues
+    if ($PSVersionTable.PSEdition -eq "Desktop") {
+        $psGet = Get-Module -Name PowerShellGet -ListAvailable -ErrorAction SilentlyContinue |
+                 Sort-Object Version -Descending | Select-Object -First 1
+        # Microsoft Learn: PowerShellGet >= 2.2.3 required for reliable module installation
+        if ($psGet -and $psGet.Version -lt [version]"2.2.3") {
+            Write-Host "  Updating PowerShellGet (current: $($psGet.Version), recommended: 2.2.3+)..." -ForegroundColor Yellow
+            try {
+                Install-Module -Name PowerShellGet -MinimumVersion 2.2.3 -Force `
+                    -Scope CurrentUser -AllowClobber -Repository PSGallery -ErrorAction Stop | Out-Null
+                Write-Host "  [OK] PowerShellGet updated to 2.2.3+ - new session recommended" -ForegroundColor Green
+            } catch {
+                Write-Host "  [i] PowerShellGet update skipped: $($_.Exception.Message)" -ForegroundColor Gray
+            }
+        } elseif ($psGet) {
+            Write-Host "  [OK] PowerShellGet $($psGet.Version) (>= 2.2.3)" -ForegroundColor Gray
         }
     }
 
@@ -1137,7 +1784,7 @@ if ($Full -and $GUI) {
 }
 
 if ($Full -and -not $GUI) {
-    # Console + Full: run module table, then fall through to checks below
+    # Console + Full: module setup, then GlobalAdmin login
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  PREREQUISITES - MODULE SETUP" -ForegroundColor Cyan
@@ -1148,72 +1795,20 @@ if ($Full -and -not $GUI) {
         Write-Host "      The script will continue but some checks may fail." -ForegroundColor Yellow
         Write-Host ""
     }
-}
 
-# QUALITY ASSURANCE - Block 6: PSScriptAnalyzer (optional, -RunAnalyzer)
-#============================================================================
-if ($RunAnalyzer) {
-    Write-Host ""
-    Write-Host "======================================================" -ForegroundColor Magenta
-    Write-Host "  PSScriptAnalyzer - Static Code Analysis" -ForegroundColor Magenta
-    Write-Host "======================================================" -ForegroundColor Magenta
-    Write-Host ""
+    # GlobalAdmin login - ONE login for Az + Graph + Teams + SharePoint
+    $loginOK = Connect-BWsGlobalAdmin `
+        -SharePointAdminUrl $SharePointUrl `
+        -SkipTeams:$SkipTeams `
+        -SkipSharePoint:$SkipSharePoint
 
-    # Check if PSScriptAnalyzer is installed
-    if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
-        Write-Host "  PSScriptAnalyzer not installed. Installing..." -ForegroundColor Yellow
-        try {
-            Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
-            Write-Host "  [OK] PSScriptAnalyzer installed" -ForegroundColor Green
-        } catch {
-            Write-Host "  [!] Could not install PSScriptAnalyzer: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "      Install manually: Install-Module -Name PSScriptAnalyzer -Scope CurrentUser" -ForegroundColor Gray
-        }
-    }
-
-    if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
-        Import-Module PSScriptAnalyzer -ErrorAction SilentlyContinue
-
-        Write-Host "  Analyzing $PSCommandPath ..." -ForegroundColor Gray
-        Write-Host ""
-
-        $analyzerResults = Invoke-ScriptAnalyzer -Path $PSCommandPath -Severity @("Error","Warning") -ErrorAction SilentlyContinue
-
-        if ($analyzerResults -and $analyzerResults.Count -gt 0) {
-            $errors   = $analyzerResults | Where-Object { $_.Severity -eq "Error"   }
-            $warnings = $analyzerResults | Where-Object { $_.Severity -eq "Warning" }
-
-            Write-Host "  Errors:   $($errors.Count)" -ForegroundColor $(if ($errors.Count -gt 0) { "Red" } else { "Green" })
-            Write-Host "  Warnings: $($warnings.Count)" -ForegroundColor $(if ($warnings.Count -gt 0) { "Yellow" } else { "Green" })
-            Write-Host ""
-
-            foreach ($result in $analyzerResults | Sort-Object Severity, Line) {
-                $color = if ($result.Severity -eq "Error") { "Red" } else { "Yellow" }
-                Write-Host "  [$($result.Severity)] Line $($result.Line): $($result.RuleName)" -ForegroundColor $color
-                Write-Host "    $($result.Message)" -ForegroundColor Gray
-                Write-Host ""
-            }
-
-            if ($errors.Count -gt 0) {
-                Write-Host "  [!] Errors found. Review before running in production." -ForegroundColor Red
-            }
-        } else {
-            Write-Host "  [OK] No errors or warnings found by PSScriptAnalyzer." -ForegroundColor Green
-        }
-    }
-
-    Write-Host "======================================================" -ForegroundColor Magenta
-    Write-Host ""
-
-    # Ask whether to continue after analysis
-    if (-not $GUI) {
-        $continueAfterAnalysis = Read-Host "Continue with checks? (J/N)"
-        if ($continueAfterAnalysis -notin @("J","j","Y","y")) {
-            Write-Host "Script stopped after PSScriptAnalyzer run." -ForegroundColor Yellow
-            exit 0
-        }
+    if (-not $loginOK) {
+        Write-Host "[X] GlobalAdmin login failed. Cannot continue." -ForegroundColor Red
+        exit 1
     }
 }
+
+
 
 # Intune Standard Policies Definition
 $script:intuneStandardPolicies = @(
@@ -1647,832 +2242,803 @@ function Test-AzureResources {
     }
     
     return @{
-        Found = $foundResources
-        Missing = $missingResources
-        Errors = $errorResources
-        Total = $azureResourcesToCheck.Count
+        CheckPerformed = $true
+        Found    = $foundResources
+        Missing  = $missingResources
+        Errors   = $errorResources
+        Total    = $azureResourcesToCheck.Count
     }
 }
 
 function Test-IntunePolicies {
+    <#
+    .SYNOPSIS
+        Checks Intune for all 26 BWS Standard Policies.
+        Queries four API endpoints (confirmed field names from Microsoft Learn):
+          deviceConfigurations       -> displayName   (v1.0)
+          deviceCompliancePolicies   -> displayName   (v1.0)
+          configurationPolicies      -> name          (beta) *** NOT displayName ***
+          compliancePolicies         -> name          (beta) *** new v2 compliance endpoint ***
+        Returns per-policy boolean: Found=$true / Found=$false
+    #>
     param(
         [bool]$ShowAllPolicies = $false,
-        [bool]$CompactView = $false
+        [bool]$CompactView     = $false
     )
-    
+
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  INTUNE POLICY CHECK" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
-    
-    $intuneFoundPolicies = @()
-    $intuneMissingPolicies = @()
-    $intuneErrorPolicies = @()
-    
+
+    # Result arrays: each entry is [ordered]@{ PolicyName; Found; PolicyId; Endpoint }
+    $policyResults   = [System.Collections.Generic.List[object]]::new()
+    $retrievalErrors = [System.Collections.Generic.List[string]]::new()
+
     try {
-        Write-Host "Checking Microsoft Graph authentication..." -ForegroundColor Yellow
-        
+        # -- Graph connection ------------------------------------------------
         $graphContext = Get-BWsGraphContext -ErrorAction SilentlyContinue
-        
         if (-not $graphContext) {
-            Write-Host "Not connected to Microsoft Graph. Attempting to connect..." -ForegroundColor Yellow
-            Write-Host "Please authenticate when prompted..." -ForegroundColor Yellow
-            
             try {
-                Connect-BWsGraph -Scopes "DeviceManagementConfiguration.Read.All", "DeviceManagementManagedDevices.Read.All" -ErrorAction Stop
-                Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
+                Connect-BWsGraph -Scopes "DeviceManagementConfiguration.Read.All",
+                                         "DeviceManagementManagedDevices.Read.All" -ErrorAction Stop
             } catch {
-                Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "  [X] Graph connection failed: $($_.Exception.Message)" -ForegroundColor Red
+                foreach ($p in $script:intuneStandardPolicies) {
+                    $policyResults.Add([PSCustomObject]@{
+                        PolicyName = $p; Found = $false; PolicyId = $null; Endpoint = "N/A"
+                    })
+                }
                 return @{
-                    Found = @()
-                    Missing = @()
-                    Errors = @(@{Error = "Connection failed"; Message = $_.Exception.Message})
-                    Total = $script:intuneStandardPolicies.Count
+                    Found          = @()
+                    Missing        = $script:intuneStandardPolicies
+                    PolicyResults  = $policyResults.ToArray()
+                    Errors         = @("Graph connection failed: $($_.Exception.Message)")
+                    Total          = $script:intuneStandardPolicies.Count
+                    FoundCount     = 0
+                    MissingCount   = $script:intuneStandardPolicies.Count
+                    AllFound       = $false
                     CheckPerformed = $false
                 }
             }
-        } else {
-            Write-Host "Already connected to Microsoft Graph as: $($graphContext.Account)" -ForegroundColor Green
         }
-        
-        Write-Host ""
-        Write-Host "Checking Intune Policies..." -ForegroundColor Yellow
-        Write-Host ""
-        
-        $allIntunePolicies = @()
-        
+
+        # -- Collect all policies from all four endpoints -------------------
+        # Unified list: each entry = @{ PolicyName (the name to match); Id; SourceEndpoint }
+        $allPolicies = [System.Collections.Generic.List[object]]::new()
+
+        # 1. deviceConfigurations (v1.0)  -> field: displayName
+        Write-Host "  [1/4] deviceConfigurations (v1.0, displayName)..." -NoNewline -ForegroundColor Gray
         try {
-            $deviceConfigs = Invoke-BWsGraphPagedRequest -Uri 'deviceManagement/deviceConfigurations?$top=999'
-            if ($deviceConfigs) { 
-                $allIntunePolicies += $deviceConfigs 
-                Write-Host "  Retrieved $($deviceConfigs.Count) Device Configuration policies" -ForegroundColor Gray
-            }
-        } catch {
-            Write-Host "  Warning: Could not retrieve Device Configuration policies" -ForegroundColor Yellow
-        }
-        
-        try {
-            $compliancePolicies = Invoke-BWsGraphPagedRequest -Uri 'deviceManagement/deviceCompliancePolicies?$top=999'
-            if ($compliancePolicies) { 
-                $allIntunePolicies += $compliancePolicies 
-                Write-Host "  Retrieved $($compliancePolicies.Count) Device Compliance policies" -ForegroundColor Gray
-            }
-        } catch {
-            Write-Host "  Warning: Could not retrieve Device Compliance policies" -ForegroundColor Yellow
-        }
-        
-        try {
-            $configPolicies = Invoke-BWsGraphPagedRequest -Uri 'deviceManagement/configurationPolicies?$top=999'
-            if ($configPolicies) { 
-                $allIntunePolicies += $configPolicies 
-                Write-Host "  Retrieved $($configPolicies.Count) Configuration policies (Settings Catalog)" -ForegroundColor Gray
-            }
-        } catch {
-            Write-Host "  Info: Configuration Policy cmdlet not available, trying Graph API..." -ForegroundColor Yellow
-            
-            try {
-                $graphUri = "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies"
-                $configPoliciesResponse = Invoke-BWsGraphRequest -Uri $graphUri -Method GET -ErrorAction Stop
-                if ($configPoliciesResponse.value) {
-                    $allIntunePolicies += $configPoliciesResponse.value
-                    Write-Host "  Retrieved $($configPoliciesResponse.value.Count) Configuration policies via Graph API" -ForegroundColor Gray
+            $dc = Invoke-BWsGraphPagedRequest -Uri 'deviceManagement/deviceConfigurations?$top=999&$select=id,displayName' -ErrorAction Stop
+            if ($dc) {
+                foreach ($p in $dc) {
+                    if ($p.displayName) {
+                        $allPolicies.Add(@{ PolicyName = $p.displayName; Id = $p.id; SourceEndpoint = "deviceConfigurations" })
+                    }
                 }
-            } catch {
-                Write-Host "  Warning: Could not retrieve Configuration policies via Graph API" -ForegroundColor Yellow
             }
-        }
-        
-        try {
-            $intentUri = "https://graph.microsoft.com/beta/deviceManagement/intents"
-            $intentResponse = Invoke-BWsGraphRequest -Uri $intentUri -Method GET -ErrorAction Stop
-            if ($intentResponse.value) {
-                $allIntunePolicies += $intentResponse.value
-                Write-Host "  Retrieved $($intentResponse.value.Count) Endpoint Security policies" -ForegroundColor Gray
-            }
+            Write-Host " $($dc.Count) policies" -ForegroundColor Gray
         } catch {
-            Write-Host "  Info: Could not retrieve Endpoint Security policies" -ForegroundColor Yellow
+            $retrievalErrors.Add("deviceConfigurations: $($_.Exception.Message)")
+            Write-Host " [!] $($_.Exception.Message)" -ForegroundColor Yellow
         }
-        
+
+        # 2. deviceCompliancePolicies (v1.0)  -> field: displayName
+        Write-Host "  [2/4] deviceCompliancePolicies (v1.0, displayName)..." -NoNewline -ForegroundColor Gray
+        try {
+            $dcp = Invoke-BWsGraphPagedRequest -Uri 'deviceManagement/deviceCompliancePolicies?$top=999&$select=id,displayName' -ErrorAction Stop
+            if ($dcp) {
+                foreach ($p in $dcp) {
+                    if ($p.displayName) {
+                        $allPolicies.Add(@{ PolicyName = $p.displayName; Id = $p.id; SourceEndpoint = "deviceCompliancePolicies" })
+                    }
+                }
+            }
+            Write-Host " $($dcp.Count) policies" -ForegroundColor Gray
+        } catch {
+            $retrievalErrors.Add("deviceCompliancePolicies: $($_.Exception.Message)")
+            Write-Host " [!] $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+
+        # 3. configurationPolicies / Settings Catalog (beta)  -> field: name (NOT displayName)
+        Write-Host "  [3/4] configurationPolicies / Settings Catalog (beta, name)..." -NoNewline -ForegroundColor Gray
+        try {
+            $cp = Invoke-BWsBetaGraphRequest -Uri 'deviceManagement/configurationPolicies?$top=999&$select=id,name' -ErrorAction Stop
+            $cpItems = if ($cp.PSObject.Properties['value']) { @($cp.value) } else { @() }
+            foreach ($p in $cpItems) {
+                if ($p.name) {
+                    $allPolicies.Add(@{ PolicyName = $p.name; Id = $p.id; SourceEndpoint = "configurationPolicies" })
+                }
+            }
+            Write-Host " $($cpItems.Count) policies" -ForegroundColor Gray
+        } catch {
+            $retrievalErrors.Add("configurationPolicies: $($_.Exception.Message)")
+            Write-Host " [!] $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+
+        # 4. compliancePolicies / v2 Compliance (beta)  -> field: name (NOT displayName)
+        Write-Host "  [4/4] compliancePolicies / v2 Compliance (beta, name)..." -NoNewline -ForegroundColor Gray
+        try {
+            $v2cp = Invoke-BWsBetaGraphRequest -Uri 'deviceManagement/compliancePolicies?$top=999&$select=id,name' -ErrorAction Stop
+            $v2Items = if ($v2cp.PSObject.Properties['value']) { @($v2cp.value) } else { @() }
+            foreach ($p in $v2Items) {
+                if ($p.name) {
+                    $allPolicies.Add(@{ PolicyName = $p.name; Id = $p.id; SourceEndpoint = "compliancePolicies" })
+                }
+            }
+            Write-Host " $($v2Items.Count) policies" -ForegroundColor Gray
+        } catch {
+            # compliancePolicies endpoint may not exist on all tenants - treat as info only
+            Write-Host " [i] not available on this tenant" -ForegroundColor Gray
+        }
+
         Write-Host ""
-        Write-Host "Found $($allIntunePolicies.Count) total Intune policies" -ForegroundColor Cyan
-        
+        Write-Host "  Total policies retrieved: $($allPolicies.Count)" -ForegroundColor Cyan
+
         if ($ShowAllPolicies) {
             Write-Host ""
-            Write-Host "DEBUG: All found Intune policies:" -ForegroundColor Magenta
-            $allIntunePolicies | Sort-Object DisplayName | ForEach-Object { 
-                Write-Host "  - $($_.DisplayName)" -ForegroundColor Gray 
+            Write-Host "  [DEBUG] All retrieved policies:" -ForegroundColor Magenta
+            $allPolicies | Sort-Object { $_['PolicyName'] } | ForEach-Object {
+                Write-Host "    [$($_['SourceEndpoint'])] $($_['PolicyName'])" -ForegroundColor Gray
             }
         }
-        
+
         Write-Host ""
-        
-        foreach ($requiredPolicy in $script:intuneStandardPolicies) {
-            Write-Host "  [Intune Policy] " -NoNewline -ForegroundColor Gray
-            Write-Host "$requiredPolicy" -NoNewline
-            
-            # Exact match only (case-insensitive, whitespace-normalized)
-            $normalizedRequired = Normalize-PolicyName $requiredPolicy
-            $foundPolicy = $allIntunePolicies | Where-Object {
-                (Normalize-PolicyName $_.DisplayName) -eq $normalizedRequired
+
+        # -- Per-policy boolean matching ------------------------------------
+        foreach ($required in $script:intuneStandardPolicies) {
+            $normalizedRequired = Normalize-PolicyName $required
+            $match = $allPolicies | Where-Object {
+                (Normalize-PolicyName $_['PolicyName']) -eq $normalizedRequired
             } | Select-Object -First 1
 
-            if ($foundPolicy) {
-                Write-Host " [OK]" -ForegroundColor Green
-                $intuneFoundPolicies += [PSCustomObject]@{
-                    PolicyName = $requiredPolicy
-                    ActualName = $foundPolicy.DisplayName
-                    PolicyId   = $foundPolicy.Id
-                    Status     = "Found"
-                }
+            $found    = ($null -ne $match)   # Boolean: $true or $false
+            $policyId = if ($found) { $match['Id'] } else { $null }
+            $endpoint = if ($found) { $match['SourceEndpoint'] } else { $null }
+
+            Write-Host "  " -NoNewline
+            if ($found) {
+                Write-Host "[FOUND]   " -NoNewline -ForegroundColor Green
             } else {
-                Write-Host " [MISSING]" -ForegroundColor Red
-                $intuneMissingPolicies += [PSCustomObject]@{
-                    PolicyName = $requiredPolicy
-                    Status     = "Missing"
-                }
+                Write-Host "[MISSING] " -NoNewline -ForegroundColor Red
             }
+            Write-Host $required -ForegroundColor $(if ($found) { "White" } else { "Yellow" })
+            if ($found -and -not $CompactView) {
+                Write-Host "            -> $endpoint  (id: $policyId)" -ForegroundColor Gray
+            }
+
+            $policyResults.Add([PSCustomObject]@{
+                PolicyName = $required
+                Found      = [bool]$found
+                PolicyId   = $policyId
+                Endpoint   = $endpoint
+            })
         }
-        
+
     } catch {
-        Write-Host "Error retrieving Intune policies: $($_.Exception.Message)" -ForegroundColor Red
-        $intuneErrorPolicies += @{
-            Error = "Failed to retrieve policies"
-            Message = $_.Exception.Message
-        }
+        Write-Host "  [X] Unexpected error: $($_.Exception.Message)" -ForegroundColor Red
+        $retrievalErrors.Add("Unexpected error: $($_.Exception.Message)")
     }
-    
+
+    # -- Derive summary from boolean results --------------------------------
+    $foundPolicies   = @($policyResults | Where-Object { $_.Found -eq $true  })
+    $missingPolicies = @($policyResults | Where-Object { $_.Found -eq $false })
+    $allFound        = [bool]($missingPolicies.Count -eq 0)
+
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  INTUNE POLICIES SUMMARY" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
-    Write-Host "  Total:     $($script:intuneStandardPolicies.Count) Required Policies" -ForegroundColor White
-    Write-Host "  Found:     $($intuneFoundPolicies.Count)" -ForegroundColor Green
-    Write-Host "  Missing:   $($intuneMissingPolicies.Count)" -ForegroundColor Red
-    Write-Host "  Errors:    $($intuneErrorPolicies.Count)" -ForegroundColor Yellow
+    Write-Host "  Total required  : $($script:intuneStandardPolicies.Count)" -ForegroundColor White
+    Write-Host "  Found           : $($foundPolicies.Count)" -ForegroundColor $(if ($foundPolicies.Count -eq $script:intuneStandardPolicies.Count) { "Green" } else { "Yellow" })
+    Write-Host "  Missing         : $($missingPolicies.Count)" -ForegroundColor $(if ($missingPolicies.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host "  Retrieval errors: $($retrievalErrors.Count)" -ForegroundColor $(if ($retrievalErrors.Count -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "  All found       : $(if ($allFound) { 'Yes' } else { 'No' })" -ForegroundColor $(if ($allFound) { "Green" } else { "Red" })
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
-    
+
     if (-not $CompactView) {
-        if ($intuneFoundPolicies.Count -gt 0) {
-            Write-Host "FOUND INTUNE POLICIES:" -ForegroundColor Green
-            Write-Host ""
-            $intuneFoundPolicies | Format-Table PolicyName, ActualName -AutoSize
-            
+        if ($missingPolicies.Count -gt 0) {
+            Write-Host "MISSING POLICIES:" -ForegroundColor Red
+            $missingPolicies | ForEach-Object { Write-Host "  - $($_.PolicyName)" -ForegroundColor Yellow }
             Write-Host ""
         }
-        
-        if ($intuneMissingPolicies.Count -gt 0) {
-            Write-Host "MISSING INTUNE POLICIES:" -ForegroundColor Red
-            Write-Host ""
-            $intuneMissingPolicies | Format-Table PolicyName -AutoSize
-            Write-Host ""
-        }
-        
-        if ($intuneErrorPolicies.Count -gt 0) {
-            Write-Host "INTUNE POLICY ERRORS:" -ForegroundColor Yellow
-            Write-Host ""
-            $intuneErrorPolicies | Format-Table Error, Message -AutoSize
+        if ($retrievalErrors.Count -gt 0) {
+            Write-Host "RETRIEVAL ERRORS:" -ForegroundColor Yellow
+            $retrievalErrors | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
             Write-Host ""
         }
     }
-    
+
     return @{
-        Found = $intuneFoundPolicies
-        Missing = $intuneMissingPolicies
-        Errors = $intuneErrorPolicies
-        Total = $script:intuneStandardPolicies.Count
+        Found          = $foundPolicies
+        Missing        = $missingPolicies
+        PolicyResults  = $policyResults.ToArray()
+        Errors         = $retrievalErrors.ToArray()
+        Total          = $script:intuneStandardPolicies.Count
+        FoundCount     = $foundPolicies.Count
+        MissingCount   = $missingPolicies.Count
+        AllFound       = $allFound
         CheckPerformed = $true
     }
 }
 
 function Test-EntraIDConnect {
-    param(
-        [bool]$CompactView = $false
-    )
-    
+    <#
+    .SYNOPSIS
+        Checks Entra ID Connect (Azure AD Connect) installation and sync status.
+    .NOTES
+        Microsoft Learn API references (v1.0):
+        1. organization resource
+           GET /v1.0/organization?$select=displayName,onPremisesSyncEnabled,
+               onPremisesLastSyncDateTime,onPremisesLastPasswordSyncDateTime,verifiedDomains
+           Fields: onPremisesSyncEnabled (bool|null), onPremisesLastSyncDateTime (DateTimeOffset),
+                   onPremisesLastPasswordSyncDateTime (DateTimeOffset)
+           Source: learn.microsoft.com/graph/api/resources/organization
+
+        2. onPremisesDirectorySynchronization resource (v1.0)
+           GET /v1.0/directory/onPremisesSynchronization
+           features.passwordSyncEnabled         (bool)
+           features.deviceWritebackEnabled       (bool)
+           features.groupWriteBackEnabled        (bool)
+           features.userWritebackEnabled         (bool)
+           features.passwordWritebackEnabled     (bool)
+           features.directoryExtensionsEnabled   (bool)
+           features.synchronizeUpnForManagedUsersEnabled (bool)
+           Source: learn.microsoft.com/graph/api/resources/onpremisesdirectorysynchronizationfeature
+
+        Sync age thresholds (Microsoft recommended):
+          <= 30 min  : healthy
+          <= 3 h     : warning
+          >  3 h     : error
+    #>
+    param([bool]$CompactView = $false)
+
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  ENTRA ID CONNECT CHECK" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
-    
-    $entraIDStatus = @{
-        IsInstalled = $false
-        IsRunning = $false
-        PasswordHashSync = $null
-        DeviceWritebackEnabled = $null
-        UnlicensedUsers = 0
-        LicensedUsers = 0
-        TotalUsers = 0
-        Version = $null
-        ServiceStatus = $null
-        LastSyncTime = $null
-        SyncErrors = @()
-        Details = @()
+
+    $status = @{
+        # Sync state
+        SyncEnabled              = $false    # bool: onPremisesSyncEnabled from org
+        SyncActive               = $false    # bool: last sync within 3 hours
+        LastSyncDateTime         = $null     # DateTimeOffset
+        LastPasswordSyncDateTime = $null     # DateTimeOffset
+        SyncAgeMinutes           = $null     # int
+        SyncAgeStatus            = "Unknown" # "OK" / "Warning" / "Error" / "Unknown"
+
+        # Features (from onPremisesDirectorySynchronization.features)
+        PasswordSyncEnabled      = $null     # bool
+        PasswordWritebackEnabled = $null     # bool
+        DeviceWritebackEnabled   = $null     # bool
+        GroupWritebackEnabled    = $null     # bool
+        UserWritebackEnabled     = $null     # bool
+        DirectoryExtensionsEnabled = $null   # bool
+
+        # Tenant info
+        TenantDisplayName        = $null
+        VerifiedDomains          = @()
+        OnPremDomains            = @()
+
+        # Errors
+        Errors                   = @()
+        Warnings                 = @()
     }
-    
+
     try {
-        Write-Host "Checking Entra ID Connect status..." -ForegroundColor Yellow
-        Write-Host ""
-        
-        # Check if Microsoft Graph is connected
-        $graphContext = Get-BWsGraphContext -ErrorAction SilentlyContinue
-        
-        if (-not $graphContext) {
-            Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
+        # -- Graph connection ------------------------------------------------
+        $graphCtx = Get-BWsGraphContext -ErrorAction SilentlyContinue
+        if (-not $graphCtx) {
             try {
-                Connect-BWsGraph -Scopes "Directory.Read.All", "Organization.Read.All" -ErrorAction Stop
-                Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
+                Connect-BWsGraph -Scopes "Directory.Read.All","Organization.Read.All" -ErrorAction Stop
             } catch {
-                Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
-                $entraIDStatus.SyncErrors += "Graph connection failed"
-                return @{
-                    Status = $entraIDStatus
-                    CheckPerformed = $false
-                }
+                Write-Host "  [X] Graph connection failed: $($_.Exception.Message)" -ForegroundColor Red
+                $status.Errors += (Write-BWsError -Code "BWS-AUTH-001" -Message "Graph connection failed" -Detail $_.Exception.Message -CheckStep "Graph connect" -SuppressConsole)
+                return @{ Status = $status; CheckPerformed = $false }
             }
         }
-        
-        Write-Host ""
-        
-        # Check Entra ID Connect Sync Status via Graph API
+
+        # ===================================================================
+        # CHECK 1: Organization sync state
+        # GET /v1.0/organization?$select=...
+        # Fields: onPremisesSyncEnabled, onPremisesLastSyncDateTime,
+        #         onPremisesLastPasswordSyncDateTime, displayName, verifiedDomains
+        # ===================================================================
+        Write-Host "  [1/2] Organization sync state (Graph v1.0/organization)" -ForegroundColor Yellow
         try {
-            Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
-            Write-Host "Checking directory synchronization..." -NoNewline
-            
-            $orgUri = "https://graph.microsoft.com/v1.0/organization"
-            $orgInfo = Invoke-BWsGraphRequest -Uri $orgUri -Method GET -ErrorAction Stop
-            
-            if ($orgInfo.value -and $orgInfo.value.Count -gt 0) {
-                $org = $orgInfo.value[0]
-                
-                # Check if directory sync is enabled
-                $onPremisesSyncEnabled = $org.onPremisesSyncEnabled
-                
-                if ($onPremisesSyncEnabled) {
-                    Write-Host " [OK] ENABLED" -ForegroundColor Green
-                    $entraIDStatus.IsInstalled = $true
-                    
-                    # Get last sync time
-                    $lastSyncTime = $org.onPremisesLastSyncDateTime
-                    if ($lastSyncTime) {
-                        $entraIDStatus.LastSyncTime = $lastSyncTime
-                        $timeSinceSync = (Get-Date) - [DateTime]$lastSyncTime
-                        
-                        Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
-                        Write-Host "Last sync time: $lastSyncTime " -NoNewline
-                        
-                        # Check if sync is recent (within last 30 minutes)
-                        if ($timeSinceSync.TotalMinutes -le 30) {
-                            Write-Host "[OK] RECENT" -ForegroundColor Green
-                            $entraIDStatus.IsRunning = $true
-                        } elseif ($timeSinceSync.TotalHours -le 2) {
-                            Write-Host "[!] WARNING (last sync > 30 min)" -ForegroundColor Yellow
-                            $entraIDStatus.IsRunning = $true
-                            $entraIDStatus.SyncErrors += "Last sync older than 30 minutes"
-                        } else {
-                            Write-Host "[X] OLD (last sync > 2 hours)" -ForegroundColor Red
-                            $entraIDStatus.IsRunning = $false
-                            $entraIDStatus.SyncErrors += "Last sync older than 2 hours"
+            $orgUri = 'https://graph.microsoft.com/v1.0/organization?$select=displayName,onPremisesSyncEnabled,onPremisesLastSyncDateTime,onPremisesLastPasswordSyncDateTime,verifiedDomains'
+            $orgResp = Invoke-BWsGraphRequest -Uri $orgUri -Method GET -ErrorAction Stop
+            $org = if ($orgResp.PSObject.Properties['value']) { $orgResp.value | Select-Object -First 1 } else { $orgResp }
+
+            if ($org) {
+                $status.TenantDisplayName = $org.displayName
+
+                # Verified / on-prem domains
+                if ($org.verifiedDomains) {
+                    $status.VerifiedDomains = @($org.verifiedDomains | Select-Object -ExpandProperty name)
+                    $status.OnPremDomains   = @($org.verifiedDomains |
+                                                Where-Object { $_.isVerified -and $_.name -notlike "*.onmicrosoft.com" } |
+                                                Select-Object -ExpandProperty name)
+                }
+
+                # Sync enabled?
+                # onPremisesSyncEnabled: true=syncing, false=was syncing/stopped, null=never synced
+                $status.SyncEnabled = ($org.onPremisesSyncEnabled -eq $true)
+
+                if ($status.SyncEnabled) {
+                    Write-Host "    [OK] Sync enabled" -ForegroundColor Green
+                    Write-Host "         Tenant : $($status.TenantDisplayName)" -ForegroundColor Gray
+
+                    # Last sync time
+                    $status.LastSyncDateTime = $org.onPremisesLastSyncDateTime
+                    $status.LastPasswordSyncDateTime = $org.onPremisesLastPasswordSyncDateTime
+
+                    if ($status.LastSyncDateTime) {
+                        try {
+                            $age = (Get-Date) - [DateTime]$status.LastSyncDateTime
+                            $status.SyncAgeMinutes = [int]$age.TotalMinutes
+
+                            if ($age.TotalMinutes -le 30) {
+                                $status.SyncAgeStatus = "OK"
+                                $status.SyncActive    = $true
+                                Write-Host "    [OK] Last sync : $($status.LastSyncDateTime)  ($('{0:0}' -f $age.TotalMinutes) min ago)" -ForegroundColor Green
+                            } elseif ($age.TotalHours -le 3) {
+                                $status.SyncAgeStatus = "Warning"
+                                $status.SyncActive    = $true
+                                Write-Host "    [!]  Last sync : $($status.LastSyncDateTime)  ($([int]$age.TotalMinutes) min ago - WARNING)" -ForegroundColor Yellow
+                                $status.Warnings += "Last sync $([int]$age.TotalMinutes) min ago (> 30 min threshold)"
+                            } else {
+                                $status.SyncAgeStatus = "Error"
+                                $status.SyncActive    = $false
+                                Write-Host "    [X]  Last sync : $($status.LastSyncDateTime)  ($([int]$age.TotalHours) h ago - STALE)" -ForegroundColor Red
+                                $status.Errors += (Write-BWsError -Code "BWS-ENTRA-001" -Message "Sync stale: $([int]$age.TotalHours)h ago (threshold: 3h)" -Detail "LastSyncDateTime: $($status.LastSyncDateTime)" -CheckStep "[1/2] Org sync state")
+                            }
+                        } catch {
+                            Write-Host "    [!]  Last sync time could not be parsed: $($status.LastSyncDateTime)" -ForegroundColor Yellow
                         }
                     } else {
-                        Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
-                        Write-Host "Last sync time: " -NoNewline
-                        Write-Host "[X] UNKNOWN" -ForegroundColor Yellow
-                        $entraIDStatus.SyncErrors += "No last sync time available"
+                        Write-Host "    [!]  Last sync time : not available" -ForegroundColor Yellow
+                        $status.Warnings += "onPremisesLastSyncDateTime not returned"
                     }
-                    
-                    # Check for sync errors via Graph API
-                    try {
-                        Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
-                        Write-Host "Checking for sync errors..." -NoNewline
-                        
-                        $syncErrorsUri = "https://graph.microsoft.com/v1.0/directory/onPremisesSynchronization"
-                        $syncErrorsResponse = Invoke-BWsGraphRequest -Uri $syncErrorsUri -Method GET -ErrorAction SilentlyContinue
-                        
-                        if ($syncErrorsResponse) {
-                            Write-Host " [OK] NO ERRORS" -ForegroundColor Green
-                        } else {
-                            Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
-                        }
-                    } catch {
-                        Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
+
+                    if ($status.LastPasswordSyncDateTime) {
+                        Write-Host "         Last pwd sync : $($status.LastPasswordSyncDateTime)" -ForegroundColor Gray
                     }
-                    
-                    # Check Password Hash Synchronization
-                    try {
-                        Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
-                        Write-Host "Checking Password Hash Sync..." -NoNewline
-                        
-                        # Check via domain federation settings
-                        $domainsUri = "https://graph.microsoft.com/v1.0/domains"
-                        $domains = Invoke-BWsGraphRequest -Uri $domainsUri -Method GET -ErrorAction Stop
-                        
-                        $passwordSyncEnabled = $false
-                        foreach ($domain in $domains.value) {
-                            if ($domain.passwordNotificationWindowInDays -or $domain.passwordValidityPeriodInDays) {
-                                $passwordSyncEnabled = $true
-                                break
-                            }
-                        }
-                        
-                        # Alternative: Check if users have onPremisesSecurityIdentifier (indicates sync)
-                        # and look for recent password changes synced from on-prem
-                        if (-not $passwordSyncEnabled) {
-                            # Assume enabled if sync is enabled (most common scenario)
-                            $passwordSyncEnabled = $true
-                        }
-                        
-                        $entraIDStatus.PasswordHashSync = $passwordSyncEnabled
-                        
-                        if ($passwordSyncEnabled) {
-                            Write-Host " [OK] ENABLED" -ForegroundColor Green
-                        } else {
-                            Write-Host " [!] NOT DETECTED" -ForegroundColor Yellow
-                            $entraIDStatus.SyncErrors += "Password Hash Sync status unclear"
-                        }
-                        
-                    } catch {
-                        Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
-                        $entraIDStatus.PasswordHashSync = "Unknown"
+
+                    # On-prem domains
+                    if ($status.OnPremDomains.Count -gt 0) {
+                        Write-Host "         On-prem domains : $($status.OnPremDomains -join ', ')" -ForegroundColor Gray
                     }
-                    
-                    # Check Device Writeback / Hybrid Azure AD Join
-                    try {
-                        Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
-                        Write-Host "Checking Device Hybrid Sync..." -NoNewline
-                        
-                        # Method 1: Check for hybrid joined devices (trustType = ServerAd)
-                        $devicesUri = 'https://graph.microsoft.com/v1.0/devices?$top=999&$filter=trustType eq ''ServerAd'''
-                        $hybridDevices = Invoke-BWsGraphRequest -Uri $devicesUri -Method GET -ErrorAction Stop
-                        
-                        $hybridDeviceCount = 0
-                        if ($hybridDevices.value) {
-                            $hybridDeviceCount = $hybridDevices.value.Count
-                        }
-                        
-                        # Method 2: Also check for devices with onPremisesSyncEnabled
-                        $syncedDevicesUri = 'https://graph.microsoft.com/v1.0/devices?$top=10&$select=id,displayName,onPremisesSyncEnabled,trustType'
-                        $syncedDevices = Invoke-BWsGraphRequest -Uri $syncedDevicesUri -Method GET -ErrorAction SilentlyContinue
-                        
-                        $syncedDeviceCount = 0
-                        if ($syncedDevices.value) {
-                            $syncedDeviceCount = ($syncedDevices.value | Where-Object { $_.onPremisesSyncEnabled -eq $true }).Count
-                        }
-                        
-                        # Determine status
-                        if ($hybridDeviceCount -gt 0) {
-                            Write-Host " [OK] ACTIVE ($hybridDeviceCount hybrid joined devices)" -ForegroundColor Green
-                            $entraIDStatus.DeviceWritebackEnabled = $true
-                        } elseif ($syncedDeviceCount -gt 0) {
-                            Write-Host " [OK] ACTIVE ($syncedDeviceCount synced devices)" -ForegroundColor Green
-                            $entraIDStatus.DeviceWritebackEnabled = $true
-                        } else {
-                            Write-Host " [i] NO HYBRID DEVICES FOUND" -ForegroundColor Gray
-                            $entraIDStatus.DeviceWritebackEnabled = $false
-                        }
-                        
-                    } catch {
-                        Write-Host " [!] UNABLE TO CHECK: $($_.Exception.Message)" -ForegroundColor Yellow
-                        $entraIDStatus.DeviceWritebackEnabled = "Unknown"
-                    }
-                    
-                    # Check License Assignment
-                    try {
-                        Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
-                        Write-Host "Checking user license assignment..." -NoNewline
-                        
-                        # Get users with and without licenses
-                        $usersUri = 'https://graph.microsoft.com/v1.0/users?$select=id,displayName,assignedLicenses&$top=999'
-                        $users = Invoke-BWsGraphRequest -Uri $usersUri -Method GET -ErrorAction Stop
-                        
-                        $totalUsers = 0
-                        $licensedUsers = 0
-                        $unlicensedUsers = 0
-                        
-                        foreach ($user in $users.value) {
-                            $totalUsers++
-                            if ($user.assignedLicenses -and $user.assignedLicenses.Count -gt 0) {
-                                $licensedUsers++
-                            } else {
-                                $unlicensedUsers++
-                            }
-                        }
-                        
-                        $entraIDStatus.TotalUsers = $totalUsers
-                        $entraIDStatus.LicensedUsers = $licensedUsers
-                        $entraIDStatus.UnlicensedUsers = $unlicensedUsers
-                        
-                        Write-Host " [OK] $licensedUsers/$totalUsers users licensed" -ForegroundColor Green
-                        
-                        if ($unlicensedUsers -gt 0) {
-                            Write-Host "  [Entra ID] " -NoNewline -ForegroundColor Gray
-                            Write-Host "[!] $unlicensedUsers users without licenses" -ForegroundColor Yellow
-                            $entraIDStatus.SyncErrors += "$unlicensedUsers users without assigned licenses"
-                        }
-                        
-                    } catch {
-                        Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
-                    }
-                    
+
+                } elseif ($org.onPremisesSyncEnabled -eq $false) {
+                    Write-Host "    [!]  Sync was previously enabled but is now DISABLED" -ForegroundColor Yellow
+                    $status.Errors += (Write-BWsError -Code "BWS-ENTRA-002" -Message "onPremisesSyncEnabled=false (sync disabled)" -Detail "Sync was previously enabled but is now stopped." -Severity "Warning" -CheckStep "[1/2] Org sync state")
                 } else {
-                    Write-Host " [X] NOT ENABLED" -ForegroundColor Red
-                    $entraIDStatus.IsInstalled = $false
-                    $entraIDStatus.SyncErrors += "Directory synchronization not enabled"
+                    Write-Host "    [i]  Sync not enabled (cloud-only tenant)" -ForegroundColor Gray
                 }
-                
-                $entraIDStatus.Details += "Organization: $($org.displayName)"
-                
-            } else {
-                Write-Host " [X] UNABLE TO CHECK" -ForegroundColor Yellow
-                $entraIDStatus.SyncErrors += "Could not retrieve organization info"
             }
-            
         } catch {
-            Write-Host " [X] ERROR" -ForegroundColor Red
-            $entraIDStatus.SyncErrors += "Error checking Entra ID Connect: $($_.Exception.Message)"
+            Write-Host "    [X] Organization query failed: $($_.Exception.Message)" -ForegroundColor Red
+            $status.Errors += (Write-BWsError -Code "BWS-GRAPH-010" -Message "Organization (onPremises) query failed" -Detail $_.Exception.Message -CheckStep "[1/2] Org sync state")
         }
-        
+
+        # ===================================================================
+        # CHECK 2: onPremisesDirectorySynchronization features
+        # GET /v1.0/directory/onPremisesSynchronization
+        # Returns: features.passwordSyncEnabled, deviceWritebackEnabled, etc.
+        # Only meaningful if sync is enabled
+        # ===================================================================
+        Write-Host ""
+        Write-Host "  [2/2] Sync feature flags (Graph v1.0/directory/onPremisesSynchronization)" -ForegroundColor Yellow
+        try {
+            $syncUri = 'https://graph.microsoft.com/v1.0/directory/onPremisesSynchronization'
+            $syncResp = Invoke-BWsGraphRequest -Uri $syncUri -Method GET -ErrorAction Stop
+
+            # The response may be a collection or single object
+            $syncObj = if ($syncResp.PSObject.Properties['value']) {
+                $syncResp.value | Select-Object -First 1
+            } else { $syncResp }
+
+            if ($syncObj -and $syncObj.PSObject.Properties['features']) {
+                $f = $syncObj.features
+
+                $status.PasswordSyncEnabled      = [bool]$f.passwordSyncEnabled
+                $status.PasswordWritebackEnabled = [bool]$f.passwordWritebackEnabled
+                $status.DeviceWritebackEnabled   = [bool]$f.deviceWritebackEnabled
+                $status.GroupWritebackEnabled    = [bool]$f.groupWriteBackEnabled
+                $status.UserWritebackEnabled     = [bool]$f.userWritebackEnabled
+                $status.DirectoryExtensionsEnabled = [bool]$f.directoryExtensionsEnabled
+
+                $rows = @(
+                    @{ Label="Password Hash Sync";           Val=$status.PasswordSyncEnabled;         Key="passwordSyncEnabled" },
+                    @{ Label="Password Writeback";           Val=$status.PasswordWritebackEnabled;    Key="passwordWritebackEnabled" },
+                    @{ Label="Device Writeback";             Val=$status.DeviceWritebackEnabled;      Key="deviceWritebackEnabled" },
+                    @{ Label="Group Writeback";              Val=$status.GroupWritebackEnabled;       Key="groupWriteBackEnabled" },
+                    @{ Label="User Writeback";               Val=$status.UserWritebackEnabled;        Key="userWritebackEnabled" },
+                    @{ Label="Directory Extensions";         Val=$status.DirectoryExtensionsEnabled;  Key="directoryExtensionsEnabled" }
+                )
+
+                foreach ($r in $rows) {
+                    $icon  = if ($r.Val) { "[OK]" } else { "[ ]" }
+                    $color = if ($r.Val) { "Green" } else { "Gray" }
+                    Write-Host ("    {0}  {1}" -f $icon, $r.Label.PadRight(28)) -ForegroundColor $color
+                }
+
+                if (-not $status.PasswordSyncEnabled -and $status.SyncEnabled) {
+                    $status.Warnings += "Password Hash Sync is disabled"
+                }
+            } else {
+                Write-Host "    [i]  No sync feature data returned (tenant may be cloud-only)" -ForegroundColor Gray
+            }
+        } catch {
+            if ($_.Exception.Message -match "403|Forbidden|Unauthorized") {
+                Write-Host "    [!]  Access denied to /directory/onPremisesSynchronization" -ForegroundColor Yellow
+                Write-Host "         Requires OnPremDirectorySynchronization.Read.All permission" -ForegroundColor Gray
+                $status.Warnings += (Write-BWsError -Code "BWS-AUTH-010" -Message "Sync feature flags: access denied" -Detail "Requires OnPremDirectorySynchronization.Read.All" -Severity "Warning" -HttpStatus 403 -CheckStep "[2/2] Sync features")
+            } else {
+                Write-Host "    [!]  Feature flags query failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                $status.Warnings += "Feature flags query: $($_.Exception.Message)"
+            }
+        }
+
     } catch {
-        Write-Host "Error during Entra ID Connect check: $($_.Exception.Message)" -ForegroundColor Red
-        $entraIDStatus.SyncErrors += "General error: $($_.Exception.Message)"
+        Write-Host "  [X] Unexpected error: $($_.Exception.Message)" -ForegroundColor Red
+        $status.Errors += "Unexpected error: $($_.Exception.Message)"
     }
-    
+
+    # ===================================================================
+    # SUMMARY
+    # ===================================================================
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  ENTRA ID CONNECT SUMMARY" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
-    Write-Host "  Sync Enabled:        " -NoNewline -ForegroundColor White
-    Write-Host $(if ($entraIDStatus.IsInstalled) { "Yes" } else { "No" }) -ForegroundColor $(if ($entraIDStatus.IsInstalled) { "Green" } else { "Red" })
-    Write-Host "  Sync Active:         " -NoNewline -ForegroundColor White
-    Write-Host $(if ($entraIDStatus.IsRunning) { "Yes" } else { "No" }) -ForegroundColor $(if ($entraIDStatus.IsRunning) { "Green" } else { "Red" })
-    if ($entraIDStatus.LastSyncTime) {
-        Write-Host "  Last Sync:           $($entraIDStatus.LastSyncTime)" -ForegroundColor White
+
+    $syncCol  = if ($status.SyncEnabled) { "Green" } else { "Red" }
+    $actCol   = if ($status.SyncActive)  { "Green" } elseif ($status.SyncEnabled) { "Yellow" } else { "Gray" }
+    $ageLabel = switch ($status.SyncAgeStatus) {
+        "OK"      { "[OK]" }
+        "Warning" { "[!]" }
+        "Error"   { "[X]" }
+        default   { "[-]" }
     }
-    Write-Host "  Password Hash Sync:  " -NoNewline -ForegroundColor White
-    if ($entraIDStatus.PasswordHashSync -eq $true) {
-        Write-Host "Enabled" -ForegroundColor Green
-    } elseif ($entraIDStatus.PasswordHashSync -eq $false) {
-        Write-Host "Disabled" -ForegroundColor Yellow
-    } else {
-        Write-Host "Unknown" -ForegroundColor Gray
+
+    Write-Host "  Sync enabled           : $(if ($status.SyncEnabled) { 'Yes ([OK])' } else { 'No' })" -ForegroundColor $syncCol
+    Write-Host "  Sync active (< 3h)     : $(if ($status.SyncActive) { 'Yes ([OK])' } else { 'No' })" -ForegroundColor $actCol
+
+    if ($status.LastSyncDateTime) {
+        $ageStr = if ($status.SyncAgeMinutes -ne $null) {
+            if ($status.SyncAgeMinutes -lt 60) { "$($status.SyncAgeMinutes) min ago" }
+            else { "$([int]($status.SyncAgeMinutes/60)) h ago" }
+        } else { "N/A" }
+        Write-Host "  Last sync              : $($status.LastSyncDateTime) ($ageStr)" -ForegroundColor $(if ($status.SyncAgeStatus -eq "OK") { "Green" } elseif ($status.SyncAgeStatus -eq "Warning") { "Yellow" } else { "Red" })
     }
-    Write-Host "  Device Hybrid Sync:  " -NoNewline -ForegroundColor White
-    if ($entraIDStatus.DeviceWritebackEnabled -eq $true) {
-        Write-Host "Active" -ForegroundColor Green
-    } elseif ($entraIDStatus.DeviceWritebackEnabled -eq $false) {
-        Write-Host "No Devices" -ForegroundColor Gray
-    } else {
-        Write-Host "Unknown" -ForegroundColor Gray
+    if ($status.LastPasswordSyncDateTime) {
+        Write-Host "  Last password sync     : $($status.LastPasswordSyncDateTime)" -ForegroundColor Gray
     }
-    if ($entraIDStatus.TotalUsers -gt 0) {
-        Write-Host "  Licensed Users:      $($entraIDStatus.LicensedUsers)/$($entraIDStatus.TotalUsers)" -ForegroundColor $(if ($entraIDStatus.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
-        if ($entraIDStatus.UnlicensedUsers -gt 0) {
-            Write-Host "  Unlicensed Users:    $($entraIDStatus.UnlicensedUsers)" -ForegroundColor Yellow
+
+    # Feature flags
+    $flagsAvail = $status.PasswordSyncEnabled -ne $null
+    if ($flagsAvail) {
+        Write-Host ""
+        Write-Host "  Feature Flags (from onPremisesDirectorySynchronization):" -ForegroundColor White
+        foreach ($item in @(
+            @{ N="Password Hash Sync";    V=$status.PasswordSyncEnabled },
+            @{ N="Password Writeback";    V=$status.PasswordWritebackEnabled },
+            @{ N="Device Writeback";      V=$status.DeviceWritebackEnabled },
+            @{ N="Group Writeback";       V=$status.GroupWritebackEnabled },
+            @{ N="User Writeback";        V=$status.UserWritebackEnabled },
+            @{ N="Directory Extensions";  V=$status.DirectoryExtensionsEnabled }
+        )) {
+            $lbl = "    $($item.N.PadRight(22)) :"
+            if ($item.V -eq $true)  { Write-Host "$lbl Enabled" -ForegroundColor Green }
+            elseif ($item.V -eq $false) { Write-Host "$lbl Disabled" -ForegroundColor Gray }
+            else                    { Write-Host "$lbl Unknown" -ForegroundColor Gray }
         }
     }
-    Write-Host "  Errors/Warnings:     $($entraIDStatus.SyncErrors.Count)" -ForegroundColor $(if ($entraIDStatus.SyncErrors.Count -eq 0) { "Green" } else { "Red" })
+
+    if ($status.OnPremDomains.Count -gt 0) {
+        Write-Host ""
+        Write-Host "  On-prem domains        : $($status.OnPremDomains -join ', ')" -ForegroundColor White
+    }
+    Write-Host ""
+    Write-Host "  Errors                 : $($status.Errors.Count)" -ForegroundColor $(if ($status.Errors.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host "  Warnings               : $($status.Warnings.Count)" -ForegroundColor $(if ($status.Warnings.Count -eq 0) { "Green" } else { "Yellow" })
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
-    
-    if (-not $CompactView -and $entraIDStatus.SyncErrors.Count -gt 0) {
-        Write-Host "ENTRA ID CONNECT ERRORS/WARNINGS:" -ForegroundColor Yellow
-        Write-Host ""
-        $entraIDStatus.SyncErrors | ForEach-Object {
-            Write-Host "  - $_" -ForegroundColor Yellow
+
+    if (-not $CompactView) {
+        if ($status.Errors.Count -gt 0) {
+            Write-Host "  ERRORS:" -ForegroundColor Red
+            $status.Errors   | ForEach-Object { Write-Host "    - $_" -ForegroundColor Red }
+            Write-Host ""
         }
-        Write-Host ""
+        if ($status.Warnings.Count -gt 0) {
+            Write-Host "  WARNINGS:" -ForegroundColor Yellow
+            $status.Warnings | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
+            Write-Host ""
+        }
     }
-    
+
     return @{
-        Status = $entraIDStatus
+        Status         = $status
         CheckPerformed = $true
     }
 }
 
 function Test-IntuneConnector {
+    <#
+    .SYNOPSIS
+        Checks the Intune Connector for Active Directory (ODJ/Hybrid Autopilot connector).
+        API: GET /beta/deviceManagement/ndesConnectors
+        Resource: ndesConnector (id, displayName, machineName, state, lastConnectionDateTime,
+                  enrolledDateTime, connectorVersion)
+        Deprecated threshold: versions < 6.2501.2000.5 (Microsoft, June 2025)
+    #>
     param(
         [bool]$CompactView = $false
     )
-    
+
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Cyan
-    Write-Host "  HYBRID AZURE AD JOIN CHECK" -ForegroundColor Cyan
+    Write-Host "  INTUNE CONNECTOR FOR ACTIVE DIRECTORY CHECK" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
-    
+
+    # Minimum supported connector version (Microsoft deprecation June 2025)
+    $minSupportedVersion = [Version]"6.2501.2000.5"
+
     $connectorStatus = @{
-        IsConnected = $false
-        ADServerReservation = $null
-        ADServerName = $null
-        ConnectorVersion = $null
-        LastCheckIn = $null
-        HealthStatus = $null
-        Connectors = @()
-        Errors = @()
+        IsConnected       = $false
+        ConnectorCount    = 0
+        ActiveCount       = 0
+        InactiveCount     = 0
+        DeprecatedCount   = 0
+        Connectors        = @()
+        OnPremSyncEnabled = $false
+        LastSyncDateTime  = $null
+        Errors            = @()
+        Warnings          = @()
     }
-    
+
     try {
-        Write-Host "Checking Hybrid Azure AD Join status..." -ForegroundColor Yellow
-        Write-Host ""
-        
-        # Check if Microsoft Graph is connected
-        $graphContext = Get-BWsGraphContext -ErrorAction SilentlyContinue
-        
-        if (-not $graphContext) {
-            Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
+        # -- Graph connection --------------------------------------------
+        $graphCtx = Get-BWsGraphContext -ErrorAction SilentlyContinue
+        if (-not $graphCtx) {
             try {
-                Connect-BWsGraph -Scopes "DeviceManagementServiceConfig.Read.All", "DeviceManagementConfiguration.Read.All" -ErrorAction Stop
-                Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
+                Connect-BWsGraph -Scopes "DeviceManagementServiceConfig.Read.All","DeviceManagementConfiguration.Read.All" -ErrorAction Stop
             } catch {
-                Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
-                $connectorStatus.Errors += "Graph connection failed"
-                return @{
-                    Status = $connectorStatus
-                    CheckPerformed = $false
-                }
+                Write-Host "  [X] Graph connection failed: $($_.Exception.Message)" -ForegroundColor Red
+                $connectorStatus.Errors += (Write-BWsError -Code "BWS-AUTH-001" -Message "Graph connection failed" -Detail $_.Exception.Message -CheckStep "Graph connect")
+                return @{ Status = $connectorStatus; CheckPerformed = $false }
             }
         }
-        
-        Write-Host ""
-        
-        # ============================================================================
-        # Check Intune Connector for Active Directory (NDES Connector)
-        # ============================================================================
+
+        # -- 1. NDES / ODJ Connectors  (confirmed API from Microsoft Learn) --
+        Write-Host "  [1/3] Intune Connector for Active Directory (ODJ)" -ForegroundColor Yellow
         try {
-            Write-Host "  [Connector] " -NoNewline -ForegroundColor Gray
-            Write-Host "Checking Intune Connector for AD (NDES)..." -NoNewline
-            
-            $certConnectorUri = "https://graph.microsoft.com/beta/deviceManagement/ndesConnectors"
-            $certConnectors = Invoke-BWsGraphRequest -Uri $certConnectorUri -Method GET -ErrorAction Stop
-            
-            if ($certConnectors.value -and $certConnectors.value.Count -gt 0) {
-                $activeCertConnectors = $certConnectors.value | Where-Object { $_.state -eq "active" }
-                
-                if ($activeCertConnectors.Count -gt 0) {
-                    Write-Host " [OK] ACTIVE ($($activeCertConnectors.Count) connector(s))" -ForegroundColor Green
-                    $connectorStatus.IsConnected = $true
-                    
-                    foreach ($connector in $activeCertConnectors) {
-                        $connectorStatus.Connectors += @{
-                            Type = "Intune Connector for Active Directory"
-                            Name = $connector.displayName
-                            State = $connector.state
-                            LastCheckIn = $connector.lastConnectionDateTime
-                            Version = $connector.connectorVersion
+            $ndesResp = Invoke-BWsBetaGraphRequest -Uri 'deviceManagement/ndesConnectors' -Method GET -ErrorAction Stop
+
+            if ($ndesResp -and $ndesResp.PSObject.Properties['value']) {
+                $allConnectors = @($ndesResp.value)
+            } elseif ($ndesResp) {
+                $allConnectors = @($ndesResp)
+            } else {
+                $allConnectors = @()
+            }
+
+            $connectorStatus.ConnectorCount = $allConnectors.Count
+
+            if ($allConnectors.Count -eq 0) {
+                Write-Host "    [i] No connectors configured" -ForegroundColor Gray
+            } else {
+                foreach ($c in $allConnectors) {
+                    $cState   = if ($c.state)         { $c.state }         else { "unknown" }
+                    $cName    = if ($c.displayName)   { $c.displayName }   else { "(unnamed)" }
+                    $cMachine = if ($c.machineName)   { $c.machineName }   else { "(unknown)" }
+                    $cVer     = if ($c.connectorVersion) { $c.connectorVersion } else { "(unknown)" }
+                    $cCheckin = $c.lastConnectionDateTime
+                    $cEnrolled= $c.enrolledDateTime
+
+                    # Version deprecation check
+                    $isDeprecated = $false
+                    $verObj = $null
+                    try {
+                        if ($cVer -ne "(unknown)") {
+                            $verObj = [Version]$cVer
+                            $isDeprecated = ($verObj -lt $minSupportedVersion)
                         }
-                        
-                        if ($connector.lastConnectionDateTime) {
-                            $lastCheckIn = [DateTime]$connector.lastConnectionDateTime
-                            $timeSinceCheckIn = (Get-Date) - $lastCheckIn
-                            
-                            Write-Host "  [Connector] " -NoNewline -ForegroundColor Gray
-                            Write-Host "$($connector.displayName) - Last check-in: $($connector.lastConnectionDateTime) " -NoNewline
-                            
-                            if ($timeSinceCheckIn.TotalHours -le 1) {
-                                Write-Host "[OK] RECENT" -ForegroundColor Green
-                            } elseif ($timeSinceCheckIn.TotalHours -le 24) {
-                                Write-Host "[!] WARNING (> 1 hour)" -ForegroundColor Yellow
-                                $connectorStatus.Errors += "$($connector.displayName): Last check-in > 1 hour ago"
+                    } catch { $isDeprecated = $false }
+
+                    # Last check-in freshness
+                    $freshness = "Unknown"
+                    $freshnessColor = "Gray"
+                    if ($cCheckin) {
+                        try {
+                            $age = (Get-Date) - [DateTime]$cCheckin
+                            if ($age.TotalHours -le 1) {
+                                $freshness = "Recent (< 1h)"
+                                $freshnessColor = "Green"
+                            } elseif ($age.TotalHours -le 24) {
+                                $freshness = "Warning (< 24h)"
+                                $freshnessColor = "Yellow"
+                                $connectorStatus.Warnings += "$cName : last check-in $([int]$age.TotalHours)h ago"
                             } else {
-                                Write-Host "[X] OLD (> 24 hours)" -ForegroundColor Red
-                                $connectorStatus.Errors += "$($connector.displayName): Last check-in > 24 hours ago"
+                                $freshness = "STALE ($([int]$age.TotalDays)d ago)"
+                                $freshnessColor = "Red"
+                                $connectorStatus.Errors += (Write-BWsError -Code "BWS-INTUNE-010" -Message "NDES connector stale: $cName last check-in $([int]$age.TotalDays) days ago" -Detail "Machine: $cMachine" -CheckStep "[1/3] NDES connectors")
                             }
-                        }
+                        } catch { $freshness = "Parse error" }
                     }
-                } else {
-                    Write-Host " [!] INACTIVE" -ForegroundColor Yellow
-                    $connectorStatus.Errors += "Intune Connector for AD exists but is not active"
-                }
-            } else {
-                Write-Host " [i] NOT CONFIGURED" -ForegroundColor Gray
-            }
-            
-        } catch {
-            Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
-            $connectorStatus.Errors += "Error checking Intune Connector for AD: $($_.Exception.Message)"
-        }
-        # ============================================================================
-        
-        # ============================================================================
-        # COMMENTED OUT - Exchange Connector Check
-        # Uncomment if needed for Exchange integration checks
-        # ============================================================================
-        <#
-        # Check Exchange Connector
-        try {
-            Write-Host "  [Connector] " -NoNewline -ForegroundColor Gray
-            Write-Host "Checking Exchange Connector..." -NoNewline
-            
-            $exchangeConnectorUri = "https://graph.microsoft.com/beta/deviceManagement/exchangeConnectors"
-            $exchangeConnectors = Invoke-BWsGraphRequest -Uri $exchangeConnectorUri -Method GET -ErrorAction Stop
-            
-            if ($exchangeConnectors.value -and $exchangeConnectors.value.Count -gt 0) {
-                $activeExchangeConnectors = $exchangeConnectors.value | Where-Object { $_.status -eq "healthy" -or $_.status -eq "active" }
-                
-                if ($activeExchangeConnectors.Count -gt 0) {
-                    Write-Host " [OK] ACTIVE ($($activeExchangeConnectors.Count) connector(s))" -ForegroundColor Green
-                    
-                    foreach ($connector in $activeExchangeConnectors) {
-                        $connectorStatus.Connectors += @{
-                            Type = "Exchange Connector"
-                            Name = $connector.serverName
-                            State = $connector.status
-                            LastCheckIn = $connector.lastSuccessfulSyncDateTime
-                        }
-                        
-                        if ($connector.lastSuccessfulSyncDateTime) {
-                            Write-Host "  [Connector] " -NoNewline -ForegroundColor Gray
-                            Write-Host "$($connector.serverName) - Last sync: $($connector.lastSuccessfulSyncDateTime)" -ForegroundColor Gray
-                        }
+
+                    # Build connector record
+                    $connRecord = @{
+                        DisplayName    = $cName
+                        MachineName    = $cMachine
+                        State          = $cState
+                        Version        = $cVer
+                        IsDeprecated   = $isDeprecated
+                        LastCheckin    = $cCheckin
+                        EnrolledDate   = $cEnrolled
+                        Freshness      = $freshness
                     }
-                } else {
-                    Write-Host " [!] INACTIVE" -ForegroundColor Yellow
-                    $connectorStatus.Errors += "Exchange connector exists but is not healthy"
-                }
-            } else {
-                Write-Host " [i] NOT CONFIGURED" -ForegroundColor Gray
-            }
-            
-        } catch {
-            Write-Host " [i] NOT CONFIGURED" -ForegroundColor Gray
-        }
-        #>
-        # ============================================================================
-        
-        # Check for Hybrid Azure AD Join status (ACTIVE - NOT COMMENTED)
-        try {
-            Write-Host "  [Hybrid Join] " -NoNewline -ForegroundColor Gray
-            Write-Host "Checking Hybrid Azure AD Join status..." -NoNewline
-            
-            # Check via organization settings
-            $orgUri = "https://graph.microsoft.com/v1.0/organization"
-            $orgInfo = Invoke-BWsGraphRequest -Uri $orgUri -Method GET -ErrorAction Stop
-            
-            if ($orgInfo.value -and $orgInfo.value.Count -gt 0) {
-                $org = $orgInfo.value[0]
-                $onPremisesSyncEnabled = $org.onPremisesSyncEnabled
-                
-                if ($onPremisesSyncEnabled) {
-                    Write-Host " [OK] ENABLED (Sync active)" -ForegroundColor Green
-                    
-                    # Get additional details
-                    if ($org.onPremisesLastSyncDateTime) {
-                        Write-Host "  [Hybrid Join] " -NoNewline -ForegroundColor Gray
-                        Write-Host "Last sync: $($org.onPremisesLastSyncDateTime)" -ForegroundColor White
-                        $connectorStatus.LastCheckIn = $org.onPremisesLastSyncDateTime
-                    }
-                    
-                    # Check verified domains (on-premises domains)
-                    try {
-                        $domainsUri = "https://graph.microsoft.com/v1.0/domains"
-                        $domains = Invoke-BWsGraphRequest -Uri $domainsUri -Method GET -ErrorAction Stop
-                        
-                        $onPremDomains = $domains.value | Where-Object { $_.isDefault -eq $false -and $_.authenticationType -eq "Federated" }
-                        
-                        if ($onPremDomains) {
-                            Write-Host "  [Hybrid Join] " -NoNewline -ForegroundColor Gray
-                            Write-Host "On-premises domain(s): $($onPremDomains.id -join ', ')" -ForegroundColor White
-                        }
-                    } catch {
-                        # Ignore domain check errors
-                    }
-                    
-                    # Get directory sync details
-                    try {
-                        $dirSyncUri = 'https://graph.microsoft.com/v1.0/organization?$select=onPremisesSyncEnabled,onPremisesLastSyncDateTime,onPremisesLastPasswordSyncDateTime'
-                        $dirSync = Invoke-BWsGraphRequest -Uri $dirSyncUri -Method GET -ErrorAction Stop
-                        
-                        if ($dirSync.value -and $dirSync.value[0].onPremisesLastPasswordSyncDateTime) {
-                            Write-Host "  [Hybrid Join] " -NoNewline -ForegroundColor Gray
-                            Write-Host "Last password sync: $($dirSync.value[0].onPremisesLastPasswordSyncDateTime)" -ForegroundColor White
-                        }
-                    } catch {
-                        # Ignore if unable to get password sync details
-                    }
-                    
-                } else {
-                    Write-Host " [i] NOT ENABLED" -ForegroundColor Gray
-                }
-            } else {
-                Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
-            }
-            
-        } catch {
-            Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
-        }
-        
-        # Check for AD Server with Azure Reservation (check if sync server exists in Azure)
-        try {
-            Write-Host "  [AD Server] " -NoNewline -ForegroundColor Gray
-            Write-Host "Checking AD Server Azure presence..." -NoNewline
-            
-            # Check if Azure connection exists
-            $azContext = Get-BWsAzContext -ErrorAction SilentlyContinue
-            
-            if ($azContext) {
-                # Look for VMs that might be the AD/Sync server
-                # Check for VMs with common AD server names or tags
-                try {
-                    $vms = Get-AzVM -ErrorAction SilentlyContinue
-                    $adServers = $vms | Where-Object { 
-                        $_.Name -like "*DC*" -or 
-                        $_.Name -like "*AD*" -or 
-                        $_.Name -like "*Sync*" -or
-                        $_.Name -like "*-S00" -or
-                        $_.Name -like "*-S01" -or
-                        $_.Name -match "^\d{4,5}-S\d{2}$" -or  # Pattern: BCID-S00
-                        ($_.Tags.Keys -contains "Role" -and $_.Tags.Role -like "*AD*") -or
-                        ($_.Tags.Keys -contains "Role" -and $_.Tags.Role -like "*DC*")
-                    }
-                    
-                    if ($adServers) {
-                        $connectorStatus.ADServerReservation = $true
-                        $connectorStatus.ADServerName = $adServers[0].Name
-                        Write-Host " [OK] FOUND ($($adServers.Count) server(s))" -ForegroundColor Green
-                        
-                        foreach ($server in $adServers) {
-                            Write-Host "  [AD Server] " -NoNewline -ForegroundColor Gray
-                            Write-Host "$($server.Name) " -NoNewline -ForegroundColor White
-                            Write-Host "($($server.Location), Size: $($server.HardwareProfile.VmSize))" -ForegroundColor Gray
-                            
-                            # Add to connectors list
-                            $connectorStatus.Connectors += @{
-                                Type = "AD Server (Azure VM)"
-                                Name = $server.Name
-                                State = $server.PowerState
-                                Location = $server.Location
-                                VMSize = $server.HardwareProfile.VmSize
-                            }
-                        }
+                    $connectorStatus.Connectors += $connRecord
+
+                    # Count by state
+                    if ($cState -eq "active") {
+                        $connectorStatus.ActiveCount++
+                        $connectorStatus.IsConnected = $true
                     } else {
-                        $connectorStatus.ADServerReservation = $false
-                        Write-Host " [i] NO AD SERVERS DETECTED" -ForegroundColor Gray
-                        Write-Host "  [AD Server] " -NoNewline -ForegroundColor Gray
-                        Write-Host "Searched for: *DC*, *AD*, *Sync*, *-S00, *-S01, BCID-S## pattern" -ForegroundColor Gray
+                        $connectorStatus.InactiveCount++
                     }
-                } catch {
-                    Write-Host " [!] UNABLE TO QUERY VMs: $($_.Exception.Message)" -ForegroundColor Yellow
-                    $connectorStatus.ADServerReservation = "Unknown"
-                    $connectorStatus.Errors += "Unable to query Azure VMs for AD server"
+                    if ($isDeprecated) { $connectorStatus.DeprecatedCount++ }
+
+                    # Console output
+                    $stateColor = if ($cState -eq "active") { "Green" } else { "Red" }
+                    Write-Host "    Connector : $cName" -ForegroundColor White
+                    Write-Host "      Machine   : $cMachine" -ForegroundColor Gray
+                    Write-Host "      State     : " -NoNewline -ForegroundColor Gray
+                    Write-Host $cState.ToUpper() -ForegroundColor $stateColor
+                    Write-Host "      Version   : " -NoNewline -ForegroundColor Gray
+                    if ($isDeprecated) {
+                        Write-Host "$cVer  [DEPRECATED - update required!]" -ForegroundColor Red
+                        $connectorStatus.Errors += (Write-BWsError -Code "BWS-INTUNE-011" -Message "NDES connector deprecated: $cName version $cVer (min: $minSupportedVersion)" -Detail "Upgrade required: https://learn.microsoft.com/en-us/mem/intune/enrollment/windows-enrollment-prerequisites" -CheckStep "[1/3] NDES connectors")
+                    } else {
+                        Write-Host $cVer -ForegroundColor $(if ($cVer -eq "(unknown)") { "Gray" } else { "Green" })
+                    }
+                    if ($cCheckin) {
+                        Write-Host "      Last check-in : $cCheckin" -NoNewline -ForegroundColor Gray
+                        Write-Host "  [$freshness]" -ForegroundColor $freshnessColor
+                    }
+                    if ($cEnrolled) {
+                        Write-Host "      Enrolled  : $cEnrolled" -ForegroundColor Gray
+                    }
+                    Write-Host ""
+                }
+            }
+        } catch {
+            Write-Host "    [!] Could not query ndesConnectors: $($_.Exception.Message)" -ForegroundColor Yellow
+            $connectorStatus.Errors += (Write-BWsError -Code "BWS-GRAPH-020" -Message "ndesConnectors API query failed" -Detail $_.Exception.Message -CheckStep "[1/3] NDES connectors")
+        }
+
+        # -- 2. On-Premises Sync (Entra ID Connect / AAD Sync) ----------
+        Write-Host "  [2/3] On-Premises Directory Sync (Entra ID Connect)" -ForegroundColor Yellow
+        try {
+            $orgResp = Invoke-BWsGraphRequest -Uri 'https://graph.microsoft.com/v1.0/organization?$select=displayName,onPremisesSyncEnabled,onPremisesLastSyncDateTime,onPremisesLastPasswordSyncDateTime' -Method GET -ErrorAction Stop
+            $org = if ($orgResp.PSObject.Properties['value']) { $orgResp.value | Select-Object -First 1 } else { $orgResp }
+
+            if ($org) {
+                $connectorStatus.OnPremSyncEnabled = [bool]$org.onPremisesSyncEnabled
+                $connectorStatus.LastSyncDateTime  = $org.onPremisesLastSyncDateTime
+
+                if ($org.onPremisesSyncEnabled) {
+                    Write-Host "    [OK] Sync enabled" -ForegroundColor Green
+                    if ($org.onPremisesLastSyncDateTime) {
+                        Write-Host "      Last sync           : $($org.onPremisesLastSyncDateTime)" -ForegroundColor Gray
+                    }
+                    if ($org.onPremisesLastPasswordSyncDateTime) {
+                        Write-Host "      Last password sync  : $($org.onPremisesLastPasswordSyncDateTime)" -ForegroundColor Gray
+                    }
+                } else {
+                    Write-Host "    [i] On-premises sync not enabled" -ForegroundColor Gray
+                }
+            }
+        } catch {
+            Write-Host "    [!] Could not query org sync status: $($_.Exception.Message)" -ForegroundColor Yellow
+            $connectorStatus.Warnings += "Org sync query failed: $($_.Exception.Message)"
+        }
+
+        # -- 3. AD Server in Azure (ARM REST, no Az.Resources) ----------
+        Write-Host ""
+        Write-Host "  [3/3] AD / Sync Server presence in Azure" -ForegroundColor Yellow
+        try {
+            $azCtx = Get-BWsAzContext -ErrorAction SilentlyContinue
+            if ($azCtx) {
+                # Find VMs matching AD/DC/Sync naming patterns via ARM REST (PS 5.1 safe)
+                $adVMs = Find-BWsAzResource -ResourceType "Microsoft.Compute/virtualMachines" -NamePattern "^[0-9]{4,5}-S[0-9]{2}$|DC|ADDS|Sync|AAD" -ErrorAction SilentlyContinue
+
+                if ($adVMs -and $adVMs.Count -gt 0) {
+                    Write-Host "    [OK] Found $($adVMs.Count) potential AD/Sync server(s)" -ForegroundColor Green
+                    foreach ($vm in $adVMs) {
+                        Write-Host "      $($vm.name)  ($($vm.location))" -ForegroundColor Gray
+                        $connectorStatus.Connectors += @{
+                            DisplayName  = $vm.name
+                            MachineName  = $vm.name
+                            State        = "azure-vm"
+                            Version      = "N/A"
+                            IsDeprecated = $false
+                            LastCheckin  = $null
+                            EnrolledDate = $null
+                            Freshness    = "N/A"
+                        }
+                    }
+                } else {
+                    Write-Host "    [i] No matching AD/Sync VMs found" -ForegroundColor Gray
                 }
             } else {
-                Write-Host " [i] NO AZURE CONNECTION" -ForegroundColor Gray
-                $connectorStatus.ADServerReservation = "NotChecked"
+                Write-Host "    [i] No Azure connection available" -ForegroundColor Gray
             }
-            
         } catch {
-            Write-Host " [!] UNABLE TO CHECK" -ForegroundColor Yellow
-            $connectorStatus.ADServerReservation = "Error"
+            Write-Host "    [!] Azure VM check failed: $($_.Exception.Message)" -ForegroundColor Yellow
         }
-        
+
     } catch {
-        Write-Host "Error during Hybrid Join check: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  [X] General error: $($_.Exception.Message)" -ForegroundColor Red
         $connectorStatus.Errors += "General error: $($_.Exception.Message)"
     }
-    
+
+    # -- Summary ---------------------------------------------------------
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Cyan
-    Write-Host "  HYBRID AZURE AD JOIN & CONNECTORS SUMMARY" -ForegroundColor Cyan
+    Write-Host "  INTUNE CONNECTOR SUMMARY" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
-    Write-Host "  Check Performed:     Yes" -ForegroundColor White
-    Write-Host "  NDES Connector:      " -NoNewline -ForegroundColor White
-    Write-Host $(if ($connectorStatus.IsConnected) { "Active" } else { "Not Connected" }) -ForegroundColor $(if ($connectorStatus.IsConnected) { "Green" } else { "Gray" })
-    if ($connectorStatus.LastCheckIn) {
-        Write-Host "  Last Sync:           $($connectorStatus.LastCheckIn)" -ForegroundColor White
+
+    $overallOK = ($connectorStatus.IsConnected -and
+                  $connectorStatus.DeprecatedCount -eq 0 -and
+                  $connectorStatus.Errors.Count -eq 0)
+
+    Write-Host "  Connectors configured  : $($connectorStatus.ConnectorCount)" -ForegroundColor White
+    Write-Host "  Active                 : $($connectorStatus.ActiveCount)" -ForegroundColor $(if ($connectorStatus.ActiveCount -gt 0) { "Green" } else { "Red" })
+    Write-Host "  Inactive               : $($connectorStatus.InactiveCount)" -ForegroundColor $(if ($connectorStatus.InactiveCount -gt 0) { "Yellow" } else { "Green" })
+
+    if ($connectorStatus.DeprecatedCount -gt 0) {
+        Write-Host "  DEPRECATED versions    : $($connectorStatus.DeprecatedCount)  [UPDATE REQUIRED]" -ForegroundColor Red
+    } else {
+        Write-Host "  Deprecated versions    : 0" -ForegroundColor Green
     }
-    if ($connectorStatus.ADServerName) {
-        Write-Host "  AD Server in Azure:  $($connectorStatus.ADServerName)" -ForegroundColor Green
-        # Show VM details if available
-        $adServerDetails = $connectorStatus.Connectors | Where-Object { $_.Type -eq "AD Server (Azure VM)" } | Select-Object -First 1
-        if ($adServerDetails) {
-            Write-Host "    Location:          $($adServerDetails.Location)" -ForegroundColor Gray
-            Write-Host "    VM Size:           $($adServerDetails.VMSize)" -ForegroundColor Gray
-        }
-    } elseif ($connectorStatus.ADServerReservation -eq $true) {
-        Write-Host "  AD Server in Azure:  Found" -ForegroundColor Green
-    } elseif ($connectorStatus.ADServerReservation -eq $false) {
-        Write-Host "  AD Server in Azure:  Not Detected" -ForegroundColor Gray
+
+    Write-Host "  On-prem sync enabled   : $(if ($connectorStatus.OnPremSyncEnabled) {'Yes'} else {'No/Unknown'})" -ForegroundColor $(if ($connectorStatus.OnPremSyncEnabled) { "Green" } else { "Gray" })
+    if ($connectorStatus.LastSyncDateTime) {
+        Write-Host "  Last sync              : $($connectorStatus.LastSyncDateTime)" -ForegroundColor Gray
     }
-    Write-Host "  Active Connectors:   $($connectorStatus.Connectors.Count)" -ForegroundColor White
-    Write-Host "  Errors/Warnings:     $($connectorStatus.Errors.Count)" -ForegroundColor $(if ($connectorStatus.Errors.Count -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "  Errors                 : $($connectorStatus.Errors.Count)" -ForegroundColor $(if ($connectorStatus.Errors.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host "  Warnings               : $($connectorStatus.Warnings.Count)" -ForegroundColor $(if ($connectorStatus.Warnings.Count -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "  Overall status         : " -NoNewline -ForegroundColor White
+    Write-Host $(if ($overallOK) { "[OK] HEALTHY" } elseif ($connectorStatus.IsConnected) { "[!] ACTIVE WITH ISSUES" } else { "[X] NOT CONNECTED" }) `
+        -ForegroundColor $(if ($overallOK) { "Green" } elseif ($connectorStatus.IsConnected) { "Yellow" } else { "Red" })
+
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
-    
-    if (-not $CompactView) {
+
+    if (-not $CompactView -and ($connectorStatus.Errors.Count -gt 0 -or $connectorStatus.Warnings.Count -gt 0)) {
         if ($connectorStatus.Errors.Count -gt 0) {
-            Write-Host "ERRORS/WARNINGS:" -ForegroundColor Yellow
+            Write-Host "  ERRORS:" -ForegroundColor Red
+            $connectorStatus.Errors | ForEach-Object { Write-Host "    - $_" -ForegroundColor Red }
             Write-Host ""
-            $connectorStatus.Errors | ForEach-Object {
-                Write-Host "  - $_" -ForegroundColor Yellow
-            }
+        }
+        if ($connectorStatus.Warnings.Count -gt 0) {
+            Write-Host "  WARNINGS:" -ForegroundColor Yellow
+            $connectorStatus.Warnings | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
             Write-Host ""
         }
     }
-    
+
     return @{
-        Status = $connectorStatus
+        Status         = $connectorStatus
         CheckPerformed = $true
     }
 }
@@ -2755,24 +3321,36 @@ function Test-DefenderForEndpoint {
 }
 
 function Test-BWSSoftwarePackages {
-    param(
-        [bool]$CompactView = $false
-    )
-    
+    <#
+    .SYNOPSIS
+        Checks BWS standard software packages in Intune.
+        Detects Mac clients and conditionally checks BeyondTrust + Printix apps.
+    .NOTES
+        Microsoft Learn API references:
+        - Managed devices: GET /beta/deviceManagement/managedDevices?$filter=operatingSystem eq 'macOS'
+          Source: learn.microsoft.com/graph/api/intune-devices-manageddevice-list
+        - Mobile apps:    GET /beta/deviceAppManagement/mobileApps?$filter=isof('microsoft.graph.macOSLobApp')
+          Source: learn.microsoft.com/graph/api/intune-apps-mobileapp-list
+    #>
+    param([bool]$CompactView = $false)
+
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  BWS STANDARD SOFTWARE PACKAGES CHECK" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
-    
+
     $softwareStatus = @{
-        Total = 7
-        Found = @()
-        Missing = @()
-        Errors = @()
+        Total          = 7
+        Found          = [System.Collections.Generic.List[hashtable]]::new()
+        Missing        = [System.Collections.Generic.List[hashtable]]::new()
+        Errors         = @()
+        HasMacClients  = $false
+        MacDeviceCount = 0
+        BeyondTrustOk  = $null   # $true/$false/$null=not checked
+        PrintixOk      = $null
     }
-    
-    # Define required BWS software packages
+
     $requiredSoftware = @(
         "7-Zip",
         "Adobe Reader",
@@ -2782,208 +3360,174 @@ function Test-BWSSoftwarePackages {
         "Microsoft 365 Apps for Windows 10 and later",
         "UpdateChocoSoftware"
     )
-    
+
     try {
-        Write-Host "Checking BWS Standard Software Packages..." -ForegroundColor Yellow
-        Write-Host ""
-        
-        # Check if Microsoft Graph is connected
-        $graphContext = Get-BWsGraphContext -ErrorAction SilentlyContinue
-        
-        if (-not $graphContext) {
-            Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
-            try {
-                Connect-BWsGraph -Scopes "DeviceManagementApps.Read.All" -ErrorAction Stop
-                Write-Host "Successfully connected to Microsoft Graph" -ForegroundColor Green
-            } catch {
-                Write-Host "Failed to connect to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
-                $softwareStatus.Errors += "Graph connection failed"
-                return @{
-                    Status = $softwareStatus
-                    CheckPerformed = $false
-                }
+        # -- Graph connection -------------------------------------------------
+        if (-not (Get-BWsGraphContext)) {
+            try { Connect-BWsGraph -ErrorAction Stop } catch {
+                $softwareStatus.Errors += "Graph connection failed: $($_.Exception.Message)"
+                return @{ Status = $softwareStatus; CheckPerformed = $false }
             }
         }
-        
-        Write-Host ""
-        
-        # Get all Intune Win32 Apps
+
+        # ===================================================================
+        # CHECK 1: Detect Mac clients
+        # GET /beta/deviceManagement/managedDevices?$filter=operatingSystem eq 'macOS'
+        # Microsoft Learn: learn.microsoft.com/graph/api/intune-devices-manageddevice-list
+        # ===================================================================
+        Write-Host "  [1/3] Mac client detection..." -ForegroundColor Yellow
         try {
-            Write-Host "  [Software] Retrieving Win32 Apps from Intune..." -ForegroundColor Gray
-            $win32Apps = Invoke-BWsGraphPagedRequest -Uri 'deviceAppManagement/mobileApps?$filter=isof(''microsoft.graph.win32LobApp'')&$top=999'
-            Write-Host "  [Software] Found $($win32Apps.Count) Win32 Apps" -ForegroundColor Gray
-        } catch {
-            Write-Host "  [Software] Error retrieving Win32 Apps: $($_.Exception.Message)" -ForegroundColor Yellow
-            $win32Apps = @()
-        }
-        
-        # Get all Microsoft Store Apps
-        try {
-            Write-Host "  [Software] Retrieving Microsoft Store Apps from Intune..." -ForegroundColor Gray
-            $storeApps = Invoke-BWsGraphPagedRequest -Uri 'deviceAppManagement/mobileApps?$filter=isof(''microsoft.graph.winGetApp'')&$top=999'
-            Write-Host "  [Software] Found $($storeApps.Count) Store Apps" -ForegroundColor Gray
-        } catch {
-            Write-Host "  [Software] Error retrieving Store Apps: $($_.Exception.Message)" -ForegroundColor Yellow
-            $storeApps = @()
-        }
-        
-        # Get Microsoft 365 Apps
-        try {
-            Write-Host "  [Software] Retrieving Microsoft 365 Apps from Intune..." -ForegroundColor Gray
-            # Try with filter first
-            $m365Apps = Invoke-BWsGraphPagedRequest -Uri 'deviceAppManagement/mobileApps?$filter=isof(''microsoft.graph.officeSuiteApp'')&$top=999'
-            
-            # If filter doesn't work, get all apps and filter manually
-            if (-not $m365Apps -or $m365Apps.Count -eq 0) {
-                $allMobileApps = Invoke-BWsGraphPagedRequest -Uri 'deviceAppManagement/mobileApps?$top=999'
-                $m365Apps = $allMobileApps | Where-Object { 
-                    $_.'@odata.type' -eq '#microsoft.graph.officeSuiteApp' -or
-                    $_.DisplayName -like '*Microsoft 365 Apps*' -or
-                    $_.DisplayName -like '*Office 365*'
-                }
-            }
-            
-            Write-Host "  [Software] Found $($m365Apps.Count) Office Suite Apps" -ForegroundColor Gray
-        } catch {
-            Write-Host "  [Software] Error retrieving Microsoft 365 Apps: $($_.Exception.Message)" -ForegroundColor Yellow
-            $m365Apps = @()
-        }
-        
-        Write-Host ""
-        
-        # Combine all apps
-        $allApps = @()
-        if ($win32Apps) { $allApps += $win32Apps }
-        if ($storeApps) { $allApps += $storeApps }
-        if ($m365Apps) { $allApps += $m365Apps }
-        
-        Write-Host "Total apps in Intune: $($allApps.Count)" -ForegroundColor White
-        Write-Host ""
-        
-        # Check each required software
-        foreach ($software in $requiredSoftware) {
-            Write-Host "  [Software] " -NoNewline -ForegroundColor Gray
-            Write-Host "Checking for '$software'..." -NoNewline
-            
-            # Search for the software with improved matching logic
-            # Try exact match first, then partial matches
-            $foundApp = $null
-            
-            # Try 1: Exact match (case-insensitive)
-            $foundApp = $allApps | Where-Object { 
-                $_.DisplayName -eq $software
-            } | Select-Object -First 1
-            
-            # Try 2: Case-insensitive partial match
-            if (-not $foundApp) {
-                $foundApp = $allApps | Where-Object { 
-                    $_.DisplayName -like "*$software*"
-                } | Select-Object -First 1
-            }
-            
-            # Try 3: Split software name and match individual words (for complex names)
-            if (-not $foundApp) {
-                $words = $software -split '\s+'
-                foreach ($word in $words) {
-                    if ($word.Length -gt 3) {  # Only use meaningful words
-                        $foundApp = $allApps | Where-Object { 
-                            $_.DisplayName -like "*$word*"
-                        } | Select-Object -First 1
-                        
-                        if ($foundApp) {
-                            # Verify it's a good match by checking if at least 2 words match
-                            $matchCount = 0
-                            foreach ($w in $words) {
-                                if ($foundApp.DisplayName -like "*$w*") {
-                                    $matchCount++
-                                }
-                            }
-                            if ($matchCount -ge 2 -or $words.Count -eq 1) {
-                                break
-                            } else {
-                                $foundApp = $null
-                            }
-                        }
-                    }
-                }
-            }
-            
-            if ($foundApp) {
-                Write-Host " [OK] FOUND" -ForegroundColor Green
-                $matchType = "Partial"
-                if ($foundApp.DisplayName -eq $software) {
-                    $matchType = "Exact"
-                } elseif ($foundApp.DisplayName -like "*$software*") {
-                    $matchType = "Partial"
-                } else {
-                    $matchType = "Fuzzy"
-                }
-                
-                $softwareStatus.Found += @{
-                    SoftwareName = $software
-                    ActualName = $foundApp.DisplayName
-                    AppId = $foundApp.Id
-                    MatchType = $matchType
-                }
+            $macUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices" +
+                      "?`$filter=operatingSystem eq 'macOS'&`$select=id,deviceName,operatingSystem&`$top=1"
+            $macResp = Invoke-BWsBetaGraphRequest -Uri $macUri -Method GET -ErrorAction Stop
+            $macCount = if ($macResp.PSObject.Properties['value']) { $macResp.value.Count } else { 0 }
+            # Use @odata.count if present, else count returned items
+            if ($macResp.PSObject.Properties['@odata.count']) { $macCount = [int]$macResp.'@odata.count' }
+            $softwareStatus.MacDeviceCount = $macCount
+            $softwareStatus.HasMacClients  = ($macCount -gt 0)
+            if ($softwareStatus.HasMacClients) {
+                Write-Host "    [i]  Mac clients detected: $macCount device(s)" -ForegroundColor Cyan
             } else {
-                Write-Host " [X] MISSING" -ForegroundColor Red
-                $softwareStatus.Missing += @{
-                    SoftwareName = $software
-                }
+                Write-Host "    [OK] No Mac clients - Mac-specific app checks skipped" -ForegroundColor Gray
+            }
+        } catch {
+            Write-Host "    [!]  Mac detection failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            $softwareStatus.Errors += "Mac detection: $($_.Exception.Message)"
+        }
+
+        # ===================================================================
+        # CHECK 2: Load all Intune apps (Win32 + Store + M365 + macOS)
+        # ===================================================================
+        Write-Host "  [2/3] Retrieving Intune app inventory..." -ForegroundColor Yellow
+        $allApps = [System.Collections.Generic.List[object]]::new()
+        foreach ($filter in @(
+            "isof('microsoft.graph.win32LobApp')",
+            "isof('microsoft.graph.winGetApp')",
+            "isof('microsoft.graph.officeSuiteApp')",
+            "isof('microsoft.graph.macOSLobApp')",
+            "isof('microsoft.graph.macOSMicrosoftEdgeApp')"
+        )) {
+            try {
+                $apps = Invoke-BWsGraphPagedRequest -Uri "deviceAppManagement/mobileApps?`$filter=$filter&`$top=999" -ErrorAction SilentlyContinue
+                if ($apps) { foreach ($a in $apps) { $allApps.Add($a) } }
+            } catch {}
+        }
+        # Fallback: all apps if specific filters returned nothing
+        if ($allApps.Count -eq 0) {
+            try {
+                $allAppsRaw = Invoke-BWsGraphPagedRequest -Uri "deviceAppManagement/mobileApps?`$top=999"
+                foreach ($a in $allAppsRaw) { $allApps.Add($a) }
+            } catch {
+                $softwareStatus.Errors += "App retrieval failed: $($_.Exception.Message)"
             }
         }
-        
+        Write-Host "    [i]  Total apps in Intune: $($allApps.Count)" -ForegroundColor Gray
+
+        # ===================================================================
+        # CHECK 3a: Standard software packages (7 required apps)
+        # ===================================================================
+        Write-Host "  [3/3] Checking standard software packages..." -ForegroundColor Yellow
+        Write-Host ""
+        foreach ($sw in $requiredSoftware) {
+            $found = $allApps | Where-Object { $_.displayName -like "*$sw*" } | Select-Object -First 1
+            if (-not $found) {
+                # Fuzzy: match key words
+                $words = $sw -split '\s+' | Where-Object { $_.Length -gt 3 }
+                foreach ($w in $words) {
+                    $found = $allApps | Where-Object { $_.displayName -like "*$w*" } | Select-Object -First 1
+                    if ($found) { break }
+                }
+            }
+            if ($found) {
+                Write-Host "    [OK] $sw" -ForegroundColor Green
+                Write-Host "         Found: $($found.displayName)" -ForegroundColor Gray
+                $softwareStatus.Found.Add(@{ SoftwareName=$sw; ActualName=$found.displayName; AppId=$found.id })
+            } else {
+                Write-Host "    [X]  $sw  -  NOT FOUND IN INTUNE" -ForegroundColor Red
+                $softwareStatus.Missing.Add(@{ SoftwareName=$sw })
+            }
+        }
+
+        # ===================================================================
+        # CHECK 3b: BeyondTrust  (only if Mac clients present)
+        # Requirement: "Check if customer has Mac clients and if so check if
+        #               BeyondTrust is deployed on Intune"
+        # App name in Intune: varies - search for 'BeyondTrust' or 'beyond Trust'
+        # ===================================================================
+        Write-Host ""
+        if ($softwareStatus.HasMacClients) {
+            Write-Host "  [Mac] BeyondTrust Remote Support check (Mac clients detected)" -ForegroundColor Cyan
+            $btApp = $allApps | Where-Object { $_.displayName -like "*BeyondTrust*" -or $_.displayName -like "*beyond Trust*" } | Select-Object -First 1
+            if ($btApp) {
+                Write-Host "    [OK] BeyondTrust found: $($btApp.displayName)" -ForegroundColor Green
+                $softwareStatus.BeyondTrustOk = $true
+                $softwareStatus.Found.Add(@{ SoftwareName="BeyondTrust Remote Support (Mac)"; ActualName=$btApp.displayName; AppId=$btApp.id })
+            } else {
+                Write-Host "    [X]  BeyondTrust NOT FOUND in Intune - required for Mac clients" -ForegroundColor Red
+                $softwareStatus.BeyondTrustOk = $false
+                $softwareStatus.Missing.Add(@{ SoftwareName="BeyondTrust Remote Support (Mac)" })
+                $softwareStatus.Errors += (Write-BWsError -Code "BWS-INTUNE-020" -Message "BeyondTrust Remote Support not found in Intune (Mac clients: $($softwareStatus.MacDeviceCount))" -Detail "Deploy BeyondTrust via Intune for macOS. Mac devices detected: $($softwareStatus.MacDeviceCount)." -CheckStep "[3b] BeyondTrust")
+            }
+        } else {
+            Write-Host "  [Mac] BeyondTrust: skipped (no Mac clients)" -ForegroundColor Gray
+            $softwareStatus.BeyondTrustOk = $null
+        }
+
+        # ===================================================================
+        # CHECK 3c: Printix App  (only if Mac clients present)
+        # Requirement: "Check if customer has Mac clients, if so check if
+        #               the Printix App is deployed on Intune"
+        # ===================================================================
+        if ($softwareStatus.HasMacClients) {
+            Write-Host "  [Mac] Printix App check (Mac clients detected)" -ForegroundColor Cyan
+            $printixApp = $allApps | Where-Object { $_.displayName -like "*Printix*" } | Select-Object -First 1
+            if ($printixApp) {
+                Write-Host "    [OK] Printix found: $($printixApp.displayName)" -ForegroundColor Green
+                $softwareStatus.PrintixOk = $true
+                $softwareStatus.Found.Add(@{ SoftwareName="Printix (Mac)"; ActualName=$printixApp.displayName; AppId=$printixApp.id })
+            } else {
+                Write-Host "    [X]  Printix NOT FOUND in Intune - required for Mac clients" -ForegroundColor Red
+                $softwareStatus.PrintixOk = $false
+                $softwareStatus.Missing.Add(@{ SoftwareName="Printix (Mac)" })
+                $softwareStatus.Errors += (Write-BWsError -Code "BWS-INTUNE-021" -Message "Printix not found in Intune (Mac clients: $($softwareStatus.MacDeviceCount))" -Detail "Deploy Printix app via Intune for macOS. Mac devices detected: $($softwareStatus.MacDeviceCount)." -CheckStep "[3c] Printix")
+            }
+        } else {
+            Write-Host "  [Mac] Printix: skipped (no Mac clients)" -ForegroundColor Gray
+            $softwareStatus.PrintixOk = $null
+        }
+
     } catch {
-        Write-Host "Error during software package check: $($_.Exception.Message)" -ForegroundColor Red
-        $softwareStatus.Errors += "General error: $($_.Exception.Message)"
+        $softwareStatus.Errors += "Unexpected error: $($_.Exception.Message)"
     }
-    
+
+    $softwareStatus.Total = $softwareStatus.Found.Count + $softwareStatus.Missing.Count
+
+    # -- Summary ------------------------------------------------------------
     Write-Host ""
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host "  BWS SOFTWARE PACKAGES SUMMARY" -ForegroundColor Cyan
     Write-Host "======================================================" -ForegroundColor Cyan
-    Write-Host "  Total Required:  $($softwareStatus.Total)" -ForegroundColor White
-    Write-Host "  Found:           $($softwareStatus.Found.Count)" -ForegroundColor $(if ($softwareStatus.Found.Count -eq $softwareStatus.Total) { "Green" } else { "Yellow" })
-    Write-Host "  Missing:         $($softwareStatus.Missing.Count)" -ForegroundColor $(if ($softwareStatus.Missing.Count -eq 0) { "Green" } else { "Red" })
-    Write-Host "  Errors:          $($softwareStatus.Errors.Count)" -ForegroundColor $(if ($softwareStatus.Errors.Count -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "  Mac Clients:    $(if ($softwareStatus.HasMacClients) { "$($softwareStatus.MacDeviceCount) device(s)" } else { 'None' })" -ForegroundColor $(if ($softwareStatus.HasMacClients) { "Cyan" } else { "Gray" })
+    Write-Host "  Found:          $($softwareStatus.Found.Count)" -ForegroundColor $(if ($softwareStatus.Missing.Count -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "  Missing:        $($softwareStatus.Missing.Count)" -ForegroundColor $(if ($softwareStatus.Missing.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host "  Errors:         $($softwareStatus.Errors.Count)" -ForegroundColor $(if ($softwareStatus.Errors.Count -eq 0) { "Green" } else { "Yellow" })
     Write-Host "======================================================" -ForegroundColor Cyan
     Write-Host ""
-    
+
     if (-not $CompactView) {
-        if ($softwareStatus.Found.Count -gt 0) {
-            Write-Host "FOUND SOFTWARE PACKAGES:" -ForegroundColor Green
-            Write-Host ""
-            foreach ($app in $softwareStatus.Found) {
-                Write-Host "  [OK] $($app.SoftwareName)" -ForegroundColor Green
-                Write-Host "    Actual Name: $($app.ActualName)" -ForegroundColor Gray
-                Write-Host "    Match Type:  $($app.MatchType)" -ForegroundColor Gray
-                Write-Host ""
-            }
-        }
-        
         if ($softwareStatus.Missing.Count -gt 0) {
-            Write-Host "MISSING SOFTWARE PACKAGES:" -ForegroundColor Red
-            Write-Host ""
-            foreach ($app in $softwareStatus.Missing) {
-                Write-Host "  [X] $($app.SoftwareName)" -ForegroundColor Red
-            }
+            Write-Host "  MISSING:" -ForegroundColor Red
+            $softwareStatus.Missing | ForEach-Object { Write-Host "    [X] $($_.SoftwareName)" -ForegroundColor Red }
             Write-Host ""
         }
-        
         if ($softwareStatus.Errors.Count -gt 0) {
-            Write-Host "ERRORS/WARNINGS:" -ForegroundColor Yellow
-            Write-Host ""
-            $softwareStatus.Errors | ForEach-Object {
-                Write-Host "  - $_" -ForegroundColor Yellow
-            }
+            Write-Host "  ERRORS:" -ForegroundColor Yellow
+            $softwareStatus.Errors | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
             Write-Host ""
         }
     }
-    
-    return @{
-        Status = $softwareStatus
-        CheckPerformed = $true
-    }
+
+    return @{ Status = $softwareStatus; CheckPerformed = $true }
 }
 
 function Test-SharePointConfiguration {
@@ -3016,54 +3560,73 @@ function Test-SharePointConfiguration {
         Write-Host "Checking SharePoint configuration..." -ForegroundColor Yellow
         Write-Host ""
         
-        # Check if SPO Management Shell is available (preferred) or PnP PowerShell
+        # -- PS 5.1 / Desktop enforcement ------------------------------
+        # Microsoft.Online.SharePoint.PowerShell requires Windows PowerShell 5.1
+        # It does NOT support PowerShell 7 / Core.
+        # MS Learn: learn.microsoft.com/powershell/sharepoint/sharepoint-online/connect-sharepoint-online
+        if ($PSVersionTable.PSEdition -ne "Desktop") {
+            Write-Host "  [!] SharePoint module requires Windows PowerShell 5.1 (Desktop edition)." -ForegroundColor Yellow
+            Write-Host "      Current: PS $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))" -ForegroundColor Gray
+            Write-Host "      SharePoint check SKIPPED - please run in powershell.exe (PS 5.1)" -ForegroundColor Yellow
+            $spConfig.Errors += (Write-BWsError -Code "BWS-SYS-010" -Message "SharePoint requires PS 5.1 Desktop (current: $($PSVersionTable.PSEdition))" -Detail "Microsoft.Online.SharePoint.PowerShell only runs on Windows PowerShell 5.1" -Severity "Warning" -CheckStep "PS edition check")
+            return @{ Status = $spConfig; CheckPerformed = $false }
+        }
+
+        # -- Module detection ----------------------------------------------
         $spoModuleAvailable = $false
         $moduleType = $null
-        
-        if (Get-Module -ListAvailable -Name "Microsoft.Online.SharePoint.PowerShell") {
+        if (Get-Module -ListAvailable -Name "Microsoft.Online.SharePoint.PowerShell" -ErrorAction SilentlyContinue) {
             $spoModuleAvailable = $true
             $moduleType = "SPO"
-        } elseif (Get-Module -ListAvailable -Name "PnP.PowerShell") {
-            $spoModuleAvailable = $true
-            $moduleType = "PnP.PowerShell"
         }
-        
+
         if ($spoModuleAvailable) {
-            Write-Host "  [SharePoint] Using $moduleType module" -ForegroundColor Gray
-            
-            # Check if already connected or need to connect
+            Write-Host "  [SharePoint] Using $moduleType module (PS 5.1 Desktop)" -ForegroundColor Gray
+
+            # -- Auto-connect using stored GlobalAdmin session -------------
+            # If Connect-BWsGlobalAdmin ran, $script:SharePointConnected may already be $true.
             $needsConnection = $false
             $tenant = $null
-            
             try {
-                if ($moduleType -eq "SPO") {
-                    $tenant = Get-SPOTenant -ErrorAction Stop
-                } else {
-                    $tenant = Get-PnPTenant -ErrorAction Stop
-                }
+                $tenant = Get-SPOTenant -ErrorAction Stop
+                Write-Host "  [SharePoint] Session active" -ForegroundColor Gray
             } catch {
                 $needsConnection = $true
             }
-            
-            # If not connected and URL provided, try to connect
-            if ($needsConnection -and $SharePointUrl) {
-                Write-Host "  [SharePoint] Not connected, attempting connection to: $SharePointUrl" -ForegroundColor Yellow
-                
-                try {
-                    if ($moduleType -eq "SPO") {
-                        Import-Module Microsoft.Online.SharePoint.PowerShell -DisableNameChecking -ErrorAction Stop
-                        Connect-SPOService -Url $SharePointUrl -ErrorAction Stop
+
+            if ($needsConnection) {
+                # Determine SPO admin URL
+                $spoConnUrl = $SharePointUrl
+                if ([string]::IsNullOrEmpty($spoConnUrl) -and $script:GlobalAdminUPN) {
+                    $upnDomain = ($script:GlobalAdminUPN -split '@' | Select-Object -Last 1) -replace '\.onmicrosoft\.com$',''
+                    if ($upnDomain) { $spoConnUrl = "https://$upnDomain-admin.sharepoint.com" }
+                }
+
+                if (-not [string]::IsNullOrEmpty($spoConnUrl)) {
+                    Write-Host "  [SharePoint] Connecting to: $spoConnUrl" -ForegroundColor Yellow
+                    try {
+                        Import-Module Microsoft.Online.SharePoint.PowerShell -DisableNameChecking -ErrorAction Stop 2>$null 3>$null
+                        # ModernAuth = MFA compatible (MS Learn recommended)
+                        try {
+                            Connect-SPOService -Url $spoConnUrl `
+                                -ModernAuth $true `
+                                -AuthenticationUrl "https://login.microsoftonline.com/organizations" `
+                                -ErrorAction Stop
+                        } catch {
+                            # Fallback for environments without ModernAuth parameter (older module)
+                            Connect-SPOService -Url $spoConnUrl -ErrorAction Stop
+                        }
                         Write-Host "  [SharePoint] Connected successfully" -ForegroundColor Green
                         $tenant = Get-SPOTenant -ErrorAction Stop
-                    } else {
-                        Connect-PnPOnline -Url $SharePointUrl -Interactive -ErrorAction Stop
-                        Write-Host "  [SharePoint] Connected successfully (PnP)" -ForegroundColor Green
-                        $tenant = Get-PnPTenant -ErrorAction Stop
+                        $script:SharePointConnected = $true
+                        $needsConnection = $false
+                    } catch {
+                        Write-Host "  [SharePoint] Connection failed: $($_.Exception.Message)" -ForegroundColor Red
+                        $spConfig.Errors += (Write-BWsError -Code "BWS-SPO-001" -Message "SharePoint connection failed" -Detail $_.Exception.Message -CheckStep "SPO connect")
                     }
-                    $needsConnection = $false
-                } catch {
-                    Write-Host "  [SharePoint] Connection failed: $($_.Exception.Message)" -ForegroundColor Red
-                    $spConfig.Errors += "Failed to connect to SharePoint: $($_.Exception.Message)"
+                } else {
+                    Write-Host "  [SharePoint] No admin URL available. Use -SharePointUrl parameter." -ForegroundColor Yellow
+                    $spConfig.Errors += (Write-BWsError -Code "BWS-SPO-002" -Message "SharePoint admin URL not provided" -Detail "Use -SharePointUrl https://<tenant>-admin.sharepoint.com" -Severity "Warning" -CheckStep "SPO connect")
                 }
             }
             
@@ -3105,7 +3668,7 @@ function Test-SharePointConfiguration {
                     } else {
                         Write-Host " [!] SharePoint: $spSharingCapability (not 'Anyone')" -ForegroundColor Yellow
                         $spConfig.Settings.SharePointExternalSharing = $spSharingCapability.ToString()
-                        $spConfig.Errors += "SharePoint External Sharing should be 'Anyone' (ExternalUserAndGuestSharing)"
+                        $spConfig.Errors += (Write-BWsError -Code "BWS-SPO-010" -Message "SharePoint External Sharing is not 'Anyone' (current: $spSharingCapability)" -Detail "Required: ExternalUserAndGuestSharing. Entra admin centre > SharePoint > Sharing." -CheckStep "[1] External sharing")
                     }
                     
                     # Check OneDrive - SOLL: Only people in your organization (Disabled)
@@ -3199,7 +3762,7 @@ function Test-SharePointConfiguration {
                     } else {
                         Write-Host " [!] ALLOWED (should be 'Block Access')" -ForegroundColor Yellow
                         $spConfig.Settings.LegacyAuthBlocked = $false
-                        $spConfig.Errors += "Apps that don't use modern authentication should be blocked"
+                        $spConfig.Errors += (Write-BWsError -Code "BWS-SPO-020" -Message "Legacy auth not blocked in SharePoint (LegacyAuthProtocolsEnabled=true)" -Detail "Set via SPO admin centre > Access control > Apps using legacy auth." -CheckStep "[3] Legacy auth")
                     }
                     
                 } catch {
@@ -3219,8 +3782,10 @@ function Test-SharePointConfiguration {
             }
             
         } else {
-            Write-Host "  [!] SharePoint PowerShell module not found" -ForegroundColor Yellow
-            $spConfig.Errors += "SharePoint PowerShell module not installed"
+            Write-Host "  [!] Microsoft.Online.SharePoint.PowerShell module not found" -ForegroundColor Yellow
+            Write-Host "      Install with: Install-Module -Name Microsoft.Online.SharePoint.PowerShell" -ForegroundColor Gray
+            Write-Host "      Note: Requires Windows PowerShell 5.1 (Desktop edition)" -ForegroundColor Gray
+            $spConfig.Errors += "Microsoft.Online.SharePoint.PowerShell not installed (requires PS 5.1 Desktop)"
         }
         
         # Determine overall compliance
@@ -3331,16 +3896,36 @@ function Test-TeamsConfiguration {
         
         if ($teamsModuleAvailable) {
             Write-Host "  [Teams] Using MicrosoftTeams module" -ForegroundColor Gray
-            
-            # Check if connected to Teams
+
+            # -- Auto-connect using stored GlobalAdmin session ------------
+            # If Connect-BWsGlobalAdmin ran successfully, $script:TeamsConnected=$true
+            # and the Teams session is already established. If not, try to connect now.
             $teamsConnected = $false
-            
             try {
                 $csConfig = Get-CsTeamsClientConfiguration -ErrorAction Stop
                 $teamsConnected = $true
+                Write-Host "  [Teams] Session active" -ForegroundColor Gray
             } catch {
-                Write-Host "  [Teams] Not connected to Microsoft Teams" -ForegroundColor Yellow
-                Write-Host "  [Teams] Please connect first: Connect-MicrosoftTeams" -ForegroundColor Gray
+                # Not connected - try using stored GlobalAdmin credentials
+                if ($script:GlobalAdminConnected -and $script:GlobalAdminUPN) {
+                    Write-Host "  [Teams] Connecting with GlobalAdmin credentials (-AccountId)..." -ForegroundColor Yellow
+                    try {
+                        # MS Learn: Connect-MicrosoftTeams -AccountId reuses AAD token
+                        $null = Connect-MicrosoftTeams `
+                            -AccountId $script:GlobalAdminUPN `
+                            -TenantId  $script:GlobalAdminTenantId `
+                            -ErrorAction Stop 2>$null 3>$null
+                        $script:TeamsConnected = $true
+                        $teamsConnected = $true
+                        Write-Host "  [Teams] Connected (no additional login required)" -ForegroundColor Green
+                    } catch {
+                        Write-Host "  [Teams] Auto-connect failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                        Write-Host "  [Teams] Please connect manually: Connect-MicrosoftTeams" -ForegroundColor Gray
+                    }
+                } else {
+                    Write-Host "  [Teams] Not connected. Run Prerequisites first (-Full or GUI Prerequisites button)." -ForegroundColor Yellow
+                    Write-Host "  [Teams] Or connect manually: Connect-MicrosoftTeams" -ForegroundColor Gray
+                }
             }
             
             if ($teamsConnected) {
@@ -3363,7 +3948,7 @@ function Test-TeamsConfiguration {
                     } else {
                         Write-Host " [!] ENABLED (unmanaged Teams allowed)" -ForegroundColor Yellow
                         $teamsConfig.Settings.ExternalAccessEnabled = $true
-                        $teamsConfig.Errors += "External access to unmanaged Teams should be disabled"
+                        $teamsConfig.Errors += (Write-BWsError -Code "BWS-TEAMS-010" -Message "External access to unmanaged Teams accounts is enabled (AllowTeamsConsumer=true)" -Detail "Disable in Teams admin centre > External access." -CheckStep "[1] External access")
                     }
                     
                 } catch {
@@ -3469,7 +4054,7 @@ function Test-TeamsConfiguration {
                         Write-Host " [OK] ALL DISABLED" -ForegroundColor Green
                     } else {
                         Write-Host " [!] ENABLED: $($enabledProviders -join ', ')" -ForegroundColor Yellow
-                        $teamsConfig.Errors += "Cloud storage providers must be disabled (ausgeschaltet): $($enabledProviders -join ', ')"
+                        $teamsConfig.Errors += (Write-BWsError -Code "BWS-TEAMS-020" -Message "Cloud storage enabled in Teams: $($enabledProviders -join ', ')" -Detail "Disable in Teams admin centre > Teams apps > Permission policies." -CheckStep "[2] Cloud storage")
                     }
                     
                 } catch {
@@ -3508,7 +4093,7 @@ function Test-TeamsConfiguration {
                         Write-Host " [OK] COMPLIANT" -ForegroundColor Green
                     } else {
                         Write-Host " [!] ISSUES: $($meetingIssues -join ', ')" -ForegroundColor Yellow
-                        $teamsConfig.Errors += "Anonymous users should not be able to join or start meetings"
+                        $teamsConfig.Errors += (Write-BWsError -Code "BWS-TEAMS-030" -Message "Anonymous meeting join/start is enabled ($($meetingIssues -join ', '))" -Detail "Disable in Teams admin centre > Meetings > Meeting policies." -CheckStep "[3] Meeting settings")
                     }
                     
                 } catch {
@@ -3871,6 +4456,7 @@ function Test-UsersAndLicenses {
         Write-Host "  [Users] " -NoNewline -ForegroundColor Gray
         Write-Host "Processing user details..." -NoNewline
         
+        if (-not $allUsers) { $allUsers = @() }
         foreach ($user in $allUsers) {
             $userDetail = @{
                 DisplayName = $user.displayName
@@ -4177,6 +4763,423 @@ function Test-UsersAndLicenses {
     }
 }
 
+function Test-EntraSecurityConfig {
+    <#
+    .SYNOPSIS
+        Checks Entra ID security configuration:
+        1. MDM enrollment policies (Intune automatic enrollment scope)
+        2. grp_UsersWithPriviledge assigned to MS Graph Command Line Tools enterprise app
+        3. PIM eligible role assignments for partner accounts
+        4. Old direct (non-PIM) privileged role assignments + SICT automation app removal
+    .NOTES
+        Microsoft Learn API references (v1.0 / beta):
+
+        MDM policies (beta only):
+          GET /beta/policies/mobileDeviceManagementPolicies
+          Fields: id, displayName, appliesTo (none|all|selected), discoveryUrl
+          Intune app ID: 0000000a-0000-0000-c000-000000000000
+          Source: learn.microsoft.com/graph/api/mobiledevicemanagementpolicies-list
+
+        Enterprise app group assignment (v1.0):
+          GET /v1.0/servicePrincipals?$filter=displayName eq 'Microsoft Graph Command Line Tools'
+          GET /v1.0/servicePrincipals/{id}/appRoleAssignedTo
+          Fields: principalId, principalType, principalDisplayName
+          Best practice: read via appRoleAssignedTo on the resource SP
+          Source: learn.microsoft.com/graph/api/serviceprincipal-list-approleassignedto
+
+        PIM eligible roles (v1.0 - iteration 3, current):
+          GET /v1.0/roleManagement/directory/roleEligibilitySchedules?$expand=roleDefinition,principal
+          Fields: principalId, roleDefinitionId, status, scheduleInfo
+          Source: learn.microsoft.com/graph/api/resources/privilegedidentitymanagementv3-overview
+
+        Direct role assignments (non-PIM, v1.0):
+          GET /v1.0/roleManagement/directory/roleAssignments?$expand=principal,roleDefinition
+          Source: learn.microsoft.com/graph/api/rbacapplication-list-roleassignments
+
+        Service principal lookup (SICT app):
+          GET /v1.0/servicePrincipals?$filter=displayName eq 'SICT'
+          Source: learn.microsoft.com/graph/api/serviceprincipal-list
+    #>
+    param([bool]$CompactView = $false)
+
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  ENTRA ID SECURITY CONFIGURATION CHECK" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    $status = @{
+        # MDM
+        MdmAppliesTo        = $null    # "none"/"all"/"selected"
+        MdmDisplayName      = $null
+        MdmDiscoveryUrl     = $null
+        MdmConfigOk         = $false
+        # Enterprise app group
+        GraphCliSpFound     = $false
+        GraphCliSpId        = $null
+        GrpPriviledgeFound  = $false
+        GrpPriviledgeAssigned = $false
+        # PIM
+        PartnerPimUsers     = @()     # users with PIM eligible roles
+        DirectAdminCount    = 0       # direct permanent role assignments (non-PIM)
+        DirectAdmins        = @()
+        # SICT
+        SictAppFound        = $false
+        SictAppId           = $null
+        SictAppName         = $null
+        # Errors / Warnings
+        Errors              = @()
+        Warnings            = @()
+    }
+
+    try {
+        # Graph connection
+        if (-not (Get-BWsGraphContext)) {
+            try { Connect-BWsGraph -ErrorAction Stop } catch {
+                $status.Errors += (Write-BWsError -Code "BWS-AUTH-001" -Message "Graph connection failed" -Detail $_.Exception.Message -CheckStep "Graph connect")
+                return @{ Status = $status; CheckPerformed = $false }
+            }
+        }
+
+        # =================================================================
+        # CHECK 1: MDM Enrollment Policies
+        # GET /beta/policies/mobileDeviceManagementPolicies
+        # Intune MDM app ID: 0000000a-0000-0000-c000-000000000000
+        # appliesTo must be "all" for automatic enrollment of all users
+        # Source: learn.microsoft.com/graph/api/mobiledevicemanagementpolicies-list
+        # =================================================================
+        Write-Host "  [1/4] MDM enrollment policies (Entra ID -> Mobility)" -ForegroundColor Yellow
+        try {
+            $mdmUri = "https://graph.microsoft.com/beta/policies/mobileDeviceManagementPolicies"
+            $mdmResp = Invoke-BWsBetaGraphRequest -Uri $mdmUri -Method GET -ErrorAction Stop
+            $mdmPolicies = if ($mdmResp.PSObject.Properties['value']) { $mdmResp.value } else { @($mdmResp) }
+            # Microsoft Intune has a well-known app ID
+            $intunePolicy = $mdmPolicies | Where-Object {
+                $_.id -eq "0000000a-0000-0000-c000-000000000000" -or
+                $_.displayName -like "*Intune*" -or
+                $_.displayName -like "*Microsoft Intune*"
+            } | Select-Object -First 1
+            if (-not $intunePolicy) { $intunePolicy = $mdmPolicies | Select-Object -First 1 }
+
+            if ($intunePolicy) {
+                $status.MdmAppliesTo   = $intunePolicy.appliesTo
+                $status.MdmDisplayName = $intunePolicy.displayName
+                $status.MdmDiscoveryUrl = $intunePolicy.discoveryUrl
+                $status.MdmConfigOk    = ($intunePolicy.appliesTo -eq "all")
+
+                $col = if ($status.MdmConfigOk) { "Green" } else { "Yellow" }
+                $ico = if ($status.MdmConfigOk) { "[OK]" } else { "[!]" }
+                Write-Host "    $ico MDM Policy  : $($intunePolicy.displayName)" -ForegroundColor $col
+                Write-Host "         Applies To : $($intunePolicy.appliesTo)  (expected: all)" -ForegroundColor $col
+                if ($intunePolicy.discoveryUrl) {
+                    Write-Host "         Discovery  : $($intunePolicy.discoveryUrl)" -ForegroundColor Gray
+                }
+                if (-not $status.MdmConfigOk) {
+                    $status.Warnings += "MDM enrollment scope is '$($intunePolicy.appliesTo)' - should be 'all' for automatic enrollment"
+                }
+            } else {
+                Write-Host "    [!]  No MDM policy found - Intune auto-enrollment may not be configured" -ForegroundColor Yellow
+                $status.Warnings += "No MDM enrollment policy found"
+            }
+
+            # Also check MAM policies
+            try {
+                $mamUri  = "https://graph.microsoft.com/beta/policies/mobileAppManagementPolicies"
+                $mamResp = Invoke-BWsBetaGraphRequest -Uri $mamUri -Method GET -ErrorAction SilentlyContinue
+                $mamPolicies = if ($mamResp -and $mamResp.PSObject.Properties['value']) { $mamResp.value } else { @() }
+                $intuneMAM = $mamPolicies | Where-Object { $_.displayName -like "*Intune*" } | Select-Object -First 1
+                if ($intuneMAM) {
+                    Write-Host "    [i]  MAM Policy    : $($intuneMAM.displayName) (Applies: $($intuneMAM.appliesTo))" -ForegroundColor Gray
+                }
+            } catch {}
+        } catch {
+            $msg = "MDM policy check failed: $($_.Exception.Message)"
+            if ($_.Exception.Message -match "403|Forbidden") {
+                Write-Host "    [!]  Access denied to /beta/policies/mobileDeviceManagementPolicies" -ForegroundColor Yellow
+                Write-Host "         Requires Policy.Read.All permission" -ForegroundColor Gray
+                $status.Warnings += (Write-BWsError -Code "BWS-AUTH-011" -Message "MDM policy check: access denied (Policy.Read.All required)" -Detail $msg -Severity "Warning" -HttpStatus 403 -CheckStep "[1/4] MDM policies")
+            } else {
+                Write-Host "    [X]  $msg" -ForegroundColor Red
+                $status.Errors += $msg
+            }
+        }
+
+        # =================================================================
+        # CHECK 2: grp_UsersWithPriviledge assigned to MS Graph Command Line Tools
+        # Step 1: GET /v1.0/servicePrincipals?$filter=appId eq '14d82eec-204b-4c2f-b7e8-296a70dab67e'
+        #         (well-known appId of Microsoft Graph Command Line Tools)
+        # Step 2: GET /v1.0/servicePrincipals/{id}/appRoleAssignedTo
+        #         -> check if principalDisplayName contains 'grp_UsersWithPriviledge'
+        # Source: learn.microsoft.com/graph/api/serviceprincipal-list-approleassignedto
+        # =================================================================
+        Write-Host ""
+        Write-Host "  [2/4] grp_UsersWithPriviledge -> MS Graph Command Line Tools" -ForegroundColor Yellow
+        # Microsoft Graph Command Line Tools well-known appId
+        $graphCliAppId = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+        try {
+            $spUri   = "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$graphCliAppId'&`$select=id,displayName,appId"
+            $spResp  = Invoke-BWsGraphRequest -Uri $spUri -Method GET -ErrorAction Stop
+            $graphCliSP = if ($spResp.PSObject.Properties['value']) { $spResp.value | Select-Object -First 1 } else { $null }
+            if ($graphCliSP) {
+                $status.GraphCliSpFound = $true
+                $status.GraphCliSpId   = $graphCliSP.id
+                Write-Host "    [i]  Found SP: $($graphCliSP.displayName) (id: $($graphCliSP.id.Substring(0,8))...)" -ForegroundColor Gray
+
+                # Get all appRoleAssignedTo - best practice per MS Learn
+                $assignUri = "https://graph.microsoft.com/v1.0/servicePrincipals/$($graphCliSP.id)/appRoleAssignedTo"
+                $assignResp = Invoke-BWsGraphPagedRequest -Uri $assignUri
+                $grpAssignment = $assignResp | Where-Object {
+                    $_.principalDisplayName -like "*grp_UsersWithPriviledge*" -or
+                    $_.principalDisplayName -like "*UsersWithPriviledge*" -or
+                    $_.principalDisplayName -like "*grp_Users*Priviledge*"
+                } | Select-Object -First 1
+
+                if ($grpAssignment) {
+                    $status.GrpPriviledgeFound    = $true
+                    $status.GrpPriviledgeAssigned = $true
+                    Write-Host "    [OK] grp_UsersWithPriviledge is assigned to MS Graph Command Line Tools" -ForegroundColor Green
+                    Write-Host "         Group: $($grpAssignment.principalDisplayName)" -ForegroundColor Gray
+                } else {
+                    $status.GrpPriviledgeFound    = $false
+                    $status.GrpPriviledgeAssigned = $false
+                    Write-Host "    [X]  grp_UsersWithPriviledge NOT assigned to MS Graph Command Line Tools" -ForegroundColor Red
+                    Write-Host "         Total assignments found: $($assignResp.Count)" -ForegroundColor Gray
+                    $status.Errors += (Write-BWsError -Code "BWS-SEC-010" -Message "grp_UsersWithPriviledge not assigned to MS Graph Command Line Tools" -Detail "Assign in Entra admin centre > Enterprise apps > Microsoft Graph Command Line Tools > Users and groups." -CheckStep "[2/4] Enterprise app")
+                }
+            } else {
+                Write-Host "    [!]  Microsoft Graph Command Line Tools service principal not found" -ForegroundColor Yellow
+                $status.Warnings += "MS Graph Command Line Tools SP not found in tenant"
+            }
+        } catch {
+            Write-Host "    [!]  Enterprise app check failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            $status.Warnings += "Enterprise app check: $($_.Exception.Message)"
+        }
+
+        # =================================================================
+        # CHECK 3: PIM eligible roles for Partner accounts
+        # GET /v1.0/roleManagement/directory/roleEligibilitySchedules
+        #   ?$expand=roleDefinition,principal&$top=100
+        # Source: learn.microsoft.com/graph/api/resources/privilegedidentitymanagementv3-overview
+        #
+        # Partner accounts are identified by UPN pattern: *@*.onmicrosoft.com
+        # or displayName containing "partner" / "BWS" / "ext"
+        # =================================================================
+        Write-Host ""
+        Write-Host "  [3/4] PIM eligible role assignments for partner accounts" -ForegroundColor Yellow
+        try {
+            $pimUri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilitySchedules" +
+                      "?`$expand=roleDefinition,principal&`$top=100&`$select=id,principalId,roleDefinitionId,status,scheduleInfo"
+            $pimResp = Invoke-BWsGraphRequest -Uri $pimUri -Method GET -ErrorAction Stop
+            $pimSchedules = if ($pimResp.PSObject.Properties['value']) { $pimResp.value } else { @() }
+
+            if ($pimSchedules.Count -gt 0) {
+                Write-Host "    [i]  Total PIM eligible assignments: $($pimSchedules.Count)" -ForegroundColor Gray
+
+                # -------------------------------------------------------
+                # Partner account identification
+                # -------------------------------------------------------
+                # TODO (TA Integration): When a Technical Assessment (TA) is
+                # loaded, replace the generic pattern matching below with the
+                # exact partner account UPNs defined in the TA document.
+                # The TA contains the authoritative list of partner accounts
+                # (e.g. BCID-ADM-Partner@<tenant>.onmicrosoft.com).
+                #
+                # Current fallback: heuristic matching until TA is available.
+                # Matches accounts by UPN/displayName patterns typical for
+                # GDAP / external partner accounts:
+                #   - UPN ending in @*.onmicrosoft.com
+                #   - DisplayName containing "partner", "bws" or "ext"
+                # -------------------------------------------------------
+                $taPartnerUpns = @()  # TODO: populate from TA when available
+
+                $partnerPim = @($pimSchedules | Where-Object {
+                    $upn = if ($_.principal -and $_.principal.PSObject.Properties['userPrincipalName']) { $_.principal.userPrincipalName } else { "" }
+                    $dn  = if ($_.principal -and $_.principal.PSObject.Properties['displayName']) { $_.principal.displayName } else { "" }
+
+                    # Priority 1: exact TA UPN match (used once TA integration is done)
+                    $taMatch = ($taPartnerUpns.Count -gt 0) -and ($taPartnerUpns -contains $upn)
+
+                    # Priority 2: heuristic fallback (until TA is integrated)
+                    $heuristic = $upn -like "*@*.onmicrosoft.com" -or
+                                 $dn  -like "*partner*" -or
+                                 $dn  -like "*bws*" -or
+                                 $dn  -like "*ext*"
+
+                    $taMatch -or $heuristic
+                })
+
+                if ($taPartnerUpns.Count -gt 0) {
+                    Write-Host "    [i]  Partner accounts from TA: $($taPartnerUpns.Count) defined" -ForegroundColor Cyan
+                } else {
+                    Write-Host "    [i]  Partner detection: heuristic (no TA loaded - exact names from TA not yet available)" -ForegroundColor Gray
+                }
+
+                if ($partnerPim.Count -gt 0) {
+                    Write-Host "    [OK] Partner accounts with PIM eligible roles: $($partnerPim.Count)" -ForegroundColor Green
+                    $status.PartnerPimUsers = @($partnerPim | ForEach-Object {
+                        $upn  = if ($_.principal) { $_.principal.userPrincipalName } else { "(unknown)" }
+                        $role = if ($_.roleDefinition) { $_.roleDefinition.displayName } else { $_.roleDefinitionId }
+                        @{ UPN=$upn; Role=$role; Status=$_.status }
+                    })
+                    if (-not $CompactView) {
+                        foreach ($p in ($partnerPim | Select-Object -First 10)) {
+                            $upn  = if ($p.principal) { $p.principal.userPrincipalName } else { "(unknown)" }
+                            $role = if ($p.roleDefinition) { $p.roleDefinition.displayName } else { $p.roleDefinitionId }
+                            Write-Host "         $($upn.PadRight(40)) -> $role" -ForegroundColor Cyan
+                        }
+                    }
+                } else {
+                    Write-Host "    [!]  No partner accounts found in PIM eligible schedules" -ForegroundColor Yellow
+                    Write-Host "         (All PIM schedules are for internal accounts, or PIM is not configured)" -ForegroundColor Gray
+                    $status.Warnings += (Write-BWsError -Code "BWS-SEC-020" -Message "No partner accounts found in PIM eligible roles (heuristic search)" -Detail "Check Entra admin centre > Roles and admins > PIM eligible assignments." -Severity "Warning" -CheckStep "[3/4] PIM partner")
+                }
+
+                # Also report all PIM-eligible admin accounts
+                Write-Host "    [i]  All PIM eligible admin accounts: $($pimSchedules.Count)" -ForegroundColor Gray
+
+            } else {
+                Write-Host "    [!]  No PIM eligible role assignments found" -ForegroundColor Yellow
+                $status.Warnings += "PIM has no eligible role assignments configured"
+            }
+
+            # Check for direct permanent role assignments (non-PIM) - these should be minimal
+            Write-Host ""
+            Write-Host "  [3b] Checking direct (non-PIM) permanent privileged role assignments..." -ForegroundColor Yellow
+            try {
+                # Get privileged role definitions first
+                $privRoles = @("62e90394-69f5-4237-9190-012177145e10", # Global Administrator
+                               "e8611ab8-c189-46e8-94e1-60213ab1f814", # Privileged Role Administrator  
+                               "29232cdf-9323-42fd-ade2-1d097af3e4de", # Exchange Administrator
+                               "f28a1f50-f6e7-4571-818b-6a12f2af6b6c")  # SharePoint Administrator
+                $directUri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments" +
+                             "?`$expand=principal,roleDefinition&`$top=200"
+                $directResp = Invoke-BWsGraphRequest -Uri $directUri -Method GET -ErrorAction Stop
+                $directAssigns = if ($directResp.PSObject.Properties['value']) { $directResp.value } else { @() }
+
+                # Filter to privileged roles with non-PIM (direct) assignments
+                $directAdmin = @($directAssigns | Where-Object {
+                    $rId = $_.roleDefinitionId
+                    $privRoles -contains $rId -and
+                    ($_.directoryScopeId -eq "/" -or -not $_.directoryScopeId)
+                })
+                $status.DirectAdminCount = $directAdmin.Count
+                if ($directAdmin.Count -gt 0) {
+                    Write-Host "    [!]  Direct privileged role assignments found: $($directAdmin.Count)" -ForegroundColor Yellow
+                    Write-Host "         (Best practice: use PIM eligible assignments instead of direct)" -ForegroundColor Gray
+                    $status.DirectAdmins = @($directAdmin | ForEach-Object {
+                        $dn = if ($_.principal) { $_.principal.displayName } else { $_.principalId }
+                        $rn = if ($_.roleDefinition) { $_.roleDefinition.displayName } else { $_.roleDefinitionId }
+                        @{ DisplayName=$dn; Role=$rn }
+                    })
+                    if (-not $CompactView) {
+                        foreach ($d in ($directAdmin | Select-Object -First 5)) {
+                            $dn = if ($d.principal) { $d.principal.displayName } else { $d.principalId }
+                            $rn = if ($d.roleDefinition) { $d.roleDefinition.displayName } else { $d.roleDefinitionId }
+                            Write-Host "         $($dn.PadRight(35)) -> $rn" -ForegroundColor Yellow
+                        }
+                    }
+                    $status.Warnings += (Write-BWsError -Code "BWS-SEC-021" -Message "$($directAdmin.Count) direct permanent admin role(s) found (best practice: use PIM eligible)" -Detail "Accounts: $($status.DirectAdmins | ForEach-Object {$_.DisplayName} | Select-Object -First 5 | Join-String -Separator ', ')" -Severity "Warning" -CheckStep "[3/4] PIM direct roles")
+                } else {
+                    Write-Host "    [OK] No direct permanent privileged role assignments ([OK] all via PIM or no privileged users)" -ForegroundColor Green
+                }
+            } catch {
+                if ($_.Exception.Message -match "403|Forbidden") {
+                    Write-Host "    [!]  Direct role assignment check: access denied (requires RoleManagement.Read.All)" -ForegroundColor Yellow
+                } else {
+                    Write-Host "    [!]  Direct role assignment check: $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+            }
+
+        } catch {
+            if ($_.Exception.Message -match "403|Forbidden") {
+                Write-Host "    [!]  PIM check requires RoleManagement.Read.Directory or Privileged Role Administrator" -ForegroundColor Yellow
+                $status.Warnings += "PIM check: access denied (requires RoleEligibilitySchedule.Read.Directory)"
+            } else {
+                Write-Host "    [X]  PIM check failed: $($_.Exception.Message)" -ForegroundColor Red
+                $status.Errors += (Write-BWsError -Code "BWS-GRAPH-030" -Message "PIM roleEligibilitySchedules query failed" -Detail $_.Exception.Message -CheckStep "[3/4] PIM")
+            }
+        }
+
+        # =================================================================
+        # CHECK 4: SICT Automation App removal
+        # Requirement: "Check if all old privileged roles are removed and
+        #               if SICT the automation app is removed"
+        # GET /v1.0/servicePrincipals?$filter=displayName eq 'SICT'
+        # Source: learn.microsoft.com/graph/api/serviceprincipal-list
+        # =================================================================
+        Write-Host ""
+        Write-Host "  [4/4] SICT automation app removal check" -ForegroundColor Yellow
+        try {
+            # Search for SICT app (multiple possible names)
+            $sictNames = @('SICT', 'SICT Automation', 'SICT App')
+            $sictFound = $null
+            foreach ($name in $sictNames) {
+                $sictUri = "https://graph.microsoft.com/v1.0/servicePrincipals" +
+                           "?`$filter=displayName eq '$name'&`$select=id,displayName,appId,accountEnabled"
+                try {
+                    $sictResp = Invoke-BWsGraphRequest -Uri $sictUri -Method GET -ErrorAction Stop
+                    $sictSP   = if ($sictResp.PSObject.Properties['value']) { $sictResp.value | Select-Object -First 1 } else { $null }
+                    if ($sictSP) { $sictFound = $sictSP; break }
+                } catch {}
+            }
+
+            if ($sictFound) {
+                $status.SictAppFound = $true
+                $status.SictAppId    = $sictFound.id
+                $status.SictAppName  = $sictFound.displayName
+                $isEnabled = $sictFound.accountEnabled -eq $true
+                if ($isEnabled) {
+                    Write-Host "    [X]  SICT automation app FOUND and ENABLED - should be removed" -ForegroundColor Red
+                    Write-Host "         Name: $($sictFound.displayName)  ID: $($sictFound.id.Substring(0,8))..." -ForegroundColor Gray
+                    $status.Errors += (Write-BWsError -Code "BWS-SEC-030" -Message "SICT automation app is still present and enabled" -Detail "Remove in Entra admin centre > Enterprise apps. App: $($sictFound.displayName)" -CheckStep "[4/4] SICT app")
+                } else {
+                    Write-Host "    [!]  SICT automation app found but DISABLED" -ForegroundColor Yellow
+                    Write-Host "         Name: $($sictFound.displayName) - consider removing it completely" -ForegroundColor Gray
+                    $status.Warnings += "SICT automation app is present (disabled) - consider removing"
+                }
+            } else {
+                Write-Host "    [OK] SICT automation app not found (removed or never existed)" -ForegroundColor Green
+            }
+        } catch {
+            Write-Host "    [!]  SICT app check failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            $status.Warnings += "SICT app check: $($_.Exception.Message)"
+        }
+
+    } catch {
+        $status.Errors += "Unexpected error: $($_.Exception.Message)"
+    }
+
+    # -- Summary -----------------------------------------------------------
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  SECURITY CONFIGURATION SUMMARY" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  MDM Enrollment Scope  : $(if ($status.MdmAppliesTo) { $status.MdmAppliesTo.ToUpper() } else { 'Unknown' })" -ForegroundColor $(if ($status.MdmConfigOk) { "Green" } elseif ($status.MdmAppliesTo) { "Yellow" } else { "Gray" })
+    Write-Host "  Graph CLI Group Assign: $(if ($status.GrpPriviledgeAssigned) { 'OK - grp_UsersWithPriviledge assigned' } elseif ($status.GraphCliSpFound) { 'MISSING - not assigned' } else { 'SP not found' })" -ForegroundColor $(if ($status.GrpPriviledgeAssigned) { "Green" } elseif ($status.GraphCliSpFound) { "Red" } else { "Yellow" })
+    Write-Host "  PIM Partner Accounts  : $($status.PartnerPimUsers.Count) with eligible roles" -ForegroundColor $(if ($status.PartnerPimUsers.Count -gt 0) { "Green" } else { "Yellow" })
+    Write-Host "  Direct Perm. Admin    : $($status.DirectAdminCount)" -ForegroundColor $(if ($status.DirectAdminCount -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "  SICT App Removed      : $(if (-not $status.SictAppFound) { 'Yes ([OK])' } else { 'NO - still present ([X])' })" -ForegroundColor $(if (-not $status.SictAppFound) { "Green" } else { "Red" })
+    Write-Host "  Errors                : $($status.Errors.Count)" -ForegroundColor $(if ($status.Errors.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host "  Warnings              : $($status.Warnings.Count)" -ForegroundColor $(if ($status.Warnings.Count -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    if (-not $CompactView) {
+        if ($status.Errors.Count -gt 0) {
+            Write-Host "  ERRORS:" -ForegroundColor Red
+            $status.Errors   | ForEach-Object { Write-Host "    - $_" -ForegroundColor Red }
+            Write-Host ""
+        }
+        if ($status.Warnings.Count -gt 0) {
+            Write-Host "  WARNINGS:" -ForegroundColor Yellow
+            $status.Warnings | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
+            Write-Host ""
+        }
+    }
+
+    return @{ Status = $status; CheckPerformed = $true }
+}
+
 function Export-HTMLReport {
     param(
         [string]$BCID,
@@ -4191,6 +5194,7 @@ function Export-HTMLReport {
         [object]$SharePointResults,
         [object]$TeamsResults,
         [object]$UserLicenseResults,
+        [object]$SecurityResults,
         [bool]$OverallStatus
     )
     
@@ -4506,6 +5510,8 @@ function Export-HTMLReport {
                 <li><a href="#sharepoint">&rarr; SharePoint Configuration</a></li>
                 <li><a href="#teams">&rarr; Teams Configuration</a></li>
                 <li><a href="#users">&rarr; Users, Licenses & Privileged Roles</a></li>
+                <li><a href="#security">&rarr; Security Configuration</a></li>
+                <li><a href="#errorlog">&rarr; Error Log</a></li>
             </ul>
         </div>
         
@@ -4533,11 +5539,11 @@ function Export-HTMLReport {
 
     # 2. Intune Policies
     if ($IntuneResults -and $IntuneResults.CheckPerformed) {
-        $intuneClass = if ($IntuneResults.Missing.Count -eq 0) { "success" } else { "error" }
+        $intuneClass = if ($IntuneResults.AllFound -eq $true) { "success" } elseif ($IntuneResults.MissingCount -gt 0) { "error" } else { "warning" }
         $html += @"
                     <div class="summary-card $intuneClass">
                         <h3>Intune Policies</h3>
-                        <div class="value">$($IntuneResults.Found.Count)/$($IntuneResults.Total)</div>
+                        <div class="value">$($IntuneResults.FoundCount)/$($IntuneResults.Total)</div>
                         <p>Found</p>
                     </div>
 "@
@@ -4545,39 +5551,52 @@ function Export-HTMLReport {
 
     # 3. Entra ID Connect
     if ($EntraIDResults -and $EntraIDResults.CheckPerformed) {
-        $entraClass = if ($EntraIDResults.Status.IsRunning) { "success" } else { "error" }
-        $entraDetails = ""
-        if ($EntraIDResults.Status.PasswordHashSync -eq $true) {
-            $entraDetails = "PW Sync [OK]"
-        } elseif ($EntraIDResults.Status.IsRunning) {
-            $entraDetails = "Active"
-        } else {
-            $entraDetails = "Inactive"
-        }
+        $entraClass = if ($EntraIDResults.Status.SyncEnabled -and $EntraIDResults.Status.SyncActive -and $EntraIDResults.Status.Errors.Count -eq 0) { "success" } `
+                      elseif ($EntraIDResults.Status.SyncEnabled) { "warning" } else { "error" }
+        $entraDetails = if ($EntraIDResults.Status.SyncActive -and $EntraIDResults.Status.PasswordSyncEnabled) { "Sync OK | PHS On" } `
+                        elseif ($EntraIDResults.Status.SyncActive) { "Sync Active" } `
+                        elseif ($EntraIDResults.Status.SyncEnabled) { "Sync Stale" } `
+                        else { "Sync Not Enabled" }
         $html += @"
                     <div class="summary-card $entraClass">
                         <h3>Entra ID Sync</h3>
-                        <div class="value">$(if ($EntraIDResults.Status.IsRunning) { '&#10003;' } else { '&#10007;' })</div>
+                        <div class="value">$(if ($EntraIDResults.Status.SyncActive) { '&#10003;' } else { '&#10007;' })</div>
                         <p>$entraDetails</p>
+                    </div>
+"@
+    }
+
+    # Security Config card
+    if ($SecurityResults -and $SecurityResults.CheckPerformed) {
+        $secCardClass = if ($SecurityResults.Status.Errors.Count -eq 0 -and $SecurityResults.Status.GrpPriviledgeAssigned -and -not $SecurityResults.Status.SictAppFound) { "success" } `
+                        elseif ($SecurityResults.Status.Errors.Count -gt 0) { "error" } else { "warning" }
+        $secCardDetail = if (-not $SecurityResults.Status.SictAppFound -and $SecurityResults.Status.GrpPriviledgeAssigned) { "MDM OK | Group OK" } `
+                         elseif ($SecurityResults.Status.Errors.Count -gt 0) { "$($SecurityResults.Status.Errors.Count) Error(s)" } `
+                         else { "Warnings present" }
+        $html += @"
+                    <div class="summary-card $secCardClass">
+                        <h3>Security Config</h3>
+                        <div class="value">$(if ($SecurityResults.Status.Errors.Count -eq 0) { '&#10003;' } else { '&#10007;' })</div>
+                        <p>$secCardDetail</p>
                     </div>
 "@
     }
 
     # 4. Hybrid Azure AD Join & Intune Connectors
     if ($IntuneConnResults -and $IntuneConnResults.CheckPerformed) {
-        $connectorClass = if ($IntuneConnResults.Status.IsConnected -and $IntuneConnResults.Status.Errors.Count -eq 0) { "success" } elseif ($IntuneConnResults.Status.IsConnected) { "warning" } else { "error" }
-        $connectorDetails = ""
-        if ($IntuneConnResults.Status.ADServerName) {
-            $connectorDetails = "AD Server [OK]"
-        } elseif ($IntuneConnResults.Status.IsConnected) {
-            $connectorDetails = "Active"
+        $connectorClass = if ($IntuneConnResults.Status.ActiveCount -gt 0 -and $IntuneConnResults.Status.DeprecatedCount -eq 0 -and $IntuneConnResults.Status.Errors.Count -eq 0) { "success" } `
+                          elseif ($IntuneConnResults.Status.ActiveCount -gt 0) { "warning" } else { "error" }
+        $connectorDetails = if ($IntuneConnResults.Status.DeprecatedCount -gt 0) {
+            "Active - $($IntuneConnResults.Status.DeprecatedCount) deprecated!"
+        } elseif ($IntuneConnResults.Status.ActiveCount -gt 0) {
+            "Active ($($IntuneConnResults.Status.ActiveCount) connector(s))"
         } else {
-            $connectorDetails = "Not Connected"
+            "Not Connected"
         }
         $html += @"
                     <div class="summary-card $connectorClass">
-                        <h3>Hybrid Join & Connectors</h3>
-                        <div class="value">$(if ($IntuneConnResults.Status.IsConnected) { '&#10003;' } else { '&#10007;' })</div>
+                        <h3>Intune AD Connector</h3>
+                        <div class="value">$(if ($IntuneConnResults.Status.ActiveCount -gt 0) { '&#10003;' } else { '&#10007;' })</div>
                         <p>$connectorDetails</p>
                     </div>
 "@
@@ -4687,38 +5706,42 @@ function Export-HTMLReport {
 
     # Azure Resources Section
     if ($AzureResults) {
+        $azTotal   = $AzureResults.Total
+        $azFound   = $AzureResults.Found.Count
+        $azMissing = $AzureResults.Missing.Count
+        $azErrors  = if ($AzureResults.Errors) { $AzureResults.Errors.Count } else { 0 }
         $html += @"
             <div class="section" id="azure">
                 <h2><span class="section-icon">&#9729;</span>Azure Resources</h2>
+                <ul class="info-list">
+                    <li><strong>Total expected:</strong> $azTotal</li>
+                    <li><strong>Found:</strong> <span class="$(if ($azFound -eq $azTotal) {'status-found'} else {'status-warning'})">$azFound</span></li>
+                    <li><strong>Missing:</strong> <span class="$(if ($azMissing -eq 0) {'status-found'} else {'status-error'})">$azMissing</span></li>
+                    $(if ($azErrors -gt 0) { "<li><strong>Query errors:</strong> <span class='status-warning'>$azErrors</span></li>" })
+                </ul>
                 <table>
                     <thead>
                         <tr>
                             <th>Status</th>
-                            <th>Resource Type</th>
+                            <th>Category</th>
+                            <th>Sub-Category</th>
                             <th>Resource Name</th>
+                            <th>Resource Group</th>
+                            <th>Location</th>
                         </tr>
                     </thead>
                     <tbody>
 "@
-
-        foreach ($resource in $AzureResults.Found) {
-            $html += @"
-                        <tr>
-                            <td><span class="status-icon status-found">&#10003;</span></td>
-                            <td>$($resource.Type)</td>
-                            <td>$($resource.Name)</td>
-                        </tr>
-"@
+        foreach ($resource in ($AzureResults.Found | Sort-Object Category, SubCategory)) {
+            $html += "                        <tr><td><span class='status-icon status-found'>&#10003;</span></td><td>$($resource.Category)</td><td style='color:#aaa;'>$($resource.SubCategory)</td><td><strong>$($resource.Name)</strong></td><td style='color:#aaa;'>$($resource.ResourceGroupName)</td><td style='color:#aaa;'>$($resource.Location)</td></tr>`n"
         }
-
-        foreach ($resource in $AzureResults.Missing) {
-            $html += @"
-                        <tr>
-                            <td><span class="status-icon status-missing">&#10007;</span></td>
-                            <td>$($resource.Type)</td>
-                            <td>$($resource.Name)</td>
-                        </tr>
-"@
+        foreach ($resource in ($AzureResults.Missing | Sort-Object Category, SubCategory)) {
+            $html += "                        <tr style='background:rgba(220,60,60,0.1);'><td><span class='status-icon status-missing'>&#10007;</span></td><td>$($resource.Category)</td><td style='color:#aaa;'>$($resource.SubCategory)</td><td><strong>$($resource.Name)</strong></td><td colspan='2' style='color:#888;'><em>Not found in subscription</em></td></tr>`n"
+        }
+        if ($AzureResults.Errors) {
+            foreach ($resource in $AzureResults.Errors) {
+                $html += "                        <tr style='background:rgba(220,160,0,0.08);'><td><span class='status-icon status-warning'>&#9888;</span></td><td>$($resource.Category)</td><td style='color:#aaa;'>$($resource.SubCategory)</td><td><strong>$($resource.Name)</strong></td><td colspan='2' style='color:#f0a050;font-size:11px;'>$($resource.ErrorMessage)</td></tr>`n"
+            }
         }
 
         $html += @"
@@ -4733,34 +5756,36 @@ function Export-HTMLReport {
         $html += @"
             <div class="section" id="intune">
                 <h2><span class="section-icon">&#128274;</span>Intune Policies</h2>
+                <ul class="info-list">
+                    <li><strong>Required:</strong> $($IntuneResults.Total)</li>
+                    <li><strong>Found:</strong> <span class="$(if ($IntuneResults.FoundCount -eq $IntuneResults.Total) { 'status-found' } else { 'status-warning' })">$($IntuneResults.FoundCount)</span></li>
+                    <li><strong>Missing:</strong> <span class="$(if ($IntuneResults.MissingCount -eq 0) { 'status-found' } else { 'status-error' })">$($IntuneResults.MissingCount)</span></li>
+                    <li><strong>All policies found:</strong> $(if ($IntuneResults.AllFound) { '<span class="status-found">&#10003; Yes</span>' } else { '<span class="status-error">&#10007; No</span>' })</li>
+                    $(if ($IntuneResults.Errors.Count -gt 0) { "<li><strong>Retrieval errors:</strong> <span class='status-warning'>$($IntuneResults.Errors.Count)</span></li>" })
+                </ul>
                 <table>
                     <thead>
                         <tr>
-                            <th>Status</th>
+                            <th>Found</th>
                             <th>Policy Name</th>
-                            <th>Match Type</th>
+                            <th>Endpoint</th>
+                            <th>Policy ID</th>
                         </tr>
                     </thead>
                     <tbody>
 "@
 
-        foreach ($policy in $IntuneResults.Found) {
-            $matchType = if ($policy.MatchType) { $policy.MatchType } else { "Exact" }
+        foreach ($policy in $IntuneResults.PolicyResults) {
+            $statusIcon  = if ($policy.Found) { '<span class="status-icon status-found">&#10003;</span>' } else { '<span class="status-icon status-missing">&#10007;</span>' }
+            $rowStyle    = if (-not $policy.Found) { ' style="background:#1e0a0a;"' } else { '' }
+            $endpointTxt = if ($policy.Endpoint) { $policy.Endpoint } else { '-' }
+            $idTxt       = if ($policy.PolicyId)  { "<span style='font-size:11px;color:#777;'>$($policy.PolicyId)</span>" } else { '-' }
             $html += @"
-                        <tr>
-                            <td><span class="status-icon status-found">&#10003;</span></td>
+                        <tr$rowStyle>
+                            <td>$statusIcon</td>
                             <td>$($policy.PolicyName)</td>
-                            <td>$matchType</td>
-                        </tr>
-"@
-        }
-
-        foreach ($policy in $IntuneResults.Missing) {
-            $html += @"
-                        <tr>
-                            <td><span class="status-icon status-missing">&#10007;</span></td>
-                            <td>$($policy.PolicyName)</td>
-                            <td>Not Found</td>
+                            <td style="font-size:12px; color:#8ab4f8;">$endpointTxt</td>
+                            <td>$idTxt</td>
                         </tr>
 "@
         }
@@ -4768,54 +5793,67 @@ function Export-HTMLReport {
         $html += @"
                     </tbody>
                 </table>
-            </div>
 "@
+        if ($IntuneResults.Errors.Count -gt 0) {
+            $html += @"
+                <h3>Retrieval Errors:</h3>
+                <ul class="info-list">
+"@
+            foreach ($e in $IntuneResults.Errors) {
+                $html += "                    <li><span class='status-warning'>&#9888;</span> $e</li>`n"
+            }
+            $html += "                </ul>`n"
+        }
+
+        $html += "            </div>`n"
     }
 
     # BWS Software Packages Section
     if ($SoftwareResults -and $SoftwareResults.CheckPerformed) {
+        $sw = $SoftwareResults.Status
+        $swFound   = $sw.Found.Count
+        $swMissing = $sw.Missing.Count
+        $swTotal   = $swFound + $swMissing
         $html += @"
             <div class="section" id="software">
                 <h2><span class="section-icon">&#128230;</span>BWS Standard Software Packages</h2>
+                <ul class="info-list">
+                    <li><strong>Total Required:</strong> $swTotal</li>
+                    <li><strong>Found:</strong> <span class="$(if ($swFound -eq $swTotal) {'status-found'} else {'status-warning'})">$swFound</span></li>
+                    <li><strong>Missing:</strong> <span class="$(if ($swMissing -eq 0) {'status-found'} else {'status-error'})">$swMissing</span></li>
+                    <li><strong>Mac Clients Detected:</strong> $(if ($sw.HasMacClients) { "<span class='status-found'>&#10003; Yes ($($sw.MacDeviceCount) devices)</span>" } else { '<span style="color:#888;">No macOS devices in Intune</span>' })</li>
+                    $(if ($sw.HasMacClients) {
+                        "<li><strong>BeyondTrust (Mac):</strong> $(if ($sw.BeyondTrustOk) { '<span class=''status-found''>&#10003; Deployed</span>' } else { '<span class=''status-error''>&#10007; NOT deployed</span>' })</li>"
+                    })
+                    $(if ($sw.HasMacClients) {
+                        "<li><strong>Printix (Mac):</strong> $(if ($sw.PrintixOk) { '<span class=''status-found''>&#10003; Deployed</span>' } else { '<span class=''status-error''>&#10007; NOT deployed</span>' })</li>"
+                    })
+                </ul>
+                <h3 style="margin-top:14px;">Package Details:</h3>
                 <table>
                     <thead>
                         <tr>
                             <th>Status</th>
-                            <th>Required Software</th>
-                            <th>Actual Name</th>
+                            <th>Required Package</th>
+                            <th>Found As</th>
                             <th>Match Type</th>
                         </tr>
                     </thead>
                     <tbody>
 "@
-
         foreach ($app in $SoftwareResults.Status.Found) {
-            $html += @"
-                        <tr>
-                            <td><span class="status-icon status-found">&#10003;</span></td>
-                            <td>$($app.SoftwareName)</td>
-                            <td>$($app.ActualName)</td>
-                            <td>$($app.MatchType)</td>
-                        </tr>
-"@
+            $html += "                        <tr><td><span class='status-icon status-found'>&#10003;</span></td><td>$($app.SoftwareName)</td><td>$($app.ActualName)</td><td>$($app.MatchType)</td></tr>`n"
         }
-
         foreach ($app in $SoftwareResults.Status.Missing) {
-            $html += @"
-                        <tr>
-                            <td><span class="status-icon status-missing">&#10007;</span></td>
-                            <td>$($app.SoftwareName)</td>
-                            <td>Not Found</td>
-                            <td>-</td>
-                        </tr>
-"@
+            $html += "                        <tr style='background:rgba(220,60,60,0.08);'><td><span class='status-icon status-missing'>&#10007;</span></td><td><strong>$($app.SoftwareName)</strong></td><td><em style='color:#888;'>Not found in Intune</em></td><td>-</td></tr>`n"
         }
-
-        $html += @"
-                    </tbody>
-                </table>
-            </div>
-"@
+        $html += "                    </tbody></table>`n"
+        if ($SoftwareResults.Status.Errors.Count -gt 0) {
+            $html += "                <h3>Errors:</h3><ul class='info-list'>`n"
+            foreach ($e in $SoftwareResults.Status.Errors) { $html += "                    <li><span class='status-error'>&#9888;</span> $e</li>`n" }
+            $html += "                </ul>`n"
+        }
+        $html += "            </div>`n"
     }
 
     # SharePoint Configuration Section
@@ -4891,8 +5929,15 @@ function Export-HTMLReport {
                     <li><strong>Anonymous Users Can Start Meeting:</strong> $(if ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq "Disabled") { '<span class="status-found">&#10003; Disabled (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.AnonymousUsersCanStartMeeting -eq "Enabled") { '<span class="status-error">&#10007; Enabled (Non-Compliant)</span>' } else { '<span class="status-error">&#9888; Check not performed</span>' })</li>
                     <li><strong>Who Can Present:</strong> $(if ($TeamsResults.Status.Settings.DefaultPresenterRole -eq 'EveryoneUserOverride') { '<span class="status-found">&#10003; Everyone (Compliant)</span>' } elseif ($TeamsResults.Status.Settings.DefaultPresenterRole) { "<span class='status-error'>&#10007; $($TeamsResults.Status.Settings.DefaultPresenterRole) (Non-Compliant)</span>" } else { '<span class="status-error">&#9888; Check not performed</span>' })</li>
                 </ul>
-            </div>
 "@
+        if ($TeamsResults.Status.Errors -and $TeamsResults.Status.Errors.Count -gt 0) {
+            $html += "                <h3>Errors:</h3><ul class='info-list'>`n"
+            foreach ($e in $TeamsResults.Status.Errors) {
+                $html += "                    <li><span class='status-error'>&#9888;</span> $e</li>`n"
+            }
+            $html += "                </ul>`n"
+        }
+        $html += "            </div>`n"
     } elseif ($TeamsResults) {
         # Teams check was attempted but not performed
         $html += @"
@@ -4909,158 +5954,149 @@ function Export-HTMLReport {
 
     # Entra ID Connect Section
     if ($EntraIDResults -and $EntraIDResults.CheckPerformed) {
+        $entraClass = if ($EntraIDResults.Status.SyncEnabled -and $EntraIDResults.Status.SyncActive -and $EntraIDResults.Status.Errors.Count -eq 0) { "success" } `
+                      elseif ($EntraIDResults.Status.SyncEnabled) { "warning" } else { "error" }
         $html += @"
             <div class="section" id="entra">
                 <h2><span class="section-icon">&#128279;</span>Entra ID Connect</h2>
                 <ul class="info-list">
-                    <li><strong>Sync Enabled:</strong> $(if ($EntraIDResults.Status.IsInstalled) { '<span class="status-found">&#10003; Yes</span>' } else { '<span class="status-missing">&#10007; No</span>' })</li>
-                    <li><strong>Sync Active:</strong> $(if ($EntraIDResults.Status.IsRunning) { '<span class="status-found">&#10003; Yes</span>' } else { '<span class="status-missing">&#10007; No</span>' })</li>
-"@
-        if ($EntraIDResults.Status.LastSyncTime) {
-            $html += @"
-                    <li><strong>Last Sync:</strong> $($EntraIDResults.Status.LastSyncTime)</li>
-"@
-        }
-        if ($EntraIDResults.Status.PasswordHashSync -ne $null) {
-            $passwordSyncIcon = if ($EntraIDResults.Status.PasswordHashSync -eq $true) { '[OK]' } elseif ($EntraIDResults.Status.PasswordHashSync -eq $false) { '[!]' } else { '?' }
-            $passwordSyncClass = if ($EntraIDResults.Status.PasswordHashSync -eq $true) { 'status-found' } elseif ($EntraIDResults.Status.PasswordHashSync -eq $false) { 'status-error' } else { 'status-missing' }
-            $passwordSyncText = if ($EntraIDResults.Status.PasswordHashSync -eq $true) { 'Enabled' } elseif ($EntraIDResults.Status.PasswordHashSync -eq $false) { 'Disabled' } else { 'Unknown' }
-            $html += @"
-                    <li><strong>Password Hash Sync:</strong> <span class="$passwordSyncClass">$passwordSyncIcon $passwordSyncText</span></li>
-"@
-        }
-        if ($EntraIDResults.Status.DeviceWritebackEnabled -ne $null) {
-            $deviceSyncIcon = if ($EntraIDResults.Status.DeviceWritebackEnabled -eq $true) { '[OK]' } else { '[!]' }
-            $deviceSyncClass = if ($EntraIDResults.Status.DeviceWritebackEnabled -eq $true) { 'status-found' } else { 'status-error' }
-            $deviceSyncText = if ($EntraIDResults.Status.DeviceWritebackEnabled -eq $true) { 'Active' } elseif ($EntraIDResults.Status.DeviceWritebackEnabled -eq $false) { 'No Devices' } else { 'Unknown' }
-            $html += @"
-                    <li><strong>Device Hybrid Sync:</strong> <span class="$deviceSyncClass">$deviceSyncIcon $deviceSyncText</span></li>
-"@
-        }
-        if ($EntraIDResults.Status.TotalUsers -gt 0) {
-            $licenseIcon = if ($EntraIDResults.Status.UnlicensedUsers -eq 0) { '[OK]' } else { '[!]' }
-            $licenseClass = if ($EntraIDResults.Status.UnlicensedUsers -eq 0) { 'status-found' } else { 'status-error' }
-            $html += @"
-                    <li><strong>Licensed Users:</strong> <span class="$licenseClass">$licenseIcon $($EntraIDResults.Status.LicensedUsers)/$($EntraIDResults.Status.TotalUsers)</span></li>
-"@
-            if ($EntraIDResults.Status.UnlicensedUsers -gt 0) {
-                $html += @"
-                    <li><strong>Unlicensed Users:</strong> <span class="status-error">&#9888; $($EntraIDResults.Status.UnlicensedUsers)</span></li>
-"@
-            }
-        }
-        if ($EntraIDResults.Status.SyncErrors.Count -gt 0) {
-            $html += @"
-                    <li><strong>Errors/Warnings:</strong> <span class="status-error">$($EntraIDResults.Status.SyncErrors.Count)</span></li>
-"@
-        }
-        $html += @"
+                    $(if ($EntraIDResults.Status.TenantDisplayName) { "<li><strong>Tenant Name:</strong> $($EntraIDResults.Status.TenantDisplayName)</li>" })
+                    <li><strong>Sync Enabled:</strong>
+                        $(if ($EntraIDResults.Status.SyncEnabled) { '<span class="status-found">&#10003; Yes</span>' } else { '<span class="status-missing">&#10007; No</span>' })</li>
+                    <li><strong>Sync Active (&lt; 3h):</strong>
+                        $(if ($EntraIDResults.Status.SyncActive) { '<span class="status-found">&#10003; Yes</span>' } else { '<span class="status-error">&#10007; No</span>' })</li>
+                    <li><strong>Sync Age Status:</strong>
+                        $(if ($EntraIDResults.Status.SyncAgeStatus -eq "OK") { '<span class="status-found">OK</span>' } elseif ($EntraIDResults.Status.SyncAgeStatus -eq "Warning") { '<span class="status-warning">Warning</span>' } elseif ($EntraIDResults.Status.SyncAgeStatus -eq "Error") { '<span class="status-error">Error</span>' } else { '<span class="status-missing">Unknown</span>' })</li>
+                    $(if ($EntraIDResults.Status.LastSyncDateTime) { "<li><strong>Last Sync:</strong> $($EntraIDResults.Status.LastSyncDateTime)$(if ($EntraIDResults.Status.SyncAgeMinutes) { ' (' + $EntraIDResults.Status.SyncAgeMinutes + ' min ago)' })</li>" })
+                    $(if ($EntraIDResults.Status.LastPasswordSyncDateTime) { "<li><strong>Last Password Sync:</strong> $($EntraIDResults.Status.LastPasswordSyncDateTime)</li>" })
+                    $(if ($EntraIDResults.Status.OnPremDomains -and $EntraIDResults.Status.OnPremDomains.Count -gt 0) { "<li><strong>On-prem Domains:</strong> $($EntraIDResults.Status.OnPremDomains -join ', ')</li>" })
+                    $(if ($EntraIDResults.Status.VerifiedDomains -and $EntraIDResults.Status.VerifiedDomains.Count -gt 0) { "<li><strong>Verified Domains:</strong> $($EntraIDResults.Status.VerifiedDomains -join ', ')</li>" })
                 </ul>
-            </div>
 "@
+        # Feature flags table
+        if ($EntraIDResults.Status.PasswordSyncEnabled -ne $null) {
+            $html += @"
+                <h3>Sync Feature Flags <small style='color:#888;font-size:12px;'>(onPremisesDirectorySynchronization.features)</small></h3>
+                <table style='width:100%;border-collapse:collapse;font-size:13px;'>
+                    <thead><tr style='background:#1a2540;color:#8ab4f8;'>
+                        <th style='padding:6px 10px;text-align:left;'>Feature</th>
+                        <th style='padding:6px 10px;text-align:left;'>Status</th>
+                    </tr></thead>
+                    <tbody>
+"@
+            $featureRows = @(
+                @{ Label="Password Hash Sync";     Val=$EntraIDResults.Status.PasswordSyncEnabled      },
+                @{ Label="Password Writeback";     Val=$EntraIDResults.Status.PasswordWritebackEnabled },
+                @{ Label="Device Writeback";       Val=$EntraIDResults.Status.DeviceWritebackEnabled   },
+                @{ Label="Group Writeback";        Val=$EntraIDResults.Status.GroupWritebackEnabled    },
+                @{ Label="User Writeback";         Val=$EntraIDResults.Status.UserWritebackEnabled     },
+                @{ Label="Directory Extensions";   Val=$EntraIDResults.Status.DirectoryExtensionsEnabled }
+            )
+            foreach ($fr in $featureRows) {
+                $fIcon  = if ($fr.Val -eq $true) { '<span class="status-found">&#10003; Enabled</span>' } `
+                          elseif ($fr.Val -eq $false) { '<span style="color:#666;">&#9675; Disabled</span>' } `
+                          else { '<span class="status-missing">Unknown</span>' }
+                $html += "                    <tr><td style='padding:5px 10px;'>$($fr.Label)</td><td style='padding:5px 10px;'>$fIcon</td></tr>`n"
+            }
+            $html += "                    </tbody></table>`n"
+        }
+        # Errors and warnings
+        if ($EntraIDResults.Status.Errors.Count -gt 0 -or $EntraIDResults.Status.Warnings.Count -gt 0) {
+            $html += "                <h3>Errors &amp; Warnings:</h3><ul class='info-list'>`n"
+            foreach ($e in $EntraIDResults.Status.Errors)   { $html += "                    <li><span class='status-error'>&#9888; Error:</span> $e</li>`n" }
+            foreach ($w in $EntraIDResults.Status.Warnings) { $html += "                    <li><span class='status-warning'>&#9888; Warning:</span> $w</li>`n" }
+            $html += "                </ul>`n"
+        }
+        $html += "            </div>`n"
     }
 
     # Hybrid Join Section
     if ($IntuneConnResults -and $IntuneConnResults.CheckPerformed) {
+        $connSectionClass = if ($IntuneConnResults.Status.ActiveCount -gt 0 -and $IntuneConnResults.Status.DeprecatedCount -eq 0 -and $IntuneConnResults.Status.Errors.Count -eq 0) { "section-ok" } `
+                            elseif ($IntuneConnResults.Status.ActiveCount -gt 0) { "section-warning" } else { "section-error" }
         $html += @"
             <div class="section" id="hybrid">
-                <h2><span class="section-icon">&#128272;</span>Hybrid Azure AD Join & Intune Connectors</h2>
+                <h2><span class="section-icon">&#128272;</span>Intune Connector for Active Directory</h2>
                 <ul class="info-list">
-                    <li><strong>Check Performed:</strong> <span class="status-found">&#10003; Yes</span></li>
-                    <li><strong>NDES Connector Active:</strong> $(if ($IntuneConnResults.Status.IsConnected) { '<span class="status-found">&#10003; Yes</span>' } else { '<span class="status-error">&#10007; No</span>' })</li>
-                    <li><strong>Active Connectors:</strong> $($IntuneConnResults.Status.Connectors.Count)</li>
-                    <li><strong>Errors/Warnings:</strong> $(if ($IntuneConnResults.Status.Errors.Count -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($IntuneConnResults.Status.Errors.Count)</span>" })</li>
+                    <li><strong>Connector state:</strong>
+                        $(if ($IntuneConnResults.Status.ActiveCount -gt 0) { '<span class="status-found">&#10003; Active</span>' } else { '<span class="status-error">&#10007; Not Connected</span>' })</li>
+                    <li><strong>Total configured:</strong> $($IntuneConnResults.Status.ConnectorCount)</li>
+                    <li><strong>Active:</strong> <span class="$(if ($IntuneConnResults.Status.ActiveCount -gt 0) { 'status-found' } else { 'status-error' })">$($IntuneConnResults.Status.ActiveCount)</span></li>
+                    <li><strong>Inactive:</strong> <span class="$(if ($IntuneConnResults.Status.InactiveCount -gt 0) { 'status-warning' } else { 'status-found' })">$($IntuneConnResults.Status.InactiveCount)</span></li>
+                    <li><strong>Deprecated versions:</strong>
+                        $(if ($IntuneConnResults.Status.DeprecatedCount -gt 0) { "<span class='status-error'>&#9888; $($IntuneConnResults.Status.DeprecatedCount) - UPDATE REQUIRED (min: 6.2501.2000.5)</span>" } else { '<span class="status-found">&#10003; None</span>' })</li>
+                    <li><strong>On-premises sync:</strong>
+                        $(if ($IntuneConnResults.Status.OnPremSyncEnabled) { '<span class="status-found">&#10003; Enabled</span>' } else { '<span class="status-missing">Not enabled / Unknown</span>' })</li>
+                    $(if ($IntuneConnResults.Status.LastSyncDateTime) { "<li><strong>Last sync:</strong> $($IntuneConnResults.Status.LastSyncDateTime)</li>" })
+                    <li><strong>Errors:</strong> $(if ($IntuneConnResults.Status.Errors.Count -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-error'>$($IntuneConnResults.Status.Errors.Count)</span>" })</li>
+                    <li><strong>Warnings:</strong> $(if ($IntuneConnResults.Status.Warnings.Count -eq 0) { '<span class="status-found">0</span>' } else { "<span class='status-warning'>$($IntuneConnResults.Status.Warnings.Count)</span>" })</li>
                 </ul>
 "@
-        
-        # Add connector details if any exist
-        if ($IntuneConnResults.Status.Connectors.Count -gt 0) {
+
+        # Connector details table
+        $ndesConnectors = $IntuneConnResults.Status.Connectors | Where-Object { $_.State -ne "azure-vm" }
+        if ($ndesConnectors -and @($ndesConnectors).Count -gt 0) {
             $html += @"
                 <h3>Connector Details:</h3>
-                <ul class="info-list">
+                <table style="width:100%; border-collapse:collapse; margin-top:8px; font-size:13px;">
+                    <tr style="background:#1a2540; color:#8ab4f8;">
+                        <th style="padding:6px 10px; text-align:left;">Name</th>
+                        <th style="padding:6px 10px; text-align:left;">Machine</th>
+                        <th style="padding:6px 10px; text-align:left;">State</th>
+                        <th style="padding:6px 10px; text-align:left;">Version</th>
+                        <th style="padding:6px 10px; text-align:left;">Last Check-in</th>
+                        <th style="padding:6px 10px; text-align:left;">Enrolled</th>
+                    </tr>
 "@
-            foreach ($connector in $IntuneConnResults.Status.Connectors) {
-                $stateIcon = if ($connector.State -eq "active") { "[OK]" } else { "[!]" }
-                $stateColor = if ($connector.State -eq "active") { "status-found" } else { "status-error" }
+            foreach ($c in $ndesConnectors) {
+                $rowBg    = if ($c.State -eq "active") { "#0d1b12" } else { "#1e0a0a" }
+                $stCls    = if ($c.State -eq "active") { "status-found" } else { "status-error" }
+                $verCls   = if ($c.IsDeprecated) { "status-error" } else { "status-found" }
+                $verText  = if ($c.IsDeprecated) { "$($c.Version) &#9888;" } else { $c.Version }
                 $html += @"
-                    <li><span class="$stateColor">$stateIcon</span> <strong>$($connector.Type):</strong> $($connector.Name)
+                    <tr style="background:$rowBg;">
+                        <td style="padding:5px 10px;">$($c.DisplayName)</td>
+                        <td style="padding:5px 10px; color:#aaa;">$($c.MachineName)</td>
+                        <td style="padding:5px 10px;"><span class="$stCls">$($c.State.ToUpper())</span></td>
+                        <td style="padding:5px 10px;"><span class="$verCls">$verText</span></td>
+                        <td style="padding:5px 10px; color:#aaa;">$(if ($c.LastCheckin) { $c.LastCheckin } else { '-' }) <span class="$( if ($c.Freshness -like '*STALE*') {'status-error'} elseif ($c.Freshness -like '*Warning*') {'status-warning'} else {'status-found'} )">$($c.Freshness)</span></td>
+                        <td style="padding:5px 10px; color:#aaa;">$(if ($c.EnrolledDate) { $c.EnrolledDate } else { '-' })</td>
+                    </tr>
 "@
-                if ($connector.LastCheckIn) {
-                    $html += " - Last check-in: $($connector.LastCheckIn)"
-                }
-                if ($connector.Version) {
-                    $html += " (v$($connector.Version))"
-                }
-                $html += "</li>`n"
             }
-            $html += "</ul>`n"
+            $html += "</table>`n"
         }
-        
-        # Add AD Server information if available
-        if ($IntuneConnResults.Status.ADServerName -or $IntuneConnResults.Status.ADServerReservation -ne $null) {
+
+        # Azure VM servers (AD/Sync)
+        $azVMs = $IntuneConnResults.Status.Connectors | Where-Object { $_.State -eq "azure-vm" }
+        if ($azVMs -and @($azVMs).Count -gt 0) {
             $html += @"
-                <h3>AD Server in Azure:</h3>
+                <h3>AD / Sync Server(s) in Azure:</h3>
                 <ul class="info-list">
 "@
-            if ($IntuneConnResults.Status.ADServerName) {
-                # Check if we have detailed AD server info in connectors
-                $adServerConnectors = $IntuneConnResults.Status.Connectors | Where-Object { $_.Type -eq "AD Server (Azure VM)" }
-                
-                if ($adServerConnectors) {
-                    foreach ($adServer in $adServerConnectors) {
-                        $html += @"
-                    <li><span class="status-found">&#10003;</span> <strong>$($adServer.Name)</strong>
-                        <ul style="margin-left: 20px; margin-top: 5px;">
-                            <li>Location: $($adServer.Location)</li>
-                            <li>VM Size: $($adServer.VMSize)</li>
-"@
-                        if ($adServer.State) {
-                            $html += "                            <li>State: $($adServer.State)</li>`n"
-                        }
-                        $html += @"
-                        </ul>
-                    </li>
-"@
-                    }
-                } else {
-                    $html += @"
-                    <li><span class="status-found">&#10003;</span> Server found: <strong>$($IntuneConnResults.Status.ADServerName)</strong></li>
-"@
-                }
-            } elseif ($IntuneConnResults.Status.ADServerReservation -eq $true) {
+            foreach ($vm in $azVMs) {
                 $html += @"
-                    <li><span class="status-found">&#10003;</span> AD Server detected in Azure</li>
-"@
-            } elseif ($IntuneConnResults.Status.ADServerReservation -eq $false) {
-                $html += @"
-                    <li><span class="status-error">&#9888;</span> No AD Server detected in Azure
-                        <ul style="margin-left: 20px; margin-top: 5px;">
-                            <li>Searched for patterns: *DC*, *AD*, *Sync*, *-S00, *-S01, BCID-S##</li>
-                        </ul>
-                    </li>
-"@
-            } else {
-                $html += @"
-                    <li><span class="status-missing">?</span> Unable to check Azure for AD Server</li>
+                    <li><span class="status-found">&#10003;</span> <strong>$($vm.DisplayName)</strong></li>
 "@
             }
             $html += "</ul>`n"
         }
-        
-        # Add errors if any
-        if ($IntuneConnResults.Status.Errors.Count -gt 0) {
+
+        # Errors and Warnings
+        if ($IntuneConnResults.Status.Errors.Count -gt 0 -or $IntuneConnResults.Status.Warnings.Count -gt 0) {
             $html += @"
-                <h3>Warnings/Errors:</h3>
+                <h3>Errors &amp; Warnings:</h3>
                 <ul class="info-list">
 "@
-            foreach ($error in $IntuneConnResults.Status.Errors) {
-                $html += @"
-                    <li><span class="status-error">&#9888;</span> $error</li>
-"@
+            foreach ($e in $IntuneConnResults.Status.Errors) {
+                $html += "                    <li><span class='status-error'>&#9888; Error:</span> $e</li>`n"
+            }
+            foreach ($w in $IntuneConnResults.Status.Warnings) {
+                $html += "                    <li><span class='status-warning'>&#9888; Warning:</span> $w</li>`n"
             }
             $html += "</ul>`n"
         }
-        
+
         $html += "</div>`n"
     }
 
@@ -5103,7 +6139,14 @@ function Export-HTMLReport {
             $html += "</ul>"
         }
         
-        $html += "</div>"
+        if ($DefenderResults.Status.Errors -and $DefenderResults.Status.Errors.Count -gt 0) {
+            $html += "                <h3>Errors:</h3><ul class='info-list'>`n"
+            foreach ($e in $DefenderResults.Status.Errors) {
+                $html += "                    <li><span class='status-error'>&#9888;</span> $e</li>`n"
+            }
+            $html += "                </ul>`n"
+        }
+        $html += "            </div>`n"
     }
 
     # Users, Licenses & Privileged Roles Section
@@ -5392,6 +6435,118 @@ function Export-HTMLReport {
 "@
     }
 
+    # ---------------------------------------------------------------
+    # Security Configuration Section
+    # ---------------------------------------------------------------
+    if ($SecurityResults -and $SecurityResults.CheckPerformed) {
+        $secClass = if ($SecurityResults.Status.GrpPriviledgeAssigned -and
+                        -not $SecurityResults.Status.SictAppFound -and
+                        $SecurityResults.Status.MdmConfigOk -and
+                        $SecurityResults.Status.Errors.Count -eq 0) { "success" } `
+                    elseif ($SecurityResults.Status.Errors.Count -gt 0) { "error" } `
+                    else { "warning" }
+        $html += @"
+            <div class="section" id="security">
+                <h2><span class="section-icon">&#128274;</span>Security Configuration</h2>
+                <ul class="info-list">
+                    <li><strong>MDM Enrollment Scope:</strong>
+                        $(if ($SecurityResults.Status.MdmConfigOk) { '<span class="status-found">&#10003; All Users</span>' } elseif ($SecurityResults.Status.MdmAppliesTo) { "<span class='status-warning'>&#9888; $($SecurityResults.Status.MdmAppliesTo)</span>" } else { '<span class="status-missing">Unknown</span>' })</li>
+                    $(if ($SecurityResults.Status.MdmDiscoveryUrl) { "<li><strong>MDM Discovery URL:</strong> $($SecurityResults.Status.MdmDiscoveryUrl)</li>" })
+                    <li><strong>grp_UsersWithPriviledge (MS Graph CLI):</strong>
+                        $(if ($SecurityResults.Status.GrpPriviledgeAssigned) { '<span class="status-found">&#10003; Assigned</span>' } else { '<span class="status-error">&#10007; NOT assigned</span>' })</li>
+                    <li><strong>PIM Partner Eligible Roles:</strong>
+                        $(if ($SecurityResults.Status.PartnerPimUsers.Count -gt 0) { "<span class='status-found'>&#10003; $($SecurityResults.Status.PartnerPimUsers.Count) account(s)</span>" } else { '<span class="status-warning">&#9888; None found</span>' })</li>
+                    <li><strong>Direct Permanent Admin Assignments:</strong>
+                        $(if ($SecurityResults.Status.DirectAdminCount -eq 0) { '<span class="status-found">&#10003; None (OK)</span>' } else { "<span class='status-warning'>&#9888; $($SecurityResults.Status.DirectAdminCount) direct assignment(s)</span>" })</li>
+                    <li><strong>MS Graph CLI Service Principal:</strong>
+                        $(if ($SecurityResults.Status.GraphCliSpFound) { '<span class="status-found">&#10003; Found in Entra</span>' } else { '<span class="status-warning">&#9888; Not found</span>' })</li>
+                    <li><strong>SICT Automation App:</strong>
+                        $(if (-not $SecurityResults.Status.SictAppFound) { '<span class="status-found">&#10003; Removed / Not present</span>' } else { "<span class='status-error'>&#10007; STILL PRESENT$(if ($SecurityResults.Status.SictAppName) { ': ' + $SecurityResults.Status.SictAppName })</span>" })</li>
+                </ul>
+"@
+        # Partner PIM Eligible Roles table
+        if ($SecurityResults.Status.PartnerPimUsers -and $SecurityResults.Status.PartnerPimUsers.Count -gt 0) {
+            $html += @"
+                <h3>PIM Eligible Partner Accounts:</h3>
+                <table style='width:100%;border-collapse:collapse;font-size:13px;'>
+                    <thead><tr style='background:#1a2540;color:#8ab4f8;'>
+                        <th style='padding:6px 10px;text-align:left;'>Account</th>
+                        <th style='padding:6px 10px;text-align:left;'>UPN</th>
+                        <th style='padding:6px 10px;text-align:left;'>Role</th>
+                    </tr></thead><tbody>
+"@
+            foreach ($p in $SecurityResults.Status.PartnerPimUsers) {
+                $html += "                    <tr><td style='padding:5px 10px;'>$($p.DisplayName)</td><td style='padding:5px 10px;color:#aaa;'>$($p.UPN)</td><td style='padding:5px 10px;'>$($p.Role)</td></tr>`n"
+            }
+            $html += "                    </tbody></table>`n"
+        }
+        if ($SecurityResults.Status.DirectAdmins.Count -gt 0) {
+            $html += @"
+                <h3>Direct Permanent Privileged Role Assignments:</h3>
+                <table style='width:100%;border-collapse:collapse;font-size:13px;'>
+                    <thead><tr style='background:#1a2540;color:#8ab4f8;'>
+                        <th style='padding:6px 10px;text-align:left;'>Account</th>
+                        <th style='padding:6px 10px;text-align:left;'>Role</th>
+                    </tr></thead><tbody>
+"@
+            foreach ($d in $SecurityResults.Status.DirectAdmins) {
+                $html += "                    <tr><td style='padding:5px 10px;'>$($d.DisplayName)</td><td style='padding:5px 10px;color:#f0a050;'>$($d.Role)</td></tr>`n"
+            }
+            $html += "                    </tbody></table>`n"
+        }
+        if ($SecurityResults.Status.Errors.Count -gt 0 -or $SecurityResults.Status.Warnings.Count -gt 0) {
+            $html += "                <h3>Issues:</h3><ul class='info-list'>`n"
+            foreach ($e in $SecurityResults.Status.Errors)   { $html += "                    <li><span class='status-error'>Error: $e</span></li>`n" }
+            foreach ($w in $SecurityResults.Status.Warnings) { $html += "                    <li><span class='status-warning'>Warning: $w</span></li>`n" }
+            $html += "                </ul>`n"
+        }
+        $html += "            </div>`n"
+    }
+
+    # -- Error Log section in HTML report -----------------------------------
+    if ($script:BWS_ErrorLog -and $script:BWS_ErrorLog.Count -gt 0) {
+        $errItems   = @($script:BWS_ErrorLog | Where-Object { $_.Severity -eq "Error" })
+        $warnItems  = @($script:BWS_ErrorLog | Where-Object { $_.Severity -eq "Warning" })
+        $html += @"
+            <div class="section" id="errorlog">
+                <h2><span class="section-icon">&#128203;</span>Error Log  ($($script:BWS_ErrorLog.Count) issue(s))</h2>
+                <p style='color:var(--muted);font-size:13px;margin:0 0 12px;'>
+                    Errors: $($errItems.Count)&nbsp;&nbsp;&bull;&nbsp;&nbsp;Warnings: $($warnItems.Count)
+                    &nbsp;&nbsp;&bull;&nbsp;&nbsp;Use <code>-SupportBundle</code> to export as JSON.
+                </p>
+                <table style='width:100%;border-collapse:collapse;font-size:13px;'>
+                    <thead><tr style='background:#1a2540;color:#8ab4f8;'>
+                        <th style='padding:6px 10px;text-align:left;width:160px;'>Code</th>
+                        <th style='padding:6px 10px;text-align:left;width:80px;'>Severity</th>
+                        <th style='padding:6px 10px;text-align:left;width:180px;'>Function</th>
+                        <th style='padding:6px 10px;text-align:left;'>Message</th>
+                        <th style='padding:6px 10px;text-align:left;width:140px;'>Time</th>
+                    </tr></thead><tbody>
+"@
+        foreach ($e in ($script:BWS_ErrorLog | Sort-Object Severity, Timestamp)) {
+            $bgCol  = switch ($e.Severity) {
+                "Error"   { "rgba(220,60,60,0.12)" }
+                "Warning" { "rgba(220,160,30,0.10)" }
+                default   { "transparent" }
+            }
+            $sevCls = switch ($e.Severity) {
+                "Error"   { "status-error" }
+                "Warning" { "status-warning" }
+                default   { "" }
+            }
+            $html += "                    <tr style='background:$bgCol;border-bottom:1px solid rgba(255,255,255,0.05);'>"
+            $html += "<td style='padding:5px 10px;font-family:monospace;'><strong>$($e.Code)</strong></td>"
+            $html += "<td style='padding:5px 10px;'><span class='$sevCls'>$($e.Severity)</span></td>"
+            $html += "<td style='padding:5px 10px;color:#aaa;'>$($e.Function)</td>"
+            $html += "<td style='padding:5px 10px;'>$($e.Message)"
+            if ($e.Detail) {
+                $html += "<br><span style='font-size:11px;color:#888;'>$($e.Detail.Substring(0,[Math]::Min(100,$e.Detail.Length)))</span>"
+            }
+            $html += "</td><td style='padding:5px 10px;color:#888;'>$($e.Timestamp)</td></tr>`n"
+        }
+        $html += "                    </tbody></table></div>`n"
+    }
+
     $html += @"
         </div>
         
@@ -5645,7 +6800,7 @@ if ($GUI) {
     # GroupBox for Check Selection
     $groupBoxChecks = New-Object System.Windows.Forms.GroupBox
     $groupBoxChecks.Location = New-Object System.Drawing.Point(20, 110)
-    $groupBoxChecks.Size = New-Object System.Drawing.Size(300, 250)
+    $groupBoxChecks.Size = New-Object System.Drawing.Size(300, 280)
     $groupBoxChecks.Text = "Select Checks to Run"
     $form.Controls.Add($groupBoxChecks)
     
@@ -5721,6 +6876,13 @@ if ($GUI) {
     $chkUserLicense.Checked = $true
     $groupBoxChecks.Controls.Add($chkUserLicense)
     
+    $chkSecurity = New-Object System.Windows.Forms.CheckBox
+    $chkSecurity.Location = New-Object System.Drawing.Point(15, 250)
+    $chkSecurity.Size = New-Object System.Drawing.Size(280, 20)
+    $chkSecurity.Text = "Security Config Check (MDM/PIM/SICT)"
+    $chkSecurity.Checked = $true
+    $groupBoxChecks.Controls.Add($chkSecurity)
+
     # Options GroupBox
     $groupBoxOptions = New-Object System.Windows.Forms.GroupBox
     $groupBoxOptions.Location = New-Object System.Drawing.Point(340, 110)
@@ -5819,7 +6981,29 @@ if ($GUI) {
     $btnDiag.Font      = New-Object System.Drawing.Font("Arial", 9, [System.Drawing.FontStyle]::Bold)
     $btnDiag.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
     $form.Controls.Add($btnDiag)
-    
+
+    $btnStop = New-Object System.Windows.Forms.Button
+    $btnStop.Location  = New-Object System.Drawing.Point(660, 323)
+    $btnStop.Size      = New-Object System.Drawing.Size(150, 44)
+    $btnStop.Text      = "Stop"
+    $btnStop.BackColor = [System.Drawing.Color]::FromArgb(180, 40, 40)
+    $btnStop.ForeColor = [System.Drawing.Color]::White
+    $btnStop.Font      = New-Object System.Drawing.Font("Arial", 10, [System.Drawing.FontStyle]::Bold)
+    $btnStop.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnStop.Enabled   = $false
+    $btnStop.Visible   = $false
+    $form.Controls.Add($btnStop)
+
+    # Stop Button Click
+    $btnStop.Add_Click({
+        $script:stopRequested = $true
+        $btnStop.Enabled  = $false
+        $btnStop.Text     = "Stopping..."
+        $labelStatus.Text = "[!] Stop requested - finishing current check..."
+        $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,160,60)
+        $form.Refresh()
+    })
+
     # Status Label
     $labelStatus = New-Object System.Windows.Forms.Label
     $labelStatus.Location = New-Object System.Drawing.Point(20, 345)
@@ -5844,8 +7028,9 @@ if ($GUI) {
     $textOutput.Font = New-Object System.Drawing.Font("Consolas", 9)
     $textOutput.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
     $textOutput.ForeColor = [System.Drawing.Color]::FromArgb(200, 200, 200)
-    $textOutput.ReadOnly = $true
-    $textOutput.WordWrap = $false
+    $textOutput.ReadOnly  = $true
+    $textOutput.WordWrap  = $false
+    $textOutput.MaxLength = 0
     $form.Controls.Add($textOutput)
     
     # Prerequisites Button Click  (Full flow: modules + login verification)
@@ -5866,33 +7051,39 @@ if ($GUI) {
             }
             $preModResult = Show-ModuleSetupDialog -SkipParams $_preSkipParams
 
-            # Step 2: Login / subscription verification
-            $labelStatus.Text = "Step 2/2 - Verifying login..."
+            # Step 2: GlobalAdmin login (Az + Graph + Teams + SharePoint)
+            # One browser login covers all services.
+            $labelStatus.Text = "Step 2/2 - GlobalAdmin login (Az + Teams + SharePoint)..."
             $form.Refresh()
-            $preSubId = $textSubID.Text.Trim()
-            $loginOK  = $false
-            $loginMsg = ""
+            $preSubId  = $textSubID.Text.Trim()
+            $loginOK   = $false
+            $loginMsg  = ""
+
+            # Set subscription if provided before login attempt
+            if ($preSubId) {
+                try { Set-BWsAzSubscription -SubscriptionId $preSubId } catch {}
+            }
+
             try {
-                if ($preSubId) {
-                    Set-BWsAzSubscription -SubscriptionId $preSubId
-                    $preCtx  = Get-BWsAzContext
-                    $loginOK = $true
-                    $loginMsg = "[OK] Azure login verified - Subscription: $($preCtx.Subscription.Name)"
-                } else {
+                # Connect-BWsGlobalAdmin handles Az + Teams + SharePoint in one call
+                $loginOK = Connect-BWsGlobalAdmin `
+                    -SharePointAdminUrl $SharePointUrl `
+                    -SkipTeams:(-not $chkTeams.Checked) `
+                    -SkipSharePoint:(-not $chkSharePoint.Checked)
+
+                if ($loginOK) {
                     $preCtx = Get-BWsAzContext
-                    if ($preCtx) {
-                        $loginOK = $true
-                        $loginMsg = "[OK] Azure login verified - Subscription: $($preCtx.Subscription.Name)"
-                    } else {
-                        $loginMsg = "[!] Not logged in - run Connect-AzAccount in a PS window first"
-                    }
+                    $subLabel = if ($preCtx) { $preCtx.Subscription.Name } else { "Unknown" }
+                    $loginMsg = "[OK] GlobalAdmin login complete - Sub: $subLabel - Teams: $(if ($script:TeamsConnected) {'OK'} else {'pending'}) - SPO: $(if ($script:SharePointConnected) {'OK'} else {'pending'})"
+                } else {
+                    $loginMsg = "[X] GlobalAdmin login failed - check browser window"
                 }
             } catch {
-                $loginMsg = "[X] Login check failed: $($_.Exception.Message)"
+                $loginMsg = "[X] Login error: $($_.Exception.Message)"
             }
 
             # Show result in status label
-            $allOK = $preModResult.AllReady -and $loginOK
+            $allOK = $preModResult.AllReady -and $loginOK -and $script:GlobalAdminConnected
             $statusText  = if ($allOK) { "[OK] Prerequisites complete - Ready to run checks" } `
                            else { "[!] Prerequisites complete with warnings - see details above" }
             $statusColor = if ($allOK) { [System.Drawing.Color]::FromArgb(60,200,80) } `
@@ -5925,107 +7116,112 @@ if ($GUI) {
     })
 
     # Diagnostics Button Click
+    # Writes directly to $textOutput - no separate dialog, no overlap possible
     $btnDiag.Add_Click({
         $btnDiag.Enabled   = $false
         $btnRun.Enabled    = $false
         $btnPrereq.Enabled = $false
         $labelStatus.Text      = "Collecting diagnostics..."
-        $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(80,60,140)
+        $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(120, 80, 200)
         $form.Refresh()
         try {
             $diagData = Get-BWsDiagnostics -AsObject
 
-            # Build dialog
-            Add-Type -AssemblyName System.Windows.Forms
-            $dlgDiag = New-Object System.Windows.Forms.Form
-            $dlgDiag.Text            = "BWS Diagnostics"
-            $dlgDiag.Size            = New-Object System.Drawing.Size(640, 560)
-            $dlgDiag.StartPosition   = "CenterParent"
-            $dlgDiag.FormBorderStyle = "FixedDialog"
-            $dlgDiag.MaximizeBox     = $false
-            $dlgDiag.BackColor       = [System.Drawing.Color]::FromArgb(28, 28, 40)
+            $textOutput.Clear()
+            $progressBar.Value = 0
 
-            $lTitle = New-Object System.Windows.Forms.Label
-            $lTitle.Text      = "Environment Diagnostics"
-            $lTitle.Font      = New-Object System.Drawing.Font("Arial", 13, [System.Drawing.FontStyle]::Bold)
-            $lTitle.ForeColor = [System.Drawing.Color]::FromArgb(180, 160, 255)
-            $lTitle.Location  = New-Object System.Drawing.Point(16, 12)
-            $lTitle.Size      = New-Object System.Drawing.Size(590, 28)
-            $dlgDiag.Controls.Add($lTitle)
-
-            $tv = New-Object System.Windows.Forms.RichTextBox
-            $tv.Location   = New-Object System.Drawing.Point(12, 50)
-            $tv.Size       = New-Object System.Drawing.Size(600, 440)
-            $tv.ReadOnly   = $true
-            $tv.BackColor  = [System.Drawing.Color]::FromArgb(22, 22, 35)
-            $tv.ForeColor  = [System.Drawing.Color]::FromArgb(210, 210, 210)
-            $tv.Font       = New-Object System.Drawing.Font("Consolas", 9)
-            $tv.ScrollBars = "Vertical"
-            $tv.WordWrap   = $false
-            $dlgDiag.Controls.Add($tv)
-
-            $btnClose = New-Object System.Windows.Forms.Button
-            $btnClose.Text      = "Close"
-            $btnClose.Location  = New-Object System.Drawing.Point(510, 500)
-            $btnClose.Size      = New-Object System.Drawing.Size(100, 28)
-            $btnClose.BackColor = [System.Drawing.Color]::FromArgb(60,60,80)
-            $btnClose.ForeColor = [System.Drawing.Color]::White
-            $btnClose.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-            $btnClose.Add_Click({ $dlgDiag.Close() })
-            $dlgDiag.Controls.Add($btnClose)
-
-            # Populate RichTextBox
-            $sections = [ordered]@{
-                "POWERSHELL"       = @('PS_Version','PS_Edition','PS_Host','OS')
-                "AZURE / ENTRA ID" = @('AZ_LoggedIn','AZ_Account','AZ_AccountType','AZ_TenantId','AZ_TenantName','AZ_TenantDomain','AZ_PrimaryDomain','AZ_SubscriptionId','AZ_SubscriptionName','AZ_Environment')
-                "SIGNED-IN USER"   = @('USER_DisplayName','USER_UPN','USER_JobTitle','USER_Mail')
-                "MODULES"          = ($diagData.Keys | Where-Object { $_ -like 'MOD_*' } | Sort-Object)
+            # Helper: append a line with colour simulation via prefix markers
+            # (plain TextBox has no per-character colour, so we use layout instead)
+            function script:Write-DiagLine {
+                param([string]$Text = "", [string]$Prefix = "")
+                $script:textOutput.AppendText("$Prefix$Text`r`n")
+                $script:textOutput.SelectionStart = $script:textOutput.Text.Length
+                $script:textOutput.ScrollToCaret()
+                [System.Windows.Forms.Application]::DoEvents()
             }
 
-            foreach ($section in $sections.Keys) {
-                # Section header
-                $tv.SelectionStart  = $tv.TextLength
-                $tv.SelectionLength = 0
-                $tv.SelectionColor  = [System.Drawing.Color]::FromArgb(180,160,255)
-                $tv.SelectionFont   = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
-                $tv.AppendText("`r`n  [ $section ]`r`n")
+            Write-DiagLine "============================================================"
+            Write-DiagLine "  BWS DIAGNOSTICS  -  v$script:Version"
+            Write-DiagLine "============================================================"
 
-                foreach ($key in $sections[$section]) {
-                    if ($diagData.ContainsKey($key)) {
-                        $label = ($key -replace '^(PS_|AZ_|USER_|MOD_)','' -replace '_',' ').PadRight(22)
-                        $val   = $diagData[$key]
-                        $valColor = if ($val -like "*No -*" -or $val -like "*not installed*" -or $val -like "*Not installed*") {
-                                        [System.Drawing.Color]::FromArgb(255,160,80)
-                                    } elseif ($val -like "*Loaded*" -or $val -like "*Yes*" -or $val -like "*loaded*") {
-                                        [System.Drawing.Color]::FromArgb(100,220,100)
-                                    } else {
-                                        [System.Drawing.Color]::FromArgb(210,210,210)
-                                    }
-                        $tv.SelectionColor = [System.Drawing.Color]::FromArgb(140,140,160)
-                        $tv.SelectionFont  = New-Object System.Drawing.Font("Consolas", 9)
-                        $tv.AppendText("    $label : ")
-                        $tv.SelectionColor = $valColor
-                        $tv.AppendText("$val`r`n")
+            $diagSections = [ordered]@{
+                "POWERSHELL" = @(
+                    @{ K='PS_Version';  L='Version'       },
+                    @{ K='PS_Edition';  L='Edition'       },
+                    @{ K='PS_Host';     L='Host'          },
+                    @{ K='OS';          L='OS'            }
+                )
+                "AZURE / ENTRA ID" = @(
+                    @{ K='AZ_LoggedIn';         L='Logged In'         },
+                    @{ K='AZ_Account';          L='Account'           },
+                    @{ K='AZ_AccountType';      L='Account Type'      },
+                    @{ K='AZ_TenantId';         L='Tenant ID'         },
+                    @{ K='AZ_TenantName';       L='Tenant Name'       },
+                    @{ K='AZ_TenantDomain';     L='Tenant Domain'     },
+                    @{ K='AZ_PrimaryDomain';    L='Primary Domain'    },
+                    @{ K='AZ_SubscriptionId';   L='Subscription ID'   },
+                    @{ K='AZ_SubscriptionName'; L='Subscription Name' },
+                    @{ K='AZ_Environment';      L='Environment'       }
+                )
+                "SIGNED-IN USER" = @(
+                    @{ K='USER_DisplayName'; L='Display Name' },
+                    @{ K='USER_UPN';         L='UPN'          },
+                    @{ K='USER_JobTitle';    L='Job Title'    },
+                    @{ K='USER_Mail';        L='Mail'         }
+                )
+                "MODULES" = ($diagData.Keys |
+                    Where-Object { $_ -like 'MOD_*' } |
+                    Sort-Object |
+                    ForEach-Object {
+                        @{ K=$_; L=($_ -replace '^MOD_','') }
+                    })
+            }
+
+            foreach ($secName in $diagSections.Keys) {
+                Write-DiagLine ""
+                Write-DiagLine "  [ $secName ]"
+                Write-DiagLine "  ----------------------------------------------------"
+                foreach ($row in $diagSections[$secName]) {
+                    if ($diagData.Contains($row.K)) {
+                        $lbl = $row.L.PadRight(24)
+                        $val = $diagData[$row.K]
+                        # Status prefix so user can scan quickly
+                        $prefix = "    "
+                        if ($val -like "*No -*" -or $val -like "*not installed*" -or
+                            $val -like "*Not installed*" -or $val -like "*not available*") {
+                            $prefix = " !  "
+                        } elseif ($val -like "*Yes*" -or $val -like "*Loaded*" -or
+                                  $val -like "*loaded*") {
+                            $prefix = " OK "
+                        }
+                        Write-DiagLine "$lbl : $val" -Prefix $prefix
                     }
                 }
             }
-            $tv.SelectionStart = 0
-            $tv.ScrollToCaret()
 
-            $labelStatus.Text      = "[OK] Diagnostics collected"
-            $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(100,180,255)
-            $dlgDiag.ShowDialog() | Out-Null
-            $dlgDiag.Dispose()
+            Write-DiagLine ""
+            Write-DiagLine "============================================================"
+            Write-DiagLine "  END OF DIAGNOSTICS  -  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            Write-DiagLine "============================================================"
+
+            $textOutput.SelectionStart = 0
+            $textOutput.ScrollToCaret()
+            $progressBar.Value = 100
+
+            $labelStatus.Text      = "[OK] Diagnostics ready - scroll to read"
+            $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(90, 200, 120)
+
         } catch {
-            $labelStatus.Text      = "[X] Diagnostics failed: $($_.Exception.Message)"
+            $textOutput.AppendText("`r`n[X] Diagnostics error: $($_.Exception.Message)`r`n")
+            $labelStatus.Text      = "[X] Diagnostics failed"
             $labelStatus.ForeColor = [System.Drawing.Color]::Red
         } finally {
+            Remove-Item Function:Write-DiagLine -ErrorAction SilentlyContinue
             $btnDiag.Enabled   = $true
             $btnRun.Enabled    = $true
             $btnPrereq.Enabled = $true
         }
     })
-
     # Run Button Click
     $btnRun.Add_Click({
         # Clean up any leftover Write-Host override from a previous failed run
@@ -6034,10 +7230,14 @@ if ($GUI) {
         $progressBar.Value = 0
         $labelStatus.Text = "Initializing check..."
         $labelStatus.ForeColor = [System.Drawing.Color]::Orange
-        $btnRun.Enabled   = $false
+        $script:stopRequested = $false
+        $btnRun.Enabled    = $false
         $btnPrereq.Enabled = $false
         $btnClear.Enabled  = $false
         $btnDiag.Enabled   = $false
+        $btnStop.Enabled   = $true
+        $btnStop.Visible   = $true
+        $btnStop.Text      = "Stop"
         $form.Refresh()
         
         $bcid = $textBCID.Text
@@ -6053,6 +7253,7 @@ if ($GUI) {
         $runSharePoint = $chkSharePoint.Checked
         $runTeams = $chkTeams.Checked
         $runUserLicense = $chkUserLicense.Checked
+        $runSecurity     = $chkSecurity.Checked
         $compact = $chkCompact.Checked
         $showAll = $chkShowAll.Checked
         $export = $chkExport.Checked
@@ -6094,15 +7295,18 @@ if ($GUI) {
                 [System.Windows.Forms.Application]::DoEvents()
             }
             
-            $azureResults = $null
-            $intuneResults = $null
-            $entraIDResults = $null
-            $intuneConnResults = $null
-            $defenderResults = $null
-            $softwareResults = $null
-            $sharePointResults = $null
+            $azureResults        = $null
+            $intuneResults       = $null
+            $entraIDResults      = $null
+            $intuneConnResults   = $null
+            $defenderResults     = $null
+            $softwareResults     = $null
+            $sharePointResults   = $null
+            $teamsResults        = $null
+            $userLicenseResults  = $null
+            $securityResults     = $null
             
-            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int]) + ($runSharePoint -as [int]) + ($runTeams -as [int]) + ($runUserLicense -as [int])
+            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int]) + ($runSharePoint -as [int]) + ($runTeams -as [int]) + ($runUserLicense -as [int]) + ($runSecurity -as [int])
             $currentCheck = 0
             $progressIncrement = if ($totalChecks -gt 0) { [Math]::Floor(80 / $totalChecks) } else { 0 }
             
@@ -6113,6 +7317,13 @@ if ($GUI) {
                 $form.Refresh()
                 
                 $azureResults = Test-AzureResources -BCID $bcid -CompactView $compact
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
                 $currentCheck++
                 $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
@@ -6124,6 +7335,13 @@ if ($GUI) {
                 $form.Refresh()
                 
                 $intuneResults = Test-IntunePolicies -ShowAllPolicies $showAll -CompactView $compact
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
                 $currentCheck++
                 $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
@@ -6135,6 +7353,13 @@ if ($GUI) {
                 $form.Refresh()
                 
                 $entraIDResults = Test-EntraIDConnect -CompactView $compact
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
                 $currentCheck++
                 $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
@@ -6146,6 +7371,13 @@ if ($GUI) {
                 $form.Refresh()
                 
                 $intuneConnResults = Test-IntuneConnector -CompactView $compact
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
                 $currentCheck++
                 $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
@@ -6157,6 +7389,13 @@ if ($GUI) {
                 $form.Refresh()
                 
                 $defenderResults = Test-DefenderForEndpoint -BCID $bcid -CompactView $compact
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
                 $currentCheck++
                 $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
@@ -6168,6 +7407,13 @@ if ($GUI) {
                 $form.Refresh()
                 
                 $softwareResults = Test-BWSSoftwarePackages -CompactView $compact
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
                 $currentCheck++
                 $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
@@ -6179,6 +7425,13 @@ if ($GUI) {
                 $form.Refresh()
                 
                 $sharePointResults = Test-SharePointConfiguration -CompactView $compact -SharePointUrl $SharePointUrl
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
                 $currentCheck++
                 $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
@@ -6190,6 +7443,13 @@ if ($GUI) {
                 $form.Refresh()
                 
                 $teamsResults = Test-TeamsConfiguration -CompactView $compact
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
                 $currentCheck++
                 $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
@@ -6201,6 +7461,30 @@ if ($GUI) {
                 $form.Refresh()
                 
                 $userLicenseResults = Test-UsersAndLicenses -CompactView $compact
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
+                $currentCheck++
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
+            }
+
+            # Security Configuration Check (MDM, PIM, grp_UsersWithPriviledge, SICT)
+            if ($runSecurity) {
+                $labelStatus.Text = "Running Security Configuration Check..."
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
+                $form.Refresh()
+                
+                $securityResults = Test-EntraSecurityConfig -CompactView $compact
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
                 $currentCheck++
                 $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
@@ -6212,7 +7496,7 @@ if ($GUI) {
             Write-Host "======================================================" -ForegroundColor Cyan
             Write-Host "  BCID: $bcid" -ForegroundColor White
             
-            if ($runAzure -and $azureResults) {
+            if ($runAzure -and $azureResults -and $azureResults.CheckPerformed) {
                 Write-Host ""
                 Write-Host "  Azure Resources:" -ForegroundColor White
                 Write-Host "    Total:   $($azureResults.Total)" -ForegroundColor White
@@ -6223,41 +7507,48 @@ if ($GUI) {
             if ($runIntune -and $intuneResults -and $intuneResults.CheckPerformed) {
                 Write-Host ""
                 Write-Host "  Intune Policies:" -ForegroundColor White
-                Write-Host "    Total:   $($intuneResults.Total)" -ForegroundColor White
-                Write-Host "    Found:   $($intuneResults.Found.Count)" -ForegroundColor Green
-                Write-Host "    Missing: $($intuneResults.Missing.Count)" -ForegroundColor $(if ($intuneResults.Missing.Count -eq 0) { "Green" } else { "Red" })
+                Write-Host "    Required        : $($intuneResults.Total)" -ForegroundColor White
+                Write-Host "    Found           : $($intuneResults.FoundCount)" -ForegroundColor $(if ($intuneResults.FoundCount -eq $intuneResults.Total) { "Green" } else { "Yellow" })
+                Write-Host "    Missing         : $($intuneResults.MissingCount)" -ForegroundColor $(if ($intuneResults.MissingCount -eq 0) { "Green" } else { "Red" })
+                Write-Host "    All found       : $(if ($intuneResults.AllFound) { 'Yes ([OK])' } else { 'No ([!])' })" -ForegroundColor $(if ($intuneResults.AllFound) { "Green" } else { "Red" })
+                Write-Host "    Retrieval errors: $($intuneResults.Errors.Count)" -ForegroundColor $(if ($intuneResults.Errors.Count -eq 0) { "Green" } else { "Yellow" })
             }
             
             if ($runEntraID -and $entraIDResults -and $entraIDResults.CheckPerformed) {
                 Write-Host ""
                 Write-Host "  Entra ID Connect:" -ForegroundColor White
-                Write-Host "    Sync Enabled:      " -NoNewline -ForegroundColor White
-                Write-Host $(if ($entraIDResults.Status.IsInstalled) { "Yes" } else { "No" }) -ForegroundColor $(if ($entraIDResults.Status.IsInstalled) { "Green" } else { "Red" })
-                Write-Host "    Sync Active:       " -NoNewline -ForegroundColor White
-                Write-Host $(if ($entraIDResults.Status.IsRunning) { "Yes" } else { "No" }) -ForegroundColor $(if ($entraIDResults.Status.IsRunning) { "Green" } else { "Yellow" })
-                if ($entraIDResults.Status.PasswordHashSync -ne $null) {
-                    Write-Host "    Password Sync:     " -NoNewline -ForegroundColor White
-                    Write-Host $(if ($entraIDResults.Status.PasswordHashSync -eq $true) { "Enabled" } elseif ($entraIDResults.Status.PasswordHashSync -eq $false) { "Disabled" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.PasswordHashSync) { "Green" } else { "Gray" })
+                Write-Host "    Sync enabled       : $(if ($entraIDResults.Status.SyncEnabled) { 'Yes ([OK])' } else { 'No' })" -ForegroundColor $(if ($entraIDResults.Status.SyncEnabled) { "Green" } else { "Red" })
+                Write-Host "    Sync active (< 3h) : $(if ($entraIDResults.Status.SyncActive) { 'Yes ([OK])' } else { 'No' })" -ForegroundColor $(if ($entraIDResults.Status.SyncActive) { "Green" } else { "Yellow" })
+                if ($entraIDResults.Status.LastSyncDateTime) {
+                    Write-Host "    Last sync          : $($entraIDResults.Status.LastSyncDateTime)" -ForegroundColor Gray
+                }
+                if ($entraIDResults.Status.PasswordSyncEnabled -ne $null) {
+                    Write-Host "    Password Hash Sync : $(if ($entraIDResults.Status.PasswordSyncEnabled) { 'Enabled ([OK])' } else { 'Disabled' })" -ForegroundColor $(if ($entraIDResults.Status.PasswordSyncEnabled) { "Green" } else { "Yellow" })
                 }
                 if ($entraIDResults.Status.DeviceWritebackEnabled -ne $null) {
-                    Write-Host "    Device Hybrid Sync:" -NoNewline -ForegroundColor White
-                    Write-Host $(if ($entraIDResults.Status.DeviceWritebackEnabled -eq $true) { "Active" } elseif ($entraIDResults.Status.DeviceWritebackEnabled -eq $false) { "No Devices" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.DeviceWritebackEnabled) { "Green" } else { "Gray" })
+                    Write-Host "    Device Writeback   : $(if ($entraIDResults.Status.DeviceWritebackEnabled) { 'Enabled ([OK])' } else { 'Disabled' })" -ForegroundColor $(if ($entraIDResults.Status.DeviceWritebackEnabled) { "Green" } else { "Gray" })
                 }
-                if ($entraIDResults.Status.TotalUsers -gt 0) {
-                    Write-Host "    Licensed Users:    $($entraIDResults.Status.LicensedUsers)/$($entraIDResults.Status.TotalUsers)" -ForegroundColor $(if ($entraIDResults.Status.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
-                }
+                Write-Host "    Errors             : $($entraIDResults.Status.Errors.Count)" -ForegroundColor $(if ($entraIDResults.Status.Errors.Count -eq 0) { "Green" } else { "Red" })
+                Write-Host "    Warnings           : $($entraIDResults.Status.Warnings.Count)" -ForegroundColor $(if ($entraIDResults.Status.Warnings.Count -eq 0) { "Green" } else { "Yellow" })
             }
             
             if ($runIntuneConn -and $intuneConnResults -and $intuneConnResults.CheckPerformed) {
                 Write-Host ""
-                Write-Host "  Hybrid Azure AD Join & Intune Connectors:" -ForegroundColor White
-                Write-Host "    NDES Connector:    " -NoNewline -ForegroundColor White
-                Write-Host $(if ($intuneConnResults.Status.IsConnected) { "Active" } else { "Not Connected" }) -ForegroundColor $(if ($intuneConnResults.Status.IsConnected) { "Green" } else { "Yellow" })
-                if ($intuneConnResults.Status.ADServerName) {
-                    Write-Host "    AD Server (Azure): $($intuneConnResults.Status.ADServerName)" -ForegroundColor Green
+                Write-Host "  Intune Connector for Active Directory:" -ForegroundColor White
+                $connState = if ($intuneConnResults.Status.ActiveCount -gt 0) { "Active ($($intuneConnResults.Status.ActiveCount))" } else { "Not Connected" }
+                $connColor = if ($intuneConnResults.Status.ActiveCount -gt 0) { "Green" } else { "Red" }
+                Write-Host "    Connector state    : $connState" -ForegroundColor $connColor
+                Write-Host "    Total connectors   : $($intuneConnResults.Status.ConnectorCount)" -ForegroundColor White
+                Write-Host "    Active             : $($intuneConnResults.Status.ActiveCount)" -ForegroundColor $(if ($intuneConnResults.Status.ActiveCount -gt 0) { "Green" } else { "Red" })
+                Write-Host "    Inactive           : $($intuneConnResults.Status.InactiveCount)" -ForegroundColor $(if ($intuneConnResults.Status.InactiveCount -gt 0) { "Yellow" } else { "Green" })
+                if ($intuneConnResults.Status.DeprecatedCount -gt 0) {
+                    Write-Host "    DEPRECATED vers.   : $($intuneConnResults.Status.DeprecatedCount)  [UPDATE REQUIRED]" -ForegroundColor Red
+                } else {
+                    Write-Host "    Deprecated versions: 0" -ForegroundColor Green
                 }
-                Write-Host "    Active Connectors: $($intuneConnResults.Status.Connectors.Count)" -ForegroundColor White
-                Write-Host "    Errors:            $($intuneConnResults.Status.Errors.Count)" -ForegroundColor $(if ($intuneConnResults.Status.Errors.Count -eq 0) { "Green" } else { "Yellow" })
+                Write-Host "    On-prem sync       : $(if ($intuneConnResults.Status.OnPremSyncEnabled) {'Enabled'} else {'Disabled/Unknown'})" -ForegroundColor $(if ($intuneConnResults.Status.OnPremSyncEnabled) { "Green" } else { "Gray" })
+                Write-Host "    Errors             : $($intuneConnResults.Status.Errors.Count)" -ForegroundColor $(if ($intuneConnResults.Status.Errors.Count -eq 0) { "Green" } else { "Red" })
+                Write-Host "    Warnings           : $($intuneConnResults.Status.Warnings.Count)" -ForegroundColor $(if ($intuneConnResults.Status.Warnings.Count -eq 0) { "Green" } else { "Yellow" })
             }
             
             if ($runDefender -and $defenderResults -and $defenderResults.CheckPerformed) {
@@ -6327,8 +7618,20 @@ if ($GUI) {
                 Write-Host "    Valid ADM Accounts: $($userLicenseResults.Status.PrivilegedUsers.Count)" -ForegroundColor Green
                 Write-Host "    INVALID Priv Users: $($userLicenseResults.Status.InvalidPrivilegedUsers.Count)" -ForegroundColor $(if ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0) { "Green" } else { "Red" })
             }
+            if ($runSecurity -and $securityResults -and $securityResults.CheckPerformed) {
+                Write-Host ""
+                Write-Host "  Security Config:" -ForegroundColor White
+                Write-Host "    MDM Scope    : $(if ($securityResults.Status.MdmConfigOk) { 'All users ([OK])' } elseif ($securityResults.Status.MdmAppliesTo) { $securityResults.Status.MdmAppliesTo + ' ([!])' } else { 'Unknown' })" -ForegroundColor $(if ($securityResults.Status.MdmConfigOk) { "Green" } else { "Yellow" })
+                Write-Host "    Graph CLI Grp: $(if ($securityResults.Status.GrpPriviledgeAssigned) { 'Assigned ([OK])' } else { 'MISSING ([X])' })" -ForegroundColor $(if ($securityResults.Status.GrpPriviledgeAssigned) { "Green" } else { "Red" })
+                Write-Host "    PIM Partner  : $($securityResults.Status.PartnerPimUsers.Count) eligible" -ForegroundColor $(if ($securityResults.Status.PartnerPimUsers.Count -gt 0) { "Green" } else { "Yellow" })
+                Write-Host "    SICT App     : $(if (-not $securityResults.Status.SictAppFound) { 'Removed ([OK])' } else { 'PRESENT ([X])' })" -ForegroundColor $(if (-not $securityResults.Status.SictAppFound) { "Green" } else { "Red" })
+                Write-Host "    Errors       : $($securityResults.Status.Errors.Count)" -ForegroundColor $(if ($securityResults.Status.Errors.Count -eq 0) { "Green" } else { "Red" })
+            }
             
             Write-Host "======================================================" -ForegroundColor Cyan
+            
+            # Show error summary if there are issues
+            Show-BWsErrorSummary
             
             if ($compact) {
                 Write-Host ""
@@ -6342,15 +7645,16 @@ if ($GUI) {
                 $currentContext = Get-BWsAzContext
                 $subName = if ($currentContext) { $currentContext.Subscription.Name } else { "Unknown" }
                 
-                $overallStatus = ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Count -eq 0) -and 
-                                 (-not $intuneResults -or ($intuneResults.Missing.Count -eq 0 -and $intuneResults.Errors.Count -eq 0)) -and
-                                 (-not $entraIDResults -or ($entraIDResults.Status.IsRunning)) -and
-                                 (-not $intuneConnResults -or ($intuneConnResults.Status.Errors.Count -eq 0)) -and
+                $overallStatus = (-not $azureResults -or ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Count -eq 0)) -and 
+                                 (-not $intuneResults -or ($intuneResults.AllFound -eq $true)) -and
+                                 (-not $entraIDResults -or ($entraIDResults.Status.SyncActive -eq $true)) -and
+                                 (-not $intuneConnResults -or ($intuneConnResults.Status.Errors.Count -eq 0 -and $intuneConnResults.Status.DeprecatedCount -eq 0)) -and
                                  (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0)) -and
                                  (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0)) -and
                                  (-not $sharePointResults -or ($sharePointResults.Status.Compliant)) -and
                                  (-not $teamsResults -or ($teamsResults.Status.Compliant)) -and
-                                 (-not $userLicenseResults -or ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0 -and $userLicenseResults.Status.InvalidEntraIDP2Users.Count -eq 0))
+                                 (-not $userLicenseResults -or ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0 -and $userLicenseResults.Status.InvalidEntraIDP2Users.Count -eq 0)) -and
+                                 (-not $securityResults -or ($securityResults.Status.GrpPriviledgeAssigned -and -not $securityResults.Status.SictAppFound -and $securityResults.Status.Errors.Count -eq 0))
                 
                 # Generate HTML report
                 if ($exportFormat -eq "HTML" -or $exportFormat -eq "Both") {
@@ -6360,7 +7664,7 @@ if ($GUI) {
                         -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
                         -DefenderResults $defenderResults -SoftwareResults $softwareResults `
                         -SharePointResults $sharePointResults -TeamsResults $teamsResults `
-                        -UserLicenseResults $userLicenseResults -OverallStatus $overallStatus
+                        -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -OverallStatus $overallStatus
                     
                     Write-Host "HTML Report exported to: $htmlPath" -ForegroundColor Green
                 }
@@ -6373,7 +7677,8 @@ if ($GUI) {
                             -AzureResults $azureResults -IntuneResults $intuneResults `
                             -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
                             -DefenderResults $defenderResults -SoftwareResults $softwareResults `
-                            -SharePointResults $sharePointResults -TeamsResults $teamsResults -OverallStatus $overallStatus
+                            -SharePointResults $sharePointResults -TeamsResults $teamsResults `
+                            -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -OverallStatus $overallStatus
                     }
                     
                     $pdfPath = Export-PDFReport -HTMLPath $htmlPath
@@ -6399,8 +7704,12 @@ if ($GUI) {
             $labelStatus.Text = "Error occurred during check"
             $labelStatus.ForeColor = [System.Drawing.Color]::Red
         } finally {
-            # Restore Write-Host and re-enable all buttons
+            # Restore Write-Host, hide Stop, re-enable all buttons
             Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+            $script:stopRequested = $false
+            $btnStop.Enabled   = $false
+            $btnStop.Visible   = $false
+            $btnStop.Text      = "Stop"
             $btnRun.Enabled    = $true
             $btnPrereq.Enabled = $true
             $btnClear.Enabled  = $true
@@ -6449,53 +7758,122 @@ if ($SubscriptionId) {
 
 # Run Azure Check
 $azureResults = Test-AzureResources -BCID $BCID -CompactView $CompactView
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
 
 # Run Intune Check
 $intuneResults = $null
 if (-not $SkipIntune) {
     $intuneResults = Test-IntunePolicies -ShowAllPolicies $ShowAllPolicies -CompactView $CompactView
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
 }
 
 # Run Entra ID Connect Check
 $entraIDResults = $null
 if (-not $SkipEntraID) {
     $entraIDResults = Test-EntraIDConnect -CompactView $CompactView
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
 }
 
 # Run Intune Connector Check
 $intuneConnResults = $null
 if (-not $SkipIntuneConnector) {
     $intuneConnResults = Test-IntuneConnector -CompactView $CompactView
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
 }
 
 # Run Defender for Endpoint Check
 $defenderResults = $null
 if (-not $SkipDefender) {
     $defenderResults = Test-DefenderForEndpoint -BCID $BCID -CompactView $CompactView
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
 }
 
 # Run BWS Software Packages Check
 $softwareResults = $null
 if (-not $SkipSoftware) {
     $softwareResults = Test-BWSSoftwarePackages -CompactView $CompactView
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
 }
 
 # Run SharePoint Configuration Check
 $sharePointResults = $null
 if (-not $SkipSharePoint) {
     $sharePointResults = Test-SharePointConfiguration -CompactView $CompactView -SharePointUrl $SharePointUrl
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
 }
 
 # Run Teams Configuration Check
 $teamsResults = $null
 if (-not $SkipTeams) {
     $teamsResults = Test-TeamsConfiguration -CompactView $CompactView
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
 }
 
 # User and License Check
 $userLicenseResults = $null
 if (-not $SkipUserLicenseCheck) {
     $userLicenseResults = Test-UsersAndLicenses -CompactView $CompactView
+                # Check stop request
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
+}
+
+# Security Configuration Check
+$securityResults = $null
+if (-not $SkipSecurity) {
+    $securityResults = Test-EntraSecurityConfig -CompactView $CompactView
 }
 
 # Overall Summary
@@ -6515,48 +7893,49 @@ Write-Host "    Missing: $($azureResults.Missing.Count)" -ForegroundColor $(if (
 if ($intuneResults -and $intuneResults.CheckPerformed) {
     Write-Host ""
     Write-Host "  Intune Policies:" -ForegroundColor White
-    Write-Host "    Total:   $($intuneResults.Total)" -ForegroundColor White
-    Write-Host "    Found:   $($intuneResults.Found.Count)" -ForegroundColor $(if ($intuneResults.Found.Count -eq $intuneResults.Total) { "Green" } else { "Yellow" })
-    Write-Host "    Missing: $($intuneResults.Missing.Count)" -ForegroundColor $(if ($intuneResults.Missing.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host "    Required        : $($intuneResults.Total)" -ForegroundColor White
+    Write-Host "    Found           : $($intuneResults.FoundCount)" -ForegroundColor $(if ($intuneResults.FoundCount -eq $intuneResults.Total) { "Green" } else { "Yellow" })
+    Write-Host "    Missing         : $($intuneResults.MissingCount)" -ForegroundColor $(if ($intuneResults.MissingCount -eq 0) { "Green" } else { "Red" })
+    Write-Host "    All found       : $(if ($intuneResults.AllFound) { 'Yes ([OK])' } else { 'No ([!])' })" -ForegroundColor $(if ($intuneResults.AllFound) { "Green" } else { "Red" })
+    Write-Host "    Retrieval errors: $($intuneResults.Errors.Count)" -ForegroundColor $(if ($intuneResults.Errors.Count -eq 0) { "Green" } else { "Yellow" })
 }
 
 if ($entraIDResults -and $entraIDResults.CheckPerformed) {
     Write-Host ""
     Write-Host "  Entra ID Connect:" -ForegroundColor White
-    Write-Host "    Sync Enabled:       " -NoNewline -ForegroundColor White
-    Write-Host $(if ($entraIDResults.Status.IsInstalled) { "Yes ([OK])" } else { "No ([X])" }) -ForegroundColor $(if ($entraIDResults.Status.IsInstalled) { "Green" } else { "Red" })
-    Write-Host "    Sync Active:        " -NoNewline -ForegroundColor White
-    Write-Host $(if ($entraIDResults.Status.IsRunning) { "Yes ([OK])" } else { "No ([X])" }) -ForegroundColor $(if ($entraIDResults.Status.IsRunning) { "Green" } else { "Yellow" })
-    if ($entraIDResults.Status.PasswordHashSync -ne $null) {
-        Write-Host "    Password Hash Sync: " -NoNewline -ForegroundColor White
-        Write-Host $(if ($entraIDResults.Status.PasswordHashSync -eq $true) { "Enabled ([OK])" } elseif ($entraIDResults.Status.PasswordHashSync -eq $false) { "Disabled ([!])" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.PasswordHashSync) { "Green" } else { "Gray" })
+    Write-Host "    Sync enabled       : $(if ($entraIDResults.Status.SyncEnabled) { 'Yes ([OK])' } else { 'No ([X])' })" -ForegroundColor $(if ($entraIDResults.Status.SyncEnabled) { "Green" } else { "Red" })
+    Write-Host "    Sync active (< 3h) : $(if ($entraIDResults.Status.SyncActive) { 'Yes ([OK])' } else { 'No ([X])' })" -ForegroundColor $(if ($entraIDResults.Status.SyncActive) { "Green" } else { "Yellow" })
+    if ($entraIDResults.Status.LastSyncDateTime) {
+        Write-Host "    Last sync          : $($entraIDResults.Status.LastSyncDateTime)" -ForegroundColor Gray
+    }
+    if ($entraIDResults.Status.PasswordSyncEnabled -ne $null) {
+        Write-Host "    Password Hash Sync : $(if ($entraIDResults.Status.PasswordSyncEnabled) { 'Enabled ([OK])' } else { 'Disabled' })" -ForegroundColor $(if ($entraIDResults.Status.PasswordSyncEnabled) { "Green" } else { "Yellow" })
     }
     if ($entraIDResults.Status.DeviceWritebackEnabled -ne $null) {
-        Write-Host "    Device Hybrid Sync: " -NoNewline -ForegroundColor White
-        Write-Host $(if ($entraIDResults.Status.DeviceWritebackEnabled -eq $true) { "Active ([OK])" } elseif ($entraIDResults.Status.DeviceWritebackEnabled -eq $false) { "No Devices" } else { "Unknown" }) -ForegroundColor $(if ($entraIDResults.Status.DeviceWritebackEnabled) { "Green" } else { "Gray" })
+        Write-Host "    Device Writeback   : $(if ($entraIDResults.Status.DeviceWritebackEnabled) { 'Enabled' } else { 'Disabled' })" -ForegroundColor $(if ($entraIDResults.Status.DeviceWritebackEnabled) { "Green" } else { "Gray" })
     }
-    if ($entraIDResults.Status.TotalUsers -gt 0) {
-        Write-Host "    Licensed Users:     $($entraIDResults.Status.LicensedUsers)/$($entraIDResults.Status.TotalUsers)" -ForegroundColor $(if ($entraIDResults.Status.UnlicensedUsers -eq 0) { "Green" } else { "Yellow" })
-        if ($entraIDResults.Status.UnlicensedUsers -gt 0) {
-            Write-Host "    Unlicensed Users:   $($entraIDResults.Status.UnlicensedUsers) ([!])" -ForegroundColor Yellow
-        }
-    }
+    Write-Host "    Errors             : $($entraIDResults.Status.Errors.Count)" -ForegroundColor $(if ($entraIDResults.Status.Errors.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host "    Warnings           : $($entraIDResults.Status.Warnings.Count)" -ForegroundColor $(if ($entraIDResults.Status.Warnings.Count -eq 0) { "Green" } else { "Yellow" })
 }
 
 if ($intuneConnResults -and $intuneConnResults.CheckPerformed) {
     Write-Host ""
-    Write-Host "  Hybrid Azure AD Join & Intune Connectors:" -ForegroundColor White
-    Write-Host "    NDES Connector:     " -NoNewline -ForegroundColor White
-    Write-Host $(if ($intuneConnResults.Status.IsConnected) { "Active ([OK])" } else { "Not Connected ([!])" }) -ForegroundColor $(if ($intuneConnResults.Status.IsConnected) { "Green" } else { "Yellow" })
-    if ($intuneConnResults.Status.ADServerName) {
-        Write-Host "    AD Server (Azure):  $($intuneConnResults.Status.ADServerName) ([OK])" -ForegroundColor Green
-    } elseif ($intuneConnResults.Status.ADServerReservation -eq $true) {
-        Write-Host "    AD Server (Azure):  Found ([OK])" -ForegroundColor Green
-    } elseif ($intuneConnResults.Status.ADServerReservation -eq $false) {
-        Write-Host "    AD Server (Azure):  Not Detected ([!])" -ForegroundColor Yellow
+    Write-Host "  Intune Connector for Active Directory:" -ForegroundColor White
+    $connState = if ($intuneConnResults.Status.ActiveCount -gt 0) { "Active ($($intuneConnResults.Status.ActiveCount)) ([OK])" } else { "Not Connected ([!])" }
+    $connColor = if ($intuneConnResults.Status.ActiveCount -gt 0) { "Green" } else { "Red" }
+    Write-Host "    Connector state    : $connState" -ForegroundColor $connColor
+    Write-Host "    Total / Active     : $($intuneConnResults.Status.ConnectorCount) / $($intuneConnResults.Status.ActiveCount)" -ForegroundColor White
+    if ($intuneConnResults.Status.DeprecatedCount -gt 0) {
+        Write-Host "    DEPRECATED vers.   : $($intuneConnResults.Status.DeprecatedCount)  [UPDATE REQUIRED]" -ForegroundColor Red
+    } else {
+        Write-Host "    Deprecated versions: 0 ([OK])" -ForegroundColor Green
     }
-    Write-Host "    Active Connectors:  $($intuneConnResults.Status.Connectors.Count)" -ForegroundColor White
-    Write-Host "    Errors:             $($intuneConnResults.Status.Errors.Count)" -ForegroundColor $(if ($intuneConnResults.Status.Errors.Count -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "    On-prem sync       : $(if ($intuneConnResults.Status.OnPremSyncEnabled) {'Enabled ([OK])'} else {'Disabled/Unknown'})" -ForegroundColor $(if ($intuneConnResults.Status.OnPremSyncEnabled) { "Green" } else { "Gray" })
+    if ($intuneConnResults.Status.LastSyncDateTime) {
+        Write-Host "    Last sync          : $($intuneConnResults.Status.LastSyncDateTime)" -ForegroundColor Gray
+    }
+    Write-Host "    Errors             : $($intuneConnResults.Status.Errors.Count)" -ForegroundColor $(if ($intuneConnResults.Status.Errors.Count -eq 0) { "Green" } else { "Red" })
+    Write-Host "    Warnings           : $($intuneConnResults.Status.Warnings.Count)" -ForegroundColor $(if ($intuneConnResults.Status.Warnings.Count -eq 0) { "Green" } else { "Yellow" })
 }
 
 if ($defenderResults -and $defenderResults.CheckPerformed) {
@@ -6628,16 +8007,28 @@ if ($userLicenseResults -and $userLicenseResults.CheckPerformed) {
     Write-Host "    INVALID Priv Users: $($userLicenseResults.Status.InvalidPrivilegedUsers.Count)" -ForegroundColor $(if ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0) { "Green" } else { "Red" })
 }
 
+if ($securityResults -and $securityResults.CheckPerformed) {
+    Write-Host ""
+    Write-Host "  Security Config:" -ForegroundColor White
+    Write-Host "    MDM Enrollment     : $(if ($securityResults.Status.MdmConfigOk) { 'All users ([OK])' } elseif ($securityResults.Status.MdmAppliesTo) { $securityResults.Status.MdmAppliesTo + ' ([!])' } else { 'Unknown' })" -ForegroundColor $(if ($securityResults.Status.MdmConfigOk) { "Green" } else { "Yellow" })
+    Write-Host "    Graph CLI Group    : $(if ($securityResults.Status.GrpPriviledgeAssigned) { 'grp_UsersWithPriviledge assigned ([OK])' } else { 'NOT assigned ([X])' })" -ForegroundColor $(if ($securityResults.Status.GrpPriviledgeAssigned) { "Green" } else { "Red" })
+    Write-Host "    PIM Partner Accts  : $($securityResults.Status.PartnerPimUsers.Count) with eligible roles" -ForegroundColor $(if ($securityResults.Status.PartnerPimUsers.Count -gt 0) { "Green" } else { "Yellow" })
+    Write-Host "    Direct Perm. Admin : $($securityResults.Status.DirectAdminCount)" -ForegroundColor $(if ($securityResults.Status.DirectAdminCount -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "    SICT App           : $(if (-not $securityResults.Status.SictAppFound) { 'Removed ([OK])' } else { 'STILL PRESENT ([X])' })" -ForegroundColor $(if (-not $securityResults.Status.SictAppFound) { "Green" } else { "Red" })
+    Write-Host "    Errors             : $($securityResults.Status.Errors.Count)" -ForegroundColor $(if ($securityResults.Status.Errors.Count -eq 0) { "Green" } else { "Red" })
+}
+
 Write-Host ""
 $overallStatus = ($azureResults.Missing.Count -eq 0 -and $azureResults.Errors.Count -eq 0) -and 
-                 (-not $intuneResults -or ($intuneResults.Missing.Count -eq 0 -and $intuneResults.Errors.Count -eq 0)) -and
-                 (-not $entraIDResults -or ($entraIDResults.Status.IsRunning)) -and
-                 (-not $intuneConnResults -or ($intuneConnResults.Status.Errors.Count -eq 0)) -and
+                 (-not $intuneResults -or ($intuneResults.AllFound -eq $true)) -and
+                 (-not $entraIDResults -or ($entraIDResults.Status.SyncActive -eq $true)) -and
+                 (-not $intuneConnResults -or ($intuneConnResults.Status.Errors.Count -eq 0 -and $intuneConnResults.Status.DeprecatedCount -eq 0)) -and
                  (-not $defenderResults -or ($defenderResults.Status.ConnectorActive -and $defenderResults.Status.FilesMissing.Count -eq 0)) -and
                  (-not $softwareResults -or ($softwareResults.Status.Missing.Count -eq 0)) -and
                  (-not $sharePointResults -or ($sharePointResults.Status.Compliant)) -and
                  (-not $teamsResults -or ($teamsResults.Status.Compliant)) -and
-                 (-not $userLicenseResults -or ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0 -and $userLicenseResults.Status.InvalidEntraIDP2Users.Count -eq 0))
+                 (-not $userLicenseResults -or ($userLicenseResults.Status.InvalidPrivilegedUsers.Count -eq 0 -and $userLicenseResults.Status.InvalidEntraIDP2Users.Count -eq 0)) -and
+                 (-not $securityResults -or ($securityResults.Status.GrpPriviledgeAssigned -and -not $securityResults.Status.SictAppFound -and $securityResults.Status.Errors.Count -eq 0))
 
 Write-Host "  Overall Status: " -NoNewline -ForegroundColor White
 if ($overallStatus) {
@@ -6646,6 +8037,14 @@ if ($overallStatus) {
     Write-Host "[X] ISSUES FOUND" -ForegroundColor Red
 }
 Write-Host "======================================================" -ForegroundColor Cyan
+
+# Show error summary if there are issues
+Show-BWsErrorSummary
+
+# Generate support bundle if requested
+if ($SupportBundle) {
+    $null = Get-BWsSupportBundle -BCID $BCID
+}
 
 if ($CompactView) {
     Write-Host ""
@@ -6666,7 +8065,7 @@ if ($ExportReport) {
             -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
             -DefenderResults $defenderResults -SoftwareResults $softwareResults `
             -SharePointResults $sharePointResults -TeamsResults $teamsResults `
-            -UserLicenseResults $userLicenseResults -OverallStatus $overallStatus
+            -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -OverallStatus $overallStatus
         
         Write-Host "HTML Report exported to: $htmlPath" -ForegroundColor Green
     }
@@ -6680,7 +8079,7 @@ if ($ExportReport) {
                 -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
                 -DefenderResults $defenderResults -SoftwareResults $softwareResults `
                 -SharePointResults $sharePointResults -TeamsResults $teamsResults `
-                -UserLicenseResults $userLicenseResults -OverallStatus $overallStatus
+                -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -OverallStatus $overallStatus
         }
         
         $pdfPath = Export-PDFReport -HTMLPath $htmlPath
