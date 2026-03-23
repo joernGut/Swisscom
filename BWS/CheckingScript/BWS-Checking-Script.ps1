@@ -98,6 +98,7 @@ param(
     [Parameter(Mandatory=$false)]
     [switch]$SkipUserLicenseCheck,
     [switch]$SkipSecurity,
+    [switch]$SkipActiveDirectory,
     
     [Parameter(Mandatory=$false)]
     [switch]$SupportBundle,
@@ -178,10 +179,18 @@ $script:Version = "3.0.0"
 #   Connect-SPOService -Credential (PSCredential, PS 5.1 only)
 # -------------------------------------------------------------------------
 $script:GlobalAdminUPN       = $null   # set by Connect-BWsGlobalAdmin
+$script:AzureARMReachable    = $false  # $true once ARM API verified
 $script:GlobalAdminTenantId  = $null   # set by Connect-BWsGlobalAdmin
 $script:GlobalAdminConnected = $false  # $true once Az + Graph confirmed
 $script:TeamsConnected       = $false  # $true after Connect-MicrosoftTeams
 $script:SharePointConnected  = $false  # $true after Connect-SPOService
+
+# -- Domain Admin session state -------------------------------------------
+$script:DomainAdminCredential = $null   # PSCredential, set by Connect-BWsDomainAdmin
+$script:DomainController      = $null   # DC hostname/FQDN used for AD queries
+$script:ADConnected           = $false  # $true after successful AD test
+
+
 
 # -- Central Error Log (all check runs accumulate here) --------------------
 # Each entry is a PSCustomObject with Code, Severity, Category, Function,
@@ -747,6 +756,7 @@ function Connect-BWsGlobalAdmin {
     #>
     param(
         [string]$SharePointAdminUrl = "",
+        [string]$SubscriptionId     = "",
         [switch]$ForceRelogin,
         [switch]$SkipTeams,
         [switch]$SkipSharePoint
@@ -783,13 +793,34 @@ function Connect-BWsGlobalAdmin {
 
         if (-not $azCtx) {
             Write-Host "    Launching browser login for GlobalAdmin..." -ForegroundColor Cyan
-            # PS 5.1 + MFA: Connect-AzAccount opens a browser window
-            # -SkipContextPopulation avoids loading all 25 subscriptions (faster)
-            $azCtx = Connect-AzAccount -ErrorAction Stop
+            Write-Host "    (Browser window will open - sign in with your GlobalAdmin account)" -ForegroundColor Gray
+            Write-Host "" 
+            # MS Learn: Connect-AzAccount -Subscription sets the active subscription directly.
+            # Without -Subscription the context lands on the first subscription alphabetically.
+            # Reference: learn.microsoft.com/powershell/module/az.accounts/connect-azaccount
+            if ($SubscriptionId) {
+                $null = Connect-AzAccount -Subscription $SubscriptionId -ErrorAction Stop
+            } else {
+                $null = Connect-AzAccount -ErrorAction Stop
+            }
             $azCtx = Get-AzContext -ErrorAction Stop
             Write-Host "    [OK] Logged in as: $($azCtx.Account.Id)" -ForegroundColor Green
-            Write-Host "         Tenant : $($azCtx.Tenant.Id)" -ForegroundColor Gray
-            Write-Host "         Sub    : $($azCtx.Subscription.Name)" -ForegroundColor Gray
+            Write-Host "         Tenant   : $($azCtx.Tenant.Id)" -ForegroundColor Gray
+            Write-Host "         Sub Name : $($azCtx.Subscription.Name)" -ForegroundColor Gray
+            Write-Host "         Sub ID   : $($azCtx.Subscription.Id)" -ForegroundColor Gray
+        }
+
+        # If a SubscriptionId was requested but the context is on a different one, switch now
+        if ($SubscriptionId -and $azCtx.Subscription.Id -ne $SubscriptionId) {
+            Write-Host "    Switching to subscription: $SubscriptionId" -ForegroundColor Cyan
+            try {
+                $null = Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop
+                $azCtx = Get-AzContext -ErrorAction Stop
+                Write-Host "    [OK] Now on: $($azCtx.Subscription.Name)" -ForegroundColor Green
+            } catch {
+                Write-Host "    [!]  Could not switch subscription: $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host "         Check that the GlobalAdmin has access to sub: $SubscriptionId" -ForegroundColor Gray
+            }
         }
 
         # Store for reuse by Teams + SharePoint
@@ -808,6 +839,25 @@ function Connect-BWsGlobalAdmin {
             }
         } catch {
             Write-Host "    [!]  Graph probe failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+
+        # Verify ARM access (needed for Test-AzureResources via Find-BWsAzResource)
+        try {
+            $armUri  = "https://management.azure.com/subscriptions/$($azCtx.Subscription.Id)" +
+                       "?api-version=2022-12-01"
+            $armResp = Invoke-AzRestMethod -Uri $armUri -Method GET -ErrorAction Stop
+            if ($armResp.StatusCode -eq 200) {
+                Write-Host "    [OK] ARM API reachable (subscription verified)" -ForegroundColor Green
+                $script:AzureARMReachable = $true
+            } else {
+                Write-Host "    [!]  ARM API returned HTTP $($armResp.StatusCode)" -ForegroundColor Yellow
+                Write-Host "         Azure resource checks may fail - verify subscription access" -ForegroundColor Gray
+                $script:AzureARMReachable = $false
+            }
+        } catch {
+            Write-Host "    [!]  ARM API probe failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "         Azure resource checks may fail" -ForegroundColor Gray
+            $script:AzureARMReachable = $false
         }
 
     } catch {
@@ -1253,6 +1303,12 @@ function Find-BWsAzResource {
             Tags              = $match.tags
         }
     } catch {
+        # Write-BWsError so the error appears in the central log with BWS-GRAPH-040
+        Write-BWsError -Code "BWS-GRAPH-040" `
+            -Message "ARM resource lookup failed for '$Name' ($ResourceType)" `
+            -Detail  $_.Exception.Message `
+            -CheckStep "Find-BWsAzResource" `
+            -SuppressConsole
         return $null
     }
 }
@@ -1799,12 +1855,22 @@ if ($Full -and -not $GUI) {
     # GlobalAdmin login - ONE login for Az + Graph + Teams + SharePoint
     $loginOK = Connect-BWsGlobalAdmin `
         -SharePointAdminUrl $SharePointUrl `
+        -SubscriptionId     $SubscriptionId `
         -SkipTeams:$SkipTeams `
         -SkipSharePoint:$SkipSharePoint
 
     if (-not $loginOK) {
         Write-Host "[X] GlobalAdmin login failed. Cannot continue." -ForegroundColor Red
         exit 1
+    }
+
+    # DomainAdmin login (optional - for Active Directory check)
+    if (-not $SkipActiveDirectory) {
+        Write-Host ""
+        $adLoginOk = Connect-BWsDomainAdmin
+        if (-not $adLoginOk) {
+            Write-Host "  [!] Active Directory check will be skipped (no DomainAdmin login)." -ForegroundColor Yellow
+        }
     }
 }
 
@@ -5180,6 +5246,358 @@ function Test-EntraSecurityConfig {
     return @{ Status = $status; CheckPerformed = $true }
 }
 
+
+# -- Domain Admin session state -------------------------------------------
+$script:DomainAdminCredential = $null   # PSCredential, set by Connect-BWsDomainAdmin
+$script:DomainController      = $null   # DC hostname/FQDN used for AD queries
+$script:ADConnected           = $false  # $true after successful AD test
+
+
+function Connect-BWsDomainAdmin {
+    <#
+    .SYNOPSIS
+        Prompts for DomainAdmin credentials and verifies connectivity to the
+        on-premises Active Directory.
+        Stores the credential in $script:DomainAdminCredential for use by
+        Test-ActiveDirectory.
+    .NOTES
+        Requires the ActiveDirectory PowerShell module (RSAT).
+        If the module is missing the function returns $false with guidance.
+        The credential is collected via Get-Credential (interactive dialog on
+        both PS 5.1 Desktop and PS Core).
+    #>
+    param(
+        [string]$DomainController = "",
+        [switch]$ForceRelogin
+    )
+
+    Write-Host ""
+    Write-Host "=====================================================" -ForegroundColor Cyan
+    Write-Host "  DOMAIN ADMIN LOGIN (on-premises AD)" -ForegroundColor Cyan
+    Write-Host "=====================================================" -ForegroundColor Cyan
+    Write-Host "  Required for: Active Directory health check" -ForegroundColor Gray
+    Write-Host "  Account: DomainAdmin (local AD admin rights)" -ForegroundColor Gray
+    Write-Host "=====================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Check ActiveDirectory module
+    if (-not (Get-Module -Name ActiveDirectory -ListAvailable -ErrorAction SilentlyContinue)) {
+        Write-Host "  [!] ActiveDirectory PowerShell module not found." -ForegroundColor Yellow
+        Write-Host "      Install RSAT: Add-WindowsCapability -Online -Name 'Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0'" -ForegroundColor Gray
+        Write-Host "      Or via Server Manager: Features > RSAT > Active Directory Domain Services Tools" -ForegroundColor Gray
+        Write-Host "  Active Directory check will be SKIPPED." -ForegroundColor Yellow
+        return $false
+    }
+
+    try { Import-Module ActiveDirectory -ErrorAction Stop -DisableNameChecking 2>$null 3>$null }
+    catch {
+        Write-Host "  [!] Failed to import ActiveDirectory module: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+
+    # Check if already connected and skip unless ForceRelogin
+    if (-not $ForceRelogin -and $script:DomainAdminCredential -and $script:ADConnected) {
+        Write-Host "  [OK] Already connected as: $($script:DomainAdminCredential.UserName)" -ForegroundColor Green
+        return $true
+    }
+
+    Write-Host "  Enter DomainAdmin credentials when the dialog opens..." -ForegroundColor Cyan
+    Write-Host ""
+
+    # Collect credential via interactive dialog
+    try {
+        $cred = Get-Credential -Message "BWS Check - Domain Admin (on-premises AD)" -ErrorAction Stop
+        if (-not $cred) {
+            Write-Host "  [!] No credentials entered - AD check will be skipped." -ForegroundColor Yellow
+            return $false
+        }
+    } catch {
+        Write-Host "  [!] Credential dialog failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+
+    # Determine domain controller to use
+    $dc = if ($DomainController) { $DomainController } else { $null }
+
+    # Test connectivity with the credential
+    Write-Host "  Testing AD connectivity..." -ForegroundColor Cyan
+    try {
+        $testParams = @{ Credential = $cred; ErrorAction = "Stop" }
+        if ($dc) { $testParams.Server = $dc }
+        $domain = Get-ADDomain @testParams
+        Write-Host "  [OK] Connected to domain: $($domain.DNSRoot)" -ForegroundColor Green
+        Write-Host "       NetBIOS : $($domain.NetBIOSName)" -ForegroundColor Gray
+        Write-Host "       PDC     : $($domain.PDCEmulator)" -ForegroundColor Gray
+
+        $script:DomainAdminCredential = $cred
+        $script:DomainController      = if ($dc) { $dc } else { $domain.PDCEmulator }
+        $script:ADConnected           = $true
+        return $true
+    } catch {
+        Write-Host "  [X] AD connection failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "      Check credentials and that a DC is reachable from this machine." -ForegroundColor Gray
+        return $false
+    }
+}
+
+
+function Test-ActiveDirectory {
+    <#
+    .SYNOPSIS
+        Checks the on-premises Active Directory for BWS-relevant configuration.
+        Requires: ActiveDirectory module (RSAT), DomainAdmin credential
+        (call Connect-BWsDomainAdmin first, or use -Full which calls it automatically).
+    .CHECKS
+        1. Domain info (DNS root, NetBIOS, Forest, DFL/FFL)
+        2. Domain Controllers (count, PDC, FSMO)
+        3. Password & Lockout policy
+        4. AD replication sites
+        5. Key AD groups (grp_UsersWithPriviledge, grp_ groups)
+        6. grp_UsersWithPriviledge membership
+        7. Top-level OUs
+        8. Stale / disabled computer accounts (>90 days)
+    #>
+    param([switch]$CompactView)
+
+    $adStatus = @{
+        DomainName          = ""
+        DomainNetBIOS       = ""
+        ForestName          = ""
+        DomainFunctionalLevel = ""
+        ForestFunctionalLevel = ""
+        PDCEmulator         = ""
+        DCCount             = 0
+        DomainControllers   = @()
+        SiteCount           = 0
+        Sites               = @()
+        PasswordMinLength   = 0
+        PasswordComplexity  = $false
+        LockoutThreshold    = 0
+        LockoutDuration     = ""
+        GrpPriviledgeFound  = $false
+        GrpPriviledgeMembers = @()
+        GrpBWSGroups        = @()
+        TopLevelOUs         = @()
+        TotalUsers          = 0
+        EnabledUsers        = 0
+        DisabledUsers       = 0
+        TotalComputers      = 0
+        StaleComputers      = 0
+        Errors              = [System.Collections.Generic.List[object]]::new()
+        Warnings            = [System.Collections.Generic.List[object]]::new()
+    }
+
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host "  ACTIVE DIRECTORY CHECK" -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Prerequisite: module + credential
+    if (-not (Get-Module -Name ActiveDirectory -ListAvailable -ErrorAction SilentlyContinue)) {
+        $adStatus.Errors.Add((Write-BWsError -Code "BWS-AD-001" -Message "ActiveDirectory module not installed (RSAT required)" -CheckStep "Prerequisites"))
+        return @{ Status = $adStatus; CheckPerformed = $false }
+    }
+    try { Import-Module ActiveDirectory -ErrorAction Stop -DisableNameChecking 2>$null 3>$null } catch {}
+
+    if (-not $script:DomainAdminCredential -or -not $script:ADConnected) {
+        $adStatus.Errors.Add((Write-BWsError -Code "BWS-AD-002" -Message "DomainAdmin not logged in - run Connect-BWsDomainAdmin or use -Full" -CheckStep "Prerequisites"))
+        return @{ Status = $adStatus; CheckPerformed = $false }
+    }
+
+    $cred   = $script:DomainAdminCredential
+    $server = $script:DomainController
+    $adParams = @{ Credential = $cred; Server = $server; ErrorAction = "Stop" }
+
+    # =========================================================
+    # CHECK 1: Domain & Forest info
+    # =========================================================
+    Write-Host "  [1/7] Domain & Forest" -ForegroundColor Yellow -NoNewline
+    try {
+        $domain = Get-ADDomain @adParams
+        $forest = Get-ADForest @adParams
+
+        $adStatus.DomainName            = $domain.DNSRoot
+        $adStatus.DomainNetBIOS         = $domain.NetBIOSName
+        $adStatus.ForestName            = $forest.Name
+        $adStatus.DomainFunctionalLevel = $domain.DomainMode.ToString()
+        $adStatus.ForestFunctionalLevel = $forest.ForestMode.ToString()
+        $adStatus.PDCEmulator           = $domain.PDCEmulator
+
+        Write-Host " [OK] $($domain.DNSRoot) ($($domain.DomainMode))" -ForegroundColor Green
+        if (-not $CompactView) {
+            Write-Host "       Forest : $($forest.Name) ($($forest.ForestMode))" -ForegroundColor Gray
+            Write-Host "       PDC    : $($domain.PDCEmulator)" -ForegroundColor Gray
+        }
+    } catch {
+        $adStatus.Errors.Add((Write-BWsError -Code "BWS-AD-010" -Message "Domain/Forest query failed: $($_.Exception.Message)" -CheckStep "[1/7] Domain"))
+    }
+
+    # =========================================================
+    # CHECK 2: Domain Controllers
+    # =========================================================
+    Write-Host "  [2/7] Domain Controllers" -ForegroundColor Yellow -NoNewline
+    try {
+        $dcs = Get-ADDomainController -Filter * @adParams
+        $adStatus.DCCount = @($dcs).Count
+        foreach ($dc in $dcs) {
+            $adStatus.DomainControllers += @{
+                Name        = $dc.Name
+                Site        = $dc.Site
+                IsGC        = $dc.IsGlobalCatalog
+                IsReadOnly  = $dc.IsReadOnly
+                OSVersion   = $dc.OperatingSystem
+                IPAddress   = $dc.IPv4Address
+            }
+        }
+        Write-Host " [OK] $($adStatus.DCCount) DC(s)" -ForegroundColor Green
+        if (-not $CompactView) {
+            foreach ($dc in $adStatus.DomainControllers) {
+                Write-Host "       - $($dc.Name)  Site=$($dc.Site)  GC=$($dc.IsGC)" -ForegroundColor Gray
+            }
+        }
+        if ($adStatus.DCCount -eq 1) {
+            $adStatus.Warnings.Add((Write-BWsError -Code "BWS-AD-011" -Message "Only 1 Domain Controller found - single point of failure" -Severity "Warning" -CheckStep "[2/7] DCs"))
+        }
+    } catch {
+        $adStatus.Errors.Add((Write-BWsError -Code "BWS-AD-012" -Message "DC enumeration failed: $($_.Exception.Message)" -CheckStep "[2/7] DCs"))
+    }
+
+    # =========================================================
+    # CHECK 3: Password & Lockout Policy
+    # =========================================================
+    Write-Host "  [3/7] Password & lockout policy" -ForegroundColor Yellow -NoNewline
+    try {
+        $policy = Get-ADDefaultDomainPasswordPolicy @adParams
+        $adStatus.PasswordMinLength  = $policy.MinPasswordLength
+        $adStatus.PasswordComplexity = $policy.ComplexityEnabled
+        $adStatus.LockoutThreshold   = $policy.LockoutThreshold
+        $adStatus.LockoutDuration    = $policy.LockoutDuration.ToString()
+        $pwOk = $policy.MinPasswordLength -ge 12 -and $policy.ComplexityEnabled
+
+        Write-Host " $(if ($pwOk) {'[OK]'} else {'[!]'})" -ForegroundColor $(if ($pwOk){'Green'}else{'Yellow'})
+        if (-not $CompactView) {
+            Write-Host "       MinLength=$($policy.MinPasswordLength)  Complexity=$($policy.ComplexityEnabled)  Lockout=$($policy.LockoutThreshold)" -ForegroundColor Gray
+        }
+        if ($policy.MinPasswordLength -lt 12) {
+            $adStatus.Warnings.Add((Write-BWsError -Code "BWS-AD-020" -Message "Password min length is $($policy.MinPasswordLength) (recommended: >= 12)" -Severity "Warning" -CheckStep "[3/7] Password policy"))
+        }
+        if (-not $policy.ComplexityEnabled) {
+            $adStatus.Warnings.Add((Write-BWsError -Code "BWS-AD-021" -Message "Password complexity is DISABLED (recommended: enabled)" -Severity "Warning" -CheckStep "[3/7] Password policy"))
+        }
+        if ($policy.LockoutThreshold -eq 0) {
+            $adStatus.Warnings.Add((Write-BWsError -Code "BWS-AD-022" -Message "Account lockout threshold is 0 (no lockout - brute force risk)" -Severity "Warning" -CheckStep "[3/7] Password policy"))
+        }
+    } catch {
+        $adStatus.Errors.Add((Write-BWsError -Code "BWS-AD-023" -Message "Password policy query failed: $($_.Exception.Message)" -CheckStep "[3/7] Password policy"))
+    }
+
+    # =========================================================
+    # CHECK 4: AD Replication Sites
+    # =========================================================
+    Write-Host "  [4/7] AD Sites" -ForegroundColor Yellow -NoNewline
+    try {
+        $sites = Get-ADReplicationSite -Filter * @adParams
+        $adStatus.SiteCount = @($sites).Count
+        $adStatus.Sites = @($sites | ForEach-Object { $_.Name })
+        Write-Host " [OK] $($adStatus.SiteCount) site(s)" -ForegroundColor Green
+        if (-not $CompactView -and $adStatus.SiteCount -gt 0) {
+            Write-Host "       Sites: $($adStatus.Sites -join ', ')" -ForegroundColor Gray
+        }
+    } catch {
+        $adStatus.Warnings.Add((Write-BWsError -Code "BWS-AD-030" -Message "AD sites query failed: $($_.Exception.Message)" -Severity "Warning" -CheckStep "[4/7] Sites"))
+    }
+
+    # =========================================================
+    # CHECK 5: Key AD Groups (grp_ prefix)
+    # =========================================================
+    Write-Host "  [5/7] Key AD Groups (grp_)" -ForegroundColor Yellow -NoNewline
+    try {
+        $grpGroups = Get-ADGroup -Filter { Name -like "grp_*" } @adParams |
+                     Select-Object Name, DistinguishedName, GroupScope, GroupCategory
+        $adStatus.GrpBWSGroups = @($grpGroups | ForEach-Object {
+            @{ Name = $_.Name; Scope = $_.GroupScope; Category = $_.GroupCategory }
+        })
+        Write-Host " [OK] $($adStatus.GrpBWSGroups.Count) grp_ group(s)" -ForegroundColor Green
+        if (-not $CompactView) {
+            foreach ($g in $adStatus.GrpBWSGroups) {
+                Write-Host "       - $($g.Name)  ($($g.Scope))" -ForegroundColor Gray
+            }
+        }
+    } catch {
+        $adStatus.Warnings.Add((Write-BWsError -Code "BWS-AD-040" -Message "Group query failed: $($_.Exception.Message)" -Severity "Warning" -CheckStep "[5/7] Groups"))
+    }
+
+    # =========================================================
+    # CHECK 6: grp_UsersWithPriviledge membership
+    # =========================================================
+    Write-Host "  [6/7] grp_UsersWithPriviledge" -ForegroundColor Yellow -NoNewline
+    try {
+        $grpFound = Get-ADGroup -Filter { Name -eq "grp_UsersWithPriviledge" } @adParams -ErrorAction SilentlyContinue
+        if ($grpFound) {
+            $adStatus.GrpPriviledgeFound = $true
+            $members = Get-ADGroupMember -Identity $grpFound -Recursive @adParams -ErrorAction SilentlyContinue
+            $adStatus.GrpPriviledgeMembers = @($members | ForEach-Object {
+                @{ Name = $_.name; SamAccountName = $_.SamAccountName; ObjectClass = $_.objectClass }
+            })
+            Write-Host " [OK] Found - $($adStatus.GrpPriviledgeMembers.Count) member(s)" -ForegroundColor Green
+            if (-not $CompactView) {
+                foreach ($m in $adStatus.GrpPriviledgeMembers) {
+                    Write-Host "       - $($m.SamAccountName)  ($($m.ObjectClass))" -ForegroundColor Gray
+                }
+            }
+        } else {
+            $adStatus.GrpPriviledgeFound = $false
+            Write-Host " [!]  NOT FOUND" -ForegroundColor Yellow
+            $adStatus.Errors.Add((Write-BWsError -Code "BWS-AD-050" -Message "grp_UsersWithPriviledge group not found in AD" -CheckStep "[6/7] grp_UsersWithPriviledge"))
+        }
+    } catch {
+        $adStatus.Errors.Add((Write-BWsError -Code "BWS-AD-051" -Message "grp_UsersWithPriviledge query failed: $($_.Exception.Message)" -CheckStep "[6/7] grp_UsersWithPriviledge"))
+    }
+
+    # =========================================================
+    # CHECK 7: User & Computer summary
+    # =========================================================
+    Write-Host "  [7/7] User & Computer summary" -ForegroundColor Yellow -NoNewline
+    try {
+        $allUsers = Get-ADUser -Filter * @adParams -Properties Enabled
+        $adStatus.TotalUsers   = @($allUsers).Count
+        $adStatus.EnabledUsers = @($allUsers | Where-Object { $_.Enabled }).Count
+        $adStatus.DisabledUsers = $adStatus.TotalUsers - $adStatus.EnabledUsers
+
+        $staleDate = (Get-Date).AddDays(-90)
+        $allComputers = Get-ADComputer -Filter * @adParams -Properties LastLogonDate, Enabled
+        $adStatus.TotalComputers = @($allComputers).Count
+        $adStatus.StaleComputers = @($allComputers | Where-Object {
+            $_.Enabled -and ($_.LastLogonDate -lt $staleDate -or -not $_.LastLogonDate)
+        }).Count
+
+        Write-Host " [OK]" -ForegroundColor Green
+        if (-not $CompactView) {
+            Write-Host "       Users   : $($adStatus.TotalUsers) total  $($adStatus.EnabledUsers) enabled  $($adStatus.DisabledUsers) disabled" -ForegroundColor Gray
+            Write-Host "       Computers: $($adStatus.TotalComputers) total  $($adStatus.StaleComputers) stale (>90 days)" -ForegroundColor Gray
+        }
+        if ($adStatus.StaleComputers -gt 10) {
+            $adStatus.Warnings.Add((Write-BWsError -Code "BWS-AD-060" -Message "$($adStatus.StaleComputers) stale computer accounts (no logon >90 days)" -Severity "Warning" -CheckStep "[7/7] Users & Computers"))
+        }
+    } catch {
+        $adStatus.Errors.Add((Write-BWsError -Code "BWS-AD-061" -Message "User/Computer summary failed: $($_.Exception.Message)" -CheckStep "[7/7] Users & Computers"))
+    }
+
+    # -- Summary ----------------------------------------------------------------
+    Write-Host ""
+    Write-Host "======================================================" -ForegroundColor Cyan
+    $errCount  = $adStatus.Errors.Count
+    $warnCount = $adStatus.Warnings.Count
+    Write-Host "  AD SUMMARY:  $($adStatus.DomainName)  |  $($adStatus.DCCount) DC(s)  |  $($adStatus.TotalUsers) users" -ForegroundColor $(if($errCount -eq 0){'Green'}else{'Red'})
+    if ($errCount -gt 0)  { Write-Host "  Errors   : $errCount"   -ForegroundColor Red    }
+    if ($warnCount -gt 0) { Write-Host "  Warnings : $warnCount"  -ForegroundColor Yellow }
+    Write-Host "======================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    return @{ Status = $adStatus; CheckPerformed = $true }
+}
+
 function Export-HTMLReport {
     param(
         [string]$BCID,
@@ -5195,6 +5613,7 @@ function Export-HTMLReport {
         [object]$TeamsResults,
         [object]$UserLicenseResults,
         [object]$SecurityResults,
+    [object]$ADResults        = $null,
         [bool]$OverallStatus
     )
     
@@ -5511,6 +5930,7 @@ function Export-HTMLReport {
                 <li><a href="#teams">&rarr; Teams Configuration</a></li>
                 <li><a href="#users">&rarr; Users, Licenses & Privileged Roles</a></li>
                 <li><a href="#security">&rarr; Security Configuration</a></li>
+                <li><a href="#activedirectory">&rarr; Active Directory</a></li>
                 <li><a href="#errorlog">&rarr; Error Log</a></li>
             </ul>
         </div>
@@ -5699,6 +6119,23 @@ function Export-HTMLReport {
 "@
     }
 
+    # 10. Active Directory
+    if ($ADResults -and $ADResults.CheckPerformed) {
+        $adCardClass = if ($ADResults.Status.Errors.Count -eq 0 -and $ADResults.Status.DCCount -gt 0) { "success" } `
+                       elseif ($ADResults.Status.Errors.Count -gt 0) { "error" } else { "warning" }
+        $adCardDetail = if ($ADResults.Status.GrpPriviledgeFound) {
+            "$($ADResults.Status.DCCount) DC(s) | $($ADResults.Status.TotalUsers) users"
+        } else {
+            "grp_UsersWithPriviledge MISSING"
+        }
+        $html += @"
+                    <div class="summary-card $adCardClass">
+                        <h3>Active Directory</h3>
+                        <div class="value">$(if ($ADResults.Status.Errors.Count -eq 0) { '&#10003;' } else { '&#10007;' })</div>
+                        <p>$adCardDetail</p>
+                    </div>
+"@
+    }
     $html += @"
                 </div>
             </div>
@@ -6503,6 +6940,90 @@ function Export-HTMLReport {
         $html += "            </div>`n"
     }
 
+    # Active Directory Section
+    if ($ADResults -and $ADResults.CheckPerformed) {
+        $adSt = $ADResults.Status
+        $adSecClass = if ($adSt.Errors.Count -eq 0 -and $adSt.DCCount -gt 0) { "section-ok" } `
+                      elseif ($adSt.Errors.Count -gt 0) { "section-error" } else { "section-warning" }
+        $html += @"
+            <div class="section" id="activedirectory">
+                <h2><span class="section-icon">&#127968;</span>Active Directory</h2>
+                <ul class="info-list">
+                    <li><strong>Domain:</strong> $($adSt.DomainName) ($($adSt.DomainNetBIOS))</li>
+                    <li><strong>Forest:</strong> $($adSt.ForestName)</li>
+                    <li><strong>Functional Level:</strong> Domain: $($adSt.DomainFunctionalLevel) | Forest: $($adSt.ForestFunctionalLevel)</li>
+                    <li><strong>PDC Emulator:</strong> $($adSt.PDCEmulator)</li>
+                    <li><strong>Domain Controllers:</strong> <span class="$(if ($adSt.DCCount -ge 2) {'status-found'} else {'status-warning'})">$($adSt.DCCount)</span></li>
+                    <li><strong>AD Sites:</strong> $($adSt.SiteCount)</li>
+                </ul>
+                <h3 style="margin-top:14px;">Password Policy:</h3>
+                <ul class="info-list">
+                    <li><strong>Min Password Length:</strong> <span class="$(if ($adSt.PasswordMinLength -ge 12) {'status-found'} else {'status-warning'})">$($adSt.PasswordMinLength)</span> (recommended: >= 12)</li>
+                    <li><strong>Complexity:</strong> <span class="$(if ($adSt.PasswordComplexity) {'status-found'} else {'status-error'})">$(if ($adSt.PasswordComplexity) {'&#10003; Enabled'} else {'&#10007; Disabled'})</span></li>
+                    <li><strong>Lockout Threshold:</strong> <span class="$(if ($adSt.LockoutThreshold -gt 0) {'status-found'} else {'status-warning'})">$(if ($adSt.LockoutThreshold -gt 0) {$adSt.LockoutThreshold} else {'0 (no lockout!)'}) </span></li>
+                </ul>
+"@
+        # Domain Controllers table
+        if ($adSt.DomainControllers -and $adSt.DomainControllers.Count -gt 0) {
+            $html += @"
+                <h3 style="margin-top:14px;">Domain Controllers:</h3>
+                <table style='width:100%;border-collapse:collapse;font-size:13px;'>
+                    <thead><tr style='background:#1a2540;color:#8ab4f8;'>
+                        <th style='padding:6px 10px;text-align:left;'>Name</th>
+                        <th style='padding:6px 10px;text-align:left;'>Site</th>
+                        <th style='padding:6px 10px;text-align:left;'>IP</th>
+                        <th style='padding:6px 10px;text-align:left;'>GC</th>
+                        <th style='padding:6px 10px;text-align:left;'>OS</th>
+                    </tr></thead><tbody>
+"@
+            foreach ($dc in $adSt.DomainControllers) {
+                $gcIcon = if ($dc.IsGC) { '<span class="status-found">&#10003;</span>' } else { '<span style="color:#888;">-</span>' }
+                $html += "                    <tr><td style='padding:5px 10px;'><strong>$($dc.Name)</strong></td><td style='padding:5px 10px;color:#aaa;'>$($dc.Site)</td><td style='padding:5px 10px;color:#aaa;'>$($dc.IPAddress)</td><td style='padding:5px 10px;'>$gcIcon</td><td style='padding:5px 10px;color:#aaa;font-size:11px;'>$($dc.OSVersion)</td></tr>`n"
+            }
+            $html += "                    </tbody></table>`n"
+        }
+        # grp_UsersWithPriviledge
+        $html += @"
+                <h3 style="margin-top:14px;">grp_UsersWithPriviledge:</h3>
+                <ul class="info-list">
+                    <li><strong>Group found in AD:</strong> $(if ($adSt.GrpPriviledgeFound) { '<span class="status-found">&#10003; Yes</span>' } else { '<span class="status-error">&#10007; NOT FOUND</span>' })</li>
+                    <li><strong>Members:</strong> $($adSt.GrpPriviledgeMembers.Count)</li>
+                </ul>
+"@
+        if ($adSt.GrpPriviledgeFound -and $adSt.GrpPriviledgeMembers.Count -gt 0) {
+            $html += "<table style='width:100%;border-collapse:collapse;font-size:13px;'><thead><tr style='background:#1a2540;color:#8ab4f8;'><th style='padding:6px 10px;text-align:left;'>Name</th><th style='padding:6px 10px;text-align:left;'>SamAccountName</th><th style='padding:6px 10px;text-align:left;'>Type</th></tr></thead><tbody>`n"
+            foreach ($m in $adSt.GrpPriviledgeMembers) {
+                $html += "                    <tr><td style='padding:5px 10px;'>$($m.Name)</td><td style='padding:5px 10px;font-family:monospace;color:#aaa;'>$($m.SamAccountName)</td><td style='padding:5px 10px;color:#aaa;'>$($m.ObjectClass)</td></tr>`n"
+            }
+            $html += "                    </tbody></table>`n"
+        }
+        # BWS grp_ groups
+        if ($adSt.GrpBWSGroups -and $adSt.GrpBWSGroups.Count -gt 0) {
+            $html += "<h3 style='margin-top:14px;'>AD Groups (grp_*):</h3>`n"
+            $html += "<table style='width:100%;border-collapse:collapse;font-size:13px;'><thead><tr style='background:#1a2540;color:#8ab4f8;'><th style='padding:6px 10px;text-align:left;'>Group Name</th><th style='padding:6px 10px;text-align:left;'>Scope</th><th style='padding:6px 10px;text-align:left;'>Category</th></tr></thead><tbody>`n"
+            foreach ($g in $adSt.GrpBWSGroups | Sort-Object Name) {
+                $html += "                    <tr><td style='padding:5px 10px;'>$($g.Name)</td><td style='padding:5px 10px;color:#aaa;'>$($g.Scope)</td><td style='padding:5px 10px;color:#aaa;'>$($g.Category)</td></tr>`n"
+            }
+            $html += "                    </tbody></table>`n"
+        }
+        # User & Computer summary
+        $html += @"
+                <h3 style="margin-top:14px;">User & Computer Summary:</h3>
+                <ul class="info-list">
+                    <li><strong>Total Users:</strong> $($adSt.TotalUsers) &nbsp;|&nbsp; <span class="status-found">$($adSt.EnabledUsers) enabled</span> &nbsp;|&nbsp; <span style="color:#888;">$($adSt.DisabledUsers) disabled</span></li>
+                    <li><strong>Total Computers:</strong> $($adSt.TotalComputers) &nbsp;|&nbsp; Stale (&gt;90 days): <span class="$(if ($adSt.StaleComputers -le 10) {'status-found'} else {'status-warning'})">$($adSt.StaleComputers)</span></li>
+                </ul>
+"@
+        # Errors and Warnings
+        if ($adSt.Errors.Count -gt 0 -or $adSt.Warnings.Count -gt 0) {
+            $html += "                <h3>Issues:</h3><ul class='info-list'>`n"
+            foreach ($e in $adSt.Errors)   { $html += "                    <li><span class='status-error'>&#9888; Error:</span> $e</li>`n" }
+            foreach ($w in $adSt.Warnings) { $html += "                    <li><span class='status-warning'>&#9888; Warning:</span> $w</li>`n" }
+            $html += "                </ul>`n"
+        }
+        $html += "            </div>`n"
+    }
+
     # -- Error Log section in HTML report -----------------------------------
     if ($script:BWS_ErrorLog -and $script:BWS_ErrorLog.Count -gt 0) {
         $errItems   = @($script:BWS_ErrorLog | Where-Object { $_.Severity -eq "Error" })
@@ -6883,6 +7404,13 @@ if ($GUI) {
     $chkSecurity.Checked = $true
     $groupBoxChecks.Controls.Add($chkSecurity)
 
+    $chkActiveDirectory = New-Object System.Windows.Forms.CheckBox
+    $chkActiveDirectory.Location = New-Object System.Drawing.Point(15, 275)
+    $chkActiveDirectory.Size = New-Object System.Drawing.Size(280, 20)
+    $chkActiveDirectory.Text = "Active Directory Check (DomainAdmin)"
+    $chkActiveDirectory.Checked = $true
+    $groupBoxChecks.Controls.Add($chkActiveDirectory)
+
     # Options GroupBox
     $groupBoxOptions = New-Object System.Windows.Forms.GroupBox
     $groupBoxOptions.Location = New-Object System.Drawing.Point(340, 110)
@@ -7068,6 +7596,7 @@ if ($GUI) {
                 # Connect-BWsGlobalAdmin handles Az + Teams + SharePoint in one call
                 $loginOK = Connect-BWsGlobalAdmin `
                     -SharePointAdminUrl $SharePointUrl `
+                    -SubscriptionId     $preSubId `
                     -SkipTeams:(-not $chkTeams.Checked) `
                     -SkipSharePoint:(-not $chkSharePoint.Checked)
 
@@ -7254,6 +7783,7 @@ if ($GUI) {
         $runTeams = $chkTeams.Checked
         $runUserLicense = $chkUserLicense.Checked
         $runSecurity     = $chkSecurity.Checked
+        $runAD           = if (Get-Variable chkActiveDirectory -ErrorAction SilentlyContinue) { $chkActiveDirectory.Checked } else { $false }
         $compact = $chkCompact.Checked
         $showAll = $chkShowAll.Checked
         $export = $chkExport.Checked
@@ -7305,8 +7835,10 @@ if ($GUI) {
             $teamsResults        = $null
             $userLicenseResults  = $null
             $securityResults     = $null
+            $adResults           = $null
             
-            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int]) + ($runSharePoint -as [int]) + ($runTeams -as [int]) + ($runUserLicense -as [int]) + ($runSecurity -as [int])
+            $runAD = $chkActiveDirectory.Checked
+            $totalChecks = ($runAzure -as [int]) + ($runIntune -as [int]) + ($runEntraID -as [int]) + ($runIntuneConn -as [int]) + ($runDefender -as [int]) + ($runSoftware -as [int]) + ($runSharePoint -as [int]) + ($runTeams -as [int]) + ($runUserLicense -as [int]) + ($runSecurity -as [int]) + ($runAD -as [int])
             $currentCheck = 0
             $progressIncrement = if ($totalChecks -gt 0) { [Math]::Floor(80 / $totalChecks) } else { 0 }
             
@@ -7489,6 +8021,33 @@ if ($GUI) {
                 $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
             }
             
+            # Active Directory Check (DomainAdmin)
+            if ($runAD) {
+                $labelStatus.Text = "Running Active Directory Check..."
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
+                $form.Refresh()
+
+                if (-not $script:ADConnected) {
+                    Write-Host ""
+                    Write-Host "  [AD] DomainAdmin login required..." -ForegroundColor Yellow
+                    $adLoginOk = Connect-BWsDomainAdmin
+                    if (-not $adLoginOk) {
+                        Write-Host "  [!] Active Directory check skipped (no DomainAdmin login)" -ForegroundColor Yellow
+                    }
+                }
+                if ($script:ADConnected) {
+                    $adResults = Test-ActiveDirectory -CompactView $compact
+                }
+                if ($script:stopRequested) {
+                    $textOutput.AppendText("`r`n[STOP] Check interrupted by user.`r`n")
+                    $labelStatus.Text      = "Stopped by user"
+                    $labelStatus.ForeColor = [System.Drawing.Color]::FromArgb(255,120,60)
+                    return
+                }
+                $currentCheck++
+                $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int](10 + ($currentCheck * $progressIncrement))))
+            }
+
             # Overall Summary
             Write-Host ""
             Write-Host "======================================================" -ForegroundColor Cyan
@@ -7628,6 +8187,18 @@ if ($GUI) {
                 Write-Host "    Errors       : $($securityResults.Status.Errors.Count)" -ForegroundColor $(if ($securityResults.Status.Errors.Count -eq 0) { "Green" } else { "Red" })
             }
             
+            if ($runAD -and $adResults -and $adResults.CheckPerformed) {
+                $adSt = $adResults.Status
+                Write-Host ""
+                Write-Host "  Active Directory:" -ForegroundColor White
+                $adOk = $adSt.Errors.Count -eq 0 -and $adSt.DCCount -gt 0
+                Write-Host "    Domain       : $($adSt.DomainName)" -ForegroundColor $(if($adOk){'Green'}else{'Yellow'})
+                Write-Host "    DCs          : $($adSt.DCCount)" -ForegroundColor $(if($adSt.DCCount -ge 2){'Green'}else{'Yellow'})
+                Write-Host "    Users        : $($adSt.TotalUsers) total  $($adSt.EnabledUsers) enabled" -ForegroundColor White
+                Write-Host "    grp_Privilge : $(if ($adSt.GrpPriviledgeFound) { 'Found ([OK]) - ' + $adSt.GrpPriviledgeMembers.Count + ' members' } else { 'NOT FOUND ([X])' })" -ForegroundColor $(if($adSt.GrpPriviledgeFound){'Green'}else{'Red'})
+                Write-Host "    Stale PCs    : $($adSt.StaleComputers)" -ForegroundColor $(if($adSt.StaleComputers -le 10){'Green'}else{'Yellow'})
+                Write-Host "    Errors       : $($adSt.Errors.Count)" -ForegroundColor $(if($adSt.Errors.Count -eq 0){'Green'}else{'Red'})
+            }
             Write-Host "======================================================" -ForegroundColor Cyan
             
             # Show error summary if there are issues
@@ -7664,7 +8235,7 @@ if ($GUI) {
                         -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
                         -DefenderResults $defenderResults -SoftwareResults $softwareResults `
                         -SharePointResults $sharePointResults -TeamsResults $teamsResults `
-                        -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -OverallStatus $overallStatus
+                        -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -ADResults $adResults -OverallStatus $overallStatus
                     
                     Write-Host "HTML Report exported to: $htmlPath" -ForegroundColor Green
                 }
@@ -7678,7 +8249,7 @@ if ($GUI) {
                             -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
                             -DefenderResults $defenderResults -SoftwareResults $softwareResults `
                             -SharePointResults $sharePointResults -TeamsResults $teamsResults `
-                            -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -OverallStatus $overallStatus
+                            -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -ADResults $adResults -OverallStatus $overallStatus
                     }
                     
                     $pdfPath = Export-PDFReport -HTMLPath $htmlPath
@@ -7872,8 +8443,24 @@ if (-not $SkipUserLicenseCheck) {
 
 # Security Configuration Check
 $securityResults = $null
+$adResults       = $null
 if (-not $SkipSecurity) {
     $securityResults = Test-EntraSecurityConfig -CompactView $CompactView
+}
+
+# Active Directory Check (DomainAdmin)
+$adResults = $null
+if (-not $SkipActiveDirectory) {
+    if (-not $script:ADConnected) {
+        # Attempt DomainAdmin login if not already done
+        $adLoginOk = Connect-BWsDomainAdmin
+        if (-not $adLoginOk) {
+            Write-Host "  [!] Active Directory check skipped (no DomainAdmin login)" -ForegroundColor Yellow
+        }
+    }
+    if ($script:ADConnected) {
+        $adResults = Test-ActiveDirectory -CompactView $CompactView
+    }
 }
 
 # Overall Summary
@@ -8039,6 +8626,19 @@ if ($overallStatus) {
 Write-Host "======================================================" -ForegroundColor Cyan
 
 # Show error summary if there are issues
+if ($adResults -and $adResults.CheckPerformed) {
+    $adSt = $adResults.Status
+    Write-Host "  Active Directory :" -NoNewline -ForegroundColor White
+    $adOk = $adSt.Errors.Count -eq 0 -and $adSt.DCCount -gt 0
+    Write-Host " $(if ($adOk) {'[OK] '}else{'[!] '})Domain=$($adSt.DomainName)  DCs=$($adSt.DCCount)  Users=$($adSt.TotalUsers)" `
+        -ForegroundColor $(if($adOk){'Green'}else{'Yellow'})
+    if ($adSt.GrpPriviledgeFound) {
+        Write-Host "  grp_UsersWithPriviledge: [OK] Found  ($($adSt.GrpPriviledgeMembers.Count) members)" -ForegroundColor Green
+    } else {
+        Write-Host "  grp_UsersWithPriviledge: [X]  NOT FOUND in AD" -ForegroundColor Red
+    }
+}
+
 Show-BWsErrorSummary
 
 # Generate support bundle if requested
@@ -8065,7 +8665,7 @@ if ($ExportReport) {
             -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
             -DefenderResults $defenderResults -SoftwareResults $softwareResults `
             -SharePointResults $sharePointResults -TeamsResults $teamsResults `
-            -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -OverallStatus $overallStatus
+            -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -ADResults $adResults -OverallStatus $overallStatus
         
         Write-Host "HTML Report exported to: $htmlPath" -ForegroundColor Green
     }
@@ -8079,7 +8679,7 @@ if ($ExportReport) {
                 -EntraIDResults $entraIDResults -IntuneConnResults $intuneConnResults `
                 -DefenderResults $defenderResults -SoftwareResults $softwareResults `
                 -SharePointResults $sharePointResults -TeamsResults $teamsResults `
-                -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -OverallStatus $overallStatus
+                -UserLicenseResults $userLicenseResults -SecurityResults $securityResults -ADResults $adResults -OverallStatus $overallStatus
         }
         
         $pdfPath = Export-PDFReport -HTMLPath $htmlPath
